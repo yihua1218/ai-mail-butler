@@ -20,6 +20,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub ai_client: AiClient,
     pub admin_email: Option<String>,
+    pub config: std::sync::Arc<crate::config::Config>,
 }
 
 #[derive(Deserialize)]
@@ -33,7 +34,7 @@ async fn get_me(
 ) -> Json<Option<User>> {
     if let Some(email) = query.email {
         if email.is_empty() { return Json(None); }
-        let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences FROM users WHERE email = ?")
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(&state.pool).await.unwrap_or(None);
             
@@ -49,7 +50,7 @@ async fn get_me(
             .bind(&new_id)
             .bind(&email)
             .execute(&state.pool).await.unwrap();
-        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None, magic_token: None, role }));
+        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None, magic_token: None, role, auto_reply: false, dry_run: true }));
     }
     Json(None)
 }
@@ -137,39 +138,50 @@ async fn post_chat(
     let message = payload.message;
     let pool = &state.pool;
 
-    let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences FROM users WHERE email = ?")
-        .bind(&email)
-        .fetch_optional(pool).await.unwrap_or(None);
+    if !email.is_empty() {
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+            .bind(&email)
+            .fetch_optional(pool).await.unwrap_or(None);
 
-    if let Some(mut user) = user {
-        // AI Integration
-        let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("Failed to extract preferences: {}", e);
-                user.preferences.clone().unwrap_or_default()
-            }
-        };
+        if let Some(mut user) = user {
+            // AI Integration
+            let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("Failed to extract preferences: {}", e);
+                    user.preferences.clone().unwrap_or_default()
+                }
+            };
 
-        sqlx::query("UPDATE users SET preferences = ?, is_onboarded = true WHERE id = ?")
-            .bind(&new_pref)
-            .bind(&user.id)
-            .execute(pool).await.unwrap();
+            sqlx::query("UPDATE users SET preferences = ?, is_onboarded = true WHERE id = ?")
+                .bind(&new_pref)
+                .bind(&user.id)
+                .execute(pool).await.unwrap();
 
-        user.preferences = Some(new_pref);
-        
-        let reply = match OnboardingService::generate_reply(&state.ai_client, &user, &message).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to generate reply: {}", e);
-                "Sorry, I am having trouble connecting to my AI brain right now.".to_string()
-            }
-        };
+            user.preferences = Some(new_pref);
+            
+            let reply = match OnboardingService::generate_reply(&state.ai_client, &user, &message).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Failed to generate reply: {}", e);
+                    "Sorry, I am having trouble connecting to my AI brain right now.".to_string()
+                }
+            };
 
-        return Json(serde_json::json!({ "reply": reply }));
+            return Json(serde_json::json!({ "reply": reply }));
+        }
     }
 
-    Json(serde_json::json!({ "reply": "Please login first." }))
+    // Anonymous Chat
+    let reply = match OnboardingService::generate_anonymous_reply(&state.ai_client, &message).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to generate anonymous reply: {}", e);
+            "Sorry, I am having trouble connecting to my AI brain right now.".to_string()
+        }
+    };
+
+    Json(serde_json::json!({ "reply": reply }))
 }
 
 #[derive(Serialize)]
@@ -198,6 +210,10 @@ struct MagicLinkRequest {
     email: String,
 }
 
+use lettre::{Message, SmtpTransport, Transport};
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::message::{header, MultiPart, SinglePart};
+
 async fn post_magic_link(
     State(state): State<AppState>,
     Json(payload): Json<MagicLinkRequest>,
@@ -206,7 +222,7 @@ async fn post_magic_link(
     let email = payload.email;
     
     // Upsert user and set token
-    let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences, magic_token FROM users WHERE email = ?")
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
         .bind(&email)
         .fetch_optional(&state.pool).await.unwrap_or(None);
         
@@ -226,14 +242,64 @@ async fn post_magic_link(
     
     let login_url = format!("http://localhost:3000/login?token={}", token);
     
-    // MOCK SEND EMAIL:
-    tracing::info!("--- MOCK EMAIL ---");
-    tracing::info!("To: {}", email);
-    tracing::info!("Subject: Your AI Mail Butler Login Link");
-    tracing::info!("Body: Click here to login: {}", login_url);
-    tracing::info!("------------------");
-    
-    Json(serde_json::json!({ "status": "success", "message": "Magic link sent to console mock" }))
+    // Construct real email using Lettre
+    let plain_text = format!("Welcome to AI Mail Butler! / 歡迎使用 AI Mail Butler！\n\nClick the link below to securely login without a password. / 請點擊下方連結安全無密碼登入：\n{}", login_url);
+    let html_text = format!(
+        "<h3>Welcome to AI Mail Butler! / 歡迎使用 AI Mail Butler！</h3>
+        <p>Click the button below to securely login without a password. / 請點擊下方按鈕安全無密碼登入：</p>
+        <a href=\"{}\" style=\"display: inline-block; padding: 10px 20px; background-color: #0071e3; color: white; text-decoration: none; border-radius: 5px;\">Login / 登入</a>
+        <br><br>
+        <p>If the button doesn't work, copy and paste this link / 如果按鈕無效，請複製貼上此連結：<br>{}</p>",
+        login_url, login_url
+    );
+
+    let email_msg = Message::builder()
+        .from(state.config.assistant_email.parse().unwrap())
+        .to(email.parse().unwrap())
+        .subject("Your AI Mail Butler Login Link / 您的登入連結")
+        .multipart(
+            MultiPart::alternative()
+                .singlepart(
+                    SinglePart::builder()
+                        .header(header::ContentType::TEXT_PLAIN)
+                        .body(plain_text),
+                )
+                .singlepart(
+                    SinglePart::builder()
+                        .header(header::ContentType::TEXT_HTML)
+                        .body(html_text),
+                ),
+        )
+        .unwrap();
+
+    let mailer = if let Some(host) = &state.config.smtp_relay_host {
+        let mut builder = SmtpTransport::relay(&host).unwrap().port(state.config.smtp_relay_port);
+        if let (Some(user), Some(pass)) = (&state.config.smtp_relay_user, &state.config.smtp_relay_pass) {
+            let creds = Credentials::new(user.to_string(), pass.to_string());
+            builder = builder.credentials(creds);
+        }
+        Some(builder.build())
+    } else {
+        // Fallback to mock if no SMTP is configured
+        None
+    };
+
+    if let Some(mailer) = mailer {
+        match mailer.send(&email_msg) {
+            Ok(_) => {
+                tracing::info!("Magic link sent successfully to {}", email);
+                return Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }));
+            },
+            Err(e) => {
+                tracing::error!("Could not send email: {:?}", e);
+                return Json(serde_json::json!({ "status": "error", "message": "Failed to send email" }));
+            }
+        }
+    } else {
+        tracing::warn!("No SMTP configured. Mocking email delivery to console:");
+        tracing::info!("To: {}\nLink: {}", email, login_url);
+        return Json(serde_json::json!({ "status": "success", "message": "Magic link sent to console mock" }));
+    }
 }
 
 #[derive(Deserialize)]
@@ -245,7 +311,7 @@ async fn post_verify(
     State(state): State<AppState>,
     Json(payload): Json<VerifyRequest>,
 ) -> Json<Option<User>> {
-    let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences, magic_token FROM users WHERE magic_token = ?")
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE magic_token = ?")
         .bind(&payload.token)
         .fetch_optional(&state.pool).await.unwrap_or(None);
         
@@ -263,6 +329,32 @@ async fn post_verify(
     }
 }
 
+#[derive(Deserialize)]
+struct SettingsRequest {
+    email: String,
+    auto_reply: bool,
+    dry_run: bool,
+}
+
+async fn post_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<SettingsRequest>,
+) -> Json<serde_json::Value> {
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ? WHERE email = ?")
+        .bind(payload.auto_reply)
+        .bind(payload.dry_run)
+        .bind(&payload.email)
+        .execute(&state.pool).await;
+        
+    match result {
+        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Err(e) => {
+            tracing::error!("Failed to update settings: {}", e);
+            Json(serde_json::json!({ "status": "error" }))
+        }
+    }
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -270,6 +362,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/auth/magic-link", post(post_magic_link))
         .route("/auth/verify", post(post_verify))
         .route("/me", get(get_me))
+        .route("/settings", post(post_settings))
         .route("/dashboard", get(get_dashboard))
         .route("/chat", post(post_chat));
 

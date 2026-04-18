@@ -28,12 +28,15 @@ async fn main() -> Result<()> {
     // 2. Initialize AI Client
     let ai_client = ai::AiClient::new(&config);
 
+    let config_arc = std::sync::Arc::new(config);
+
     // 3. Start SMTP Server
     tokio::spawn({
         let pool = pool.clone();
         let ai_client = ai_client.clone();
+        let config_clone = config_arc.clone();
         async move {
-            if let Err(e) = mail::MailService::start(pool, ai_client).await {
+            if let Err(e) = mail::MailService::start(pool, ai_client, config_clone).await {
                 tracing::error!("Mail server failed: {}", e);
             }
         }
@@ -41,8 +44,8 @@ async fn main() -> Result<()> {
 
     // 4. Start Web Server
     let admin_email = std::env::var("ADMIN_EMAIL").ok();
-    let state = web::AppState { pool, ai_client, admin_email };
-    web::start_server(config.server_port, state).await?;
+    let state = web::AppState { pool, ai_client, admin_email, config: config_arc.clone() };
+    web::start_server(state.config.server_port, state).await?;
 
     Ok(())
 }

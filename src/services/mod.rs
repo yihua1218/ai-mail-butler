@@ -24,4 +24,18 @@ impl OnboardingService {
         let reply = client.chat(&prompt_with_context, current_message).await?;
         Ok(reply)
     }
+
+    pub async fn generate_anonymous_reply(client: &AiClient, current_message: &str) -> Result<String> {
+        let system_prompt = "You are AI Mail Butler, an intelligent, self-hosted email processing assistant.
+Your capabilities include:
+- Auto-replying to forwarded emails based on user instructions.
+- A 'Dry Run' mode to let users review drafted responses before sending them to external recipients.
+- A Dashboard to view stats and processed emails.
+- Role-Based Access Control (Admin vs Regular User).
+- Passwordless login using Magic Links.
+You are currently talking to an anonymous visitor. Explain these features if asked, and encourage them to enter their email in the navigation bar to login via Magic Link to use the dashboard and configure you.";
+        
+        let reply = client.chat(system_prompt, current_message).await?;
+        Ok(reply)
+    }
 }

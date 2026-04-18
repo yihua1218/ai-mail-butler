@@ -10,7 +10,13 @@ pub struct User {
     pub magic_token: Option<String>,
     #[serde(default)]
     pub role: String,
+    #[serde(default)]
+    pub auto_reply: bool,
+    #[serde(default = "default_true")]
+    pub dry_run: bool,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Serialize, FromRow)]
 pub struct EmailRecord {

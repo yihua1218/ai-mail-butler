@@ -7,6 +7,8 @@ export interface User {
   is_onboarded: boolean;
   preferences: string | null;
   role: 'admin' | 'user';
+  auto_reply: boolean;
+  dry_run: boolean;
 }
 
 interface AuthContextType {

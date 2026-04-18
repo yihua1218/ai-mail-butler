@@ -20,6 +20,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
 
     // Safely add magic_token column if it doesn't exist
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN magic_token TEXT").execute(&pool).await;
+    // Safely add auto_reply and dry_run columns
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN auto_reply BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 1").execute(&pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS emails (

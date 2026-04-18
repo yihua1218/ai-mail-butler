@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { ConfigProvider, Layout, Menu, Typography, Button, Dropdown, Row, Col, Card, Statistic, Table, Input } from 'antd';
-import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined } from '@ant-design/icons';
+import { ConfigProvider, Layout, Menu, Typography, Button, Dropdown, Row, Col, Card, Statistic, Table, Input, Switch, Form, message } from 'antd';
+import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './AuthContext';
 import { Chat } from './Chat';
@@ -145,6 +145,58 @@ const Dashboard: React.FC = () => {
   );
 };
 
+const Settings: React.FC = () => {
+  const { user } = useAuth();
+  const [loading, setLoading] = useState(false);
+  const [form] = Form.useForm();
+
+  useEffect(() => {
+    if (user) {
+      // The user object now includes auto_reply and dry_run
+      form.setFieldsValue({
+        auto_reply: user.auto_reply,
+        dry_run: user.dry_run,
+      });
+    }
+  }, [user, form]);
+
+  const onFinish = async (values: any) => {
+    setLoading(true);
+    try {
+      await axios.post('/api/settings', {
+        email: user?.email,
+        ...values
+      });
+      message.success('Settings saved successfully!');
+      // Force reload auth to get updated user state if needed, or simply let it be
+    } catch (error) {
+      message.error('Failed to save settings.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!user) return <Card><p>Please login to view settings.</p></Card>;
+
+  return (
+    <Card title="System Settings" bordered={false} style={{ maxWidth: 600, margin: '0 auto' }}>
+      <Form form={form} layout="vertical" onFinish={onFinish}>
+        <Form.Item name="dry_run" label="Dry Run Mode (試運行模式)" valuePropName="checked" tooltip="When enabled, AI replies are drafted and sent to your own email for review. When disabled, they are sent directly to the original sender.">
+          <Switch />
+        </Form.Item>
+        <Form.Item name="auto_reply" label="Auto Reply (自動回覆)" valuePropName="checked" tooltip="Automatically send the AI-generated reply. If Dry Run is off, this will send it to the external sender.">
+          <Switch />
+        </Form.Item>
+        <Form.Item>
+          <Button type="primary" htmlType="submit" loading={loading} icon={<SettingOutlined />}>
+            Save Settings
+          </Button>
+        </Form.Item>
+      </Form>
+    </Card>
+  );
+};
+
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user, requestMagicLink, verifyToken, logout, loading } = useAuth();
@@ -215,7 +267,10 @@ const App: React.FC = () => {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
             {user ? (
-              <Button type="text" onClick={logout} icon={<LogoutOutlined />}>Logout</Button>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <span style={{ color: '#1d1d1f', fontWeight: 500 }}>{user.email}</span>
+                <Button size="small" onClick={logout} icon={<LogoutOutlined />}>Logout</Button>
+              </div>
             ) : (
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {isLinkSent ? (
@@ -236,7 +291,7 @@ const App: React.FC = () => {
         <Content style={{ padding: '40px 50px', maxWidth: '1200px', margin: '0 auto', width: '100%' }}>
           {activeMenu === '1' && <Dashboard />}
           {activeMenu === '2' && <Chat />}
-          {activeMenu === '3' && <Card><p>Settings coming soon...</p></Card>}
+          {activeMenu === '3' && <Settings />}
           {activeMenu === '4' && <About />}
         </Content>
         <Footer style={{ textAlign: 'center', color: '#86868b' }}>

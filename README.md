@@ -13,12 +13,13 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 
 - **Email forwarding detection & parsing**: Identifies the original user who forwarded the email.
 - **AI processing module**: English to Traditional Chinese translation, rule-based auto-reply.
-- **AI Chat Interface**: Converse directly with your email assistant via the Web UI.
+- **AI Chat Interface**: Converse directly with your email assistant via the Web UI. Anonymous visitors can also chat with the AI to learn about the system.
 - **User configuration & onboarding**: Automated onboarding flow via email.
 - **Role-Based Access Control (RBAC)**: Supports Admin, User, and Anonymous roles with strict data isolation.
-- **Passwordless Authentication**: Magic link login.
+- **Passwordless Authentication**: Magic link login via email (supports Plain Text & HTML Rich Text, bilingual).
+- **User Settings**: Toggle Auto-reply and Dry Run mode (AI replies sent to yourself for review before going to external senders).
 - **Web Dashboard**: View history of received emails and actions taken, featuring an Apple-style aesthetic inspired by Ant Design.
-- **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment.
+- **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment. Falls back to console mock if no SMTP relay is configured.
 
 ## Development and Testing
 

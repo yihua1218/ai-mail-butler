@@ -11,40 +11,40 @@ use crate::ai::AiClient;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::config::Config;
+use lettre::{Message, SmtpTransport, Transport};
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::message::{header, SinglePart};
+
 pub struct MailService;
 
 impl MailService {
-    pub async fn start(pool: SqlitePool, ai_client: AiClient) -> Result<()> {
+    pub async fn start(pool: SqlitePool, ai_client: AiClient, config: Arc<Config>) -> Result<()> {
         let spool_dir = "data/mail_spool";
         fs::create_dir_all(spool_dir).await?;
 
         info!("Starting lightweight SMTP server on port 2525...");
         
-        // Use samotop_delivery's Dir if it is under delivery or use samotop::mail::Dir if exported there.
-        // I will use samotop_delivery::delivery::Dir since rustc suggested it.
         let dir = samotop_delivery::delivery::Dir::new(spool_dir.to_string().into()).unwrap();
         let mail = Arc::new(Builder::default().using(dir));
         let svc = samotop::io::smtp::SmtpService::new(mail);
         
-        // Use 2525 for dev to avoid sudo requirements, forward via firewall in prod
         let srv = TcpServer::on("0.0.0.0:2525").serve(svc);
         
-        // Run samotop in the background
         tokio::spawn(async move {
             if let Err(e) = srv.await {
                 error!("SMTP server error: {:?}", e);
             }
         });
 
-        // Start mail processor loop
         tokio::spawn(async move {
-            Self::process_spool(pool, ai_client, spool_dir).await;
+            Self::process_spool(pool, ai_client, config, spool_dir).await;
         });
 
         Ok(())
     }
 
-    async fn process_spool(pool: SqlitePool, ai_client: AiClient, spool_dir: &str) {
+    async fn process_spool(pool: SqlitePool, ai_client: AiClient, config: Arc<Config>, spool_dir: &str) {
         info!("Started mail spool processor watching {}", spool_dir);
         loop {
             if let Ok(mut entries) = fs::read_dir(spool_dir).await {
@@ -72,11 +72,9 @@ impl MailService {
                                 
                                 info!("Parsed email from {} to {}: {}", from_addr, to_addr, subject);
                                 
-                                // Simplified mapping: extract the raw email (very naive)
                                 let to_clean = to_addr.replace("<", "").replace(">", "");
                                 
-                                // Find user by email
-                                let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences, magic_token FROM users WHERE email = ?")
+                                let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
                                     .bind(&to_clean)
                                     .fetch_optional(&pool).await.unwrap_or(None);
 
@@ -88,20 +86,64 @@ impl MailService {
                                         .bind(&id).bind(&u.id).bind(&subject).bind(&preview)
                                         .execute(&pool).await.unwrap_or_default();
 
-                                    // Trigger AI Auto-reply if they are onboarded
                                     if u.is_onboarded {
                                         info!("Triggering AI for email {}", id);
                                         match crate::services::OnboardingService::generate_reply(&ai_client, &u, &body).await {
                                             Ok(ai_reply) => {
-                                                info!("--- AI AUTO REPLY MOCK ---");
-                                                info!("To: {}", from_addr);
-                                                info!("Subject: Re: {}", subject);
-                                                info!("Body:\n{}", ai_reply);
-                                                info!("--------------------------");
+                                                // Handle dry run and auto reply logic
+                                                let target_email = if u.dry_run {
+                                                    u.email.clone() // Send back to the user
+                                                } else {
+                                                    from_addr.clone() // Send to original sender
+                                                };
+
+                                                let email_subject = format!("Re: {}", subject);
                                                 
-                                                sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
-                                                    .bind(&id)
-                                                    .execute(&pool).await.unwrap_or_default();
+                                                if u.dry_run || u.auto_reply {
+                                                    info!("Sending AI reply to {} (dry_run: {}, auto_reply: {})", target_email, u.dry_run, u.auto_reply);
+                                                    
+                                                    let email_msg = Message::builder()
+                                                        .from(config.assistant_email.parse().unwrap())
+                                                        .to(target_email.replace("<", "").replace(">", "").parse().unwrap_or_else(|_| u.email.parse().unwrap()))
+                                                        .subject(&email_subject)
+                                                        .singlepart(
+                                                            SinglePart::builder()
+                                                                .header(header::ContentType::TEXT_PLAIN)
+                                                                .body(ai_reply),
+                                                        )
+                                                        .unwrap();
+
+                                                    let mailer = if let Some(host) = &config.smtp_relay_host {
+                                                        let mut builder = SmtpTransport::relay(&host).unwrap().port(config.smtp_relay_port);
+                                                        if let (Some(user), Some(pass)) = (&config.smtp_relay_user, &config.smtp_relay_pass) {
+                                                            let creds = Credentials::new(user.to_string(), pass.to_string());
+                                                            builder = builder.credentials(creds);
+                                                        }
+                                                        Some(builder.build())
+                                                    } else { None };
+
+                                                    if let Some(mailer) = mailer {
+                                                        match mailer.send(&email_msg) {
+                                                            Ok(_) => {
+                                                                sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
+                                                                    .bind(&id).execute(&pool).await.unwrap_or_default();
+                                                            },
+                                                            Err(e) => error!("Could not send email: {:?}", e)
+                                                        }
+                                                    } else {
+                                                        info!("--- MOCK SMTP DELIVERY ---");
+                                                        info!("To: {}", target_email);
+                                                        info!("Subject: {}", email_subject);
+                                                        info!("Body:\n{}", String::from_utf8_lossy(&email_msg.formatted()));
+                                                        info!("--------------------------");
+                                                        sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
+                                                            .bind(&id).execute(&pool).await.unwrap_or_default();
+                                                    }
+                                                } else {
+                                                    info!("Skipping reply for {} (dry_run: false, auto_reply: false)", id);
+                                                    sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+                                                        .bind(&id).execute(&pool).await.unwrap_or_default();
+                                                }
                                             },
                                             Err(e) => error!("AI reply failed: {}", e)
                                         }
