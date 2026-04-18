@@ -7,7 +7,8 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 - **Backend**: Rust (`tokio`, `axum`)
 - **Database**: SQLite (via `sqlx`)
 - **AI Integration**: Custom LLM endpoints via HTTP (`reqwest`)
-- **Mail Handling**: SMTP receiving and sending (e.g. `lettre`, `mailparse`)
+- **Mail Handling**: SMTP receiving (Samotop) and sending (mail-send) with MIME/HTML support
+- **Reliability**: Automated startup diagnostics and database self-healing mechanisms
 
 ## Features
 
@@ -19,7 +20,8 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 - **Passwordless Authentication**: Magic link login via email (supports Plain Text & HTML Rich Text, bilingual).
 - **User Settings**: Toggle Auto-reply and Dry Run mode (AI replies sent to yourself for review before going to external senders).
 - **Web Dashboard**: View history of received emails and actions taken, featuring an Apple-style aesthetic inspired by Ant Design.
-- **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment. Falls back to console mock if no SMTP relay is configured.
+- **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment.
+- **Diagnostics**: Self-healing database schema verification on startup.
 
 ## Development and Testing
 

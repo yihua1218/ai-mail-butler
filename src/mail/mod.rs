@@ -88,8 +88,18 @@ impl MailService {
 
                                     if u.is_onboarded {
                                         info!("Triggering AI for email {}", id);
-                                        match crate::services::OnboardingService::generate_reply(&ai_client, &u, &body).await {
+                                        let memory = crate::services::OnboardingService::get_memory(&pool, &u.id).await;
+                                        match crate::services::OnboardingService::generate_reply(&ai_client, &u, &body, &memory).await {
                                             Ok(ai_reply) => {
+                                                // Update memory asynchronously
+                                                let ai_client_clone = ai_client.clone();
+                                                let pool_clone = pool.clone();
+                                                let user_id = u.id.clone();
+                                                let msg_clone = body.clone();
+                                                let reply_clone = ai_reply.clone();
+                                                tokio::spawn(async move {
+                                                    let _ = crate::services::OnboardingService::update_memory(&ai_client_clone, &pool_clone, &user_id, &msg_clone, &reply_clone).await;
+                                                });
                                                 // Handle dry run and auto reply logic
                                                 let target_email = if u.dry_run {
                                                     u.email.clone() // Send back to the user

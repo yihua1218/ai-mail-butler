@@ -14,6 +14,10 @@ const en = {
     stats_emails_replied: "Emails Replied",
     stats_emails_sent: "Emails Sent",
     stats_ai_replies: "AI Chat Replies",
+    email_format: "Email Format",
+    format_both: "Both (HTML + Plain)",
+    format_html: "HTML Only",
+    format_plain: "Plain Text Only",
   }
 };
 
@@ -30,6 +34,10 @@ const zhTW = {
     stats_emails_replied: "自動回覆數",
     stats_emails_sent: "主動寄出數",
     stats_ai_replies: "AI 助理回覆次數",
+    email_format: "郵件格式",
+    format_both: "雙格式 (HTML + 純文字)",
+    format_html: "僅 HTML",
+    format_plain: "僅純文字",
   }
 };
 

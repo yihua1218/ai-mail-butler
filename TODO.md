@@ -10,8 +10,11 @@
 - [x] Implement AI Chat functionality (WebSocket or REST).
 - [x] Implement email parser to extract forwarded content and sender identity.
 - [x] Develop AI integration for email translation and auto-reply.
-- [x] Create email magic-link authentication flow.
-
-## Low Priority
+- [x] Create email magic-link authentication flow with HTML/Plain support.
+- [x] Add automated startup diagnostics and self-healing DB migrations.
+- [x] Implement user-configurable email format (HTML/Plain/Both).
+- [x] Implement guest settings (anonymous nickname) in browser storage.
 - [ ] Add unit tests and integration tests.
 - [x] Refine Docker build process to include frontend assets.
+
+## Low Priority

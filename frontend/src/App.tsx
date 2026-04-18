@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ConfigProvider, Layout, Menu, Typography, Button, Dropdown, Row, Col, Card, Statistic, Table, Input, Switch, Form, message } from 'antd';
+import { 
+  Layout, Menu, Typography, Card, Table, Row, Col, Statistic, Button, 
+  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio
+} from 'antd';
 import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -172,6 +175,7 @@ const Settings: React.FC = () => {
         display_name: user.display_name,
         auto_reply: user.auto_reply,
         dry_run: user.dry_run,
+        email_format: user.email_format,
       });
     } else {
       // Guest settings from localStorage
@@ -223,6 +227,13 @@ const Settings: React.FC = () => {
             </Form.Item>
             <Form.Item name="auto_reply" label="Auto Reply (自動回覆)" valuePropName="checked" tooltip="Automatically send the AI-generated reply. If Dry Run is off, this will send it to the external sender.">
               <Switch />
+            </Form.Item>
+            <Form.Item name="email_format" label={t('email_format')} tooltip="Choose how magic links and notifications are sent to you.">
+              <Radio.Group>
+                <Radio value="both">{t('format_both')}</Radio>
+                <Radio value="html">{t('format_html')}</Radio>
+                <Radio value="plain">{t('format_plain')}</Radio>
+              </Radio.Group>
             </Form.Item>
           </>
         )}

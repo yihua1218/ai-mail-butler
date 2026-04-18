@@ -149,6 +149,7 @@ async fn post_chat(
             .fetch_optional(pool).await.unwrap_or(None);
 
         if let Some(mut user) = user {
+            // Update preferences (existing logic)
             let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -162,10 +163,28 @@ async fn post_chat(
                 .execute(pool).await.ok();
             user.preferences = Some(new_pref);
 
-            match OnboardingService::generate_reply(&state.ai_client, &user, &message).await {
+            // Fetch Memory
+            let memory = OnboardingService::get_memory(pool, &user.id).await;
+
+            let ai_reply = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory).await {
                 Ok(r) => r,
                 Err(e) => { tracing::error!("Failed to generate reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
-            }
+            };
+
+            // Periodically update memory (we do it every time for now as requested "定期整理", but could be optimized)
+            let ai_client_clone = state.ai_client.clone();
+            let pool_clone = state.pool.clone();
+            let user_id = user.id.clone();
+            let msg_clone = message.clone();
+            let reply_clone = ai_reply.clone();
+            
+            tokio::spawn(async move {
+                if let Err(e) = OnboardingService::update_memory(&ai_client_clone, &pool_clone, &user_id, &msg_clone, &reply_clone).await {
+                    tracing::error!("Failed to update user memory: {}", e);
+                }
+            });
+
+            ai_reply
         } else {
             match OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name).await {
                 Ok(r) => r,
@@ -493,6 +512,7 @@ struct SettingsRequest {
     email: String,
     auto_reply: bool,
     dry_run: bool,
+    email_format: String,
     display_name: Option<String>,
 }
 
@@ -500,10 +520,11 @@ async fn post_settings(
     State(state): State<AppState>,
     Json(payload): Json<SettingsRequest>,
 ) -> Json<serde_json::Value> {
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, display_name = ? WHERE email = ?")
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, display_name = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
-        .bind(payload.display_name)
+        .bind(&payload.email_format)
+        .bind(&payload.display_name)
         .bind(&payload.email)
         .execute(&state.pool).await;
         

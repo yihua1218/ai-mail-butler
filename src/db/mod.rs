@@ -51,6 +51,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // User long-term memory for AI personalization
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user_memories (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 
