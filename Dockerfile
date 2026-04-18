@@ -1,20 +1,4 @@
-# Stage 1: Build (Builder)
-FROM rust:slim-bookworm AS builder
-
-# Install build dependencies (reqwest requires OpenSSL by default)
-RUN apt-get update && \
-    apt-get install -y pkg-config libssl-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Copy source code into the container
-COPY . .
-
-# Compile optimized release version
-RUN cargo build --release
-
-# Stage 2: Lightweight runtime environment (Runner)
+# Lightweight runtime environment
 FROM debian:bookworm-slim
 
 # Install necessary HTTPS certificates and OpenSSL for runtime
@@ -24,10 +8,17 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Copy the compiled standalone executable from the builder stage
-COPY --from=builder /app/target/release/ai-mail-butler /usr/local/bin/ai-mail-butler
+# TARGETARCH is automatically populated by Docker Buildx (e.g. amd64, arm64)
+ARG TARGETARCH
 
-# Expose the defined port (Corresponds to your WEB_PORT/SMTP_PORT)
+# Copy the pre-compiled frontend assets
+COPY frontend/dist ./frontend/dist
+
+# Copy the pre-compiled Rust executable based on architecture
+COPY bin/${TARGETARCH}/ai-mail-butler /usr/local/bin/ai-mail-butler
+RUN chmod +x /usr/local/bin/ai-mail-butler
+
+# Expose the defined ports
 EXPOSE 3000
 EXPOSE 25
 

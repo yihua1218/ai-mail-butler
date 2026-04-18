@@ -45,6 +45,25 @@ To build and run using Docker:
 docker-compose up --build -d
 ```
 
+## Cloudflare DNS Configuration (MX Records)
+
+To receive emails at your custom domain using AI Mail Butler, you need to configure your DNS settings. Here is an example of configuring MX records in Cloudflare for `mail.yihua.app`:
+
+1. Log in to your Cloudflare dashboard and select your domain (`yihua.app`).
+2. Navigate to the **DNS** -> **Records** section.
+3. First, ensure you have an `A` record pointing to your server's IP address:
+   - **Type**: `A`
+   - **Name**: `mail` (or your preferred subdomain)
+   - **IPv4 address**: `YOUR_SERVER_IP`
+   - **Proxy status**: DNS only (Turn OFF the orange cloud, as Cloudflare proxy only supports HTTP/HTTPS, not SMTP).
+4. Add the `MX` record to direct emails to your server:
+   - **Type**: `MX`
+   - **Name**: `mail` (This means you will receive emails at `*@mail.yihua.app`)
+   - **Mail server**: `mail.yihua.app`
+   - **Priority**: `10`
+
+Once DNS propagates, any email sent to `anything@mail.yihua.app` will be routed to your AI Mail Butler instance.
+
 ## License
 
 This software is released under The Unlicense or CC0 1.0 Universal. See the `LICENSE` file for details.

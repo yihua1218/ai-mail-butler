@@ -1,10 +1,10 @@
 # 待辦事項 (TODO)
 
 ## 高優先級
-- [ ] 在 `src/mail/mod.rs` 中實作輕量級 Rust 內建 SMTP 伺服器（使用 `samotop`）。
-- [ ] 在 `src/db/mod.rs` 中設定資料庫連線與 `sqlx` 遷移 (Migrations)。
-- [ ] 在 `src/web/mod.rs` 中建置 Axum Web 伺服器與 API 路由。
-- [ ] 初始化 React 前端專案，並導入 Ant Design（Apple 風格美學）。
+- [x] 在 `src/mail/mod.rs` 中實作輕量級 Rust 內建 SMTP 伺服器（使用 `samotop`）。
+- [x] 在 `src/db/mod.rs` 中設定資料庫連線與 `sqlx` 遷移 (Migrations)。
+- [x] 在 `src/web/mod.rs` 中建置 Axum Web 伺服器與 API 路由。
+- [x] 初始化 React 前端專案，並導入 Ant Design（Apple 風格美學）。
 
 ## 中優先級
 - [ ] 實作 AI 對話功能 (WebSocket 或 REST)。

@@ -19,9 +19,25 @@ async fn main() -> Result<()> {
     
     info!("Starting AI Mail Butler...");
 
-    // TODO: Initialize database connection
-    // TODO: Start SMTP server / Webhook receiver
-    // TODO: Start Web Server (Axum)
+    let config = config::Config::load();
+
+    // 1. Initialize Database
+    let pool = db::connect(&config.database_url).await?;
+    info!("Database connected successfully.");
+
+    // 2. Initialize AI Client
+    let ai_client = ai::AiClient::new(&config);
+
+    // 3. Start SMTP Server
+    tokio::spawn(async move {
+        if let Err(e) = mail::MailService::start().await {
+            tracing::error!("Mail server failed: {}", e);
+        }
+    });
+
+    // 4. Start Web Server
+    let state = web::AppState { pool, ai_client };
+    web::start_server(config.server_port, state).await?;
 
     Ok(())
 }

@@ -45,6 +45,25 @@ cargo test
 docker-compose up --build -d
 ```
 
+## Cloudflare DNS 設定 (MX 紀錄)
+
+為了讓您的 AI Mail Butler 能夠順利接收自訂網域的電子郵件，您需要設定 DNS 紀錄。以下是以在 Cloudflare 設定 `mail.yihua.app` 為例的教學：
+
+1. 登入 Cloudflare 儀表板，並選擇您的網域（例如：`yihua.app`）。
+2. 進入 **DNS** -> **Records (紀錄)** 頁面。
+3. 首先，請確保您有一個 `A` 紀錄指向您伺服器的 IP 位址：
+   - **類型 (Type)**：`A`
+   - **名稱 (Name)**：`mail` (或是您自訂的子網域)
+   - **IPv4 位址 (IPv4 address)**：`您的伺服器_IP`
+   - **Proxy 狀態 (Proxy status)**：僅限 DNS / DNS only（**請務必關閉橘色雲朵**，因為 Cloudflare 的 Proxy 只支援 HTTP/HTTPS，不支援 SMTP 協定）。
+4. 新增 `MX` 紀錄，將郵件導向您的伺服器：
+   - **類型 (Type)**：`MX`
+   - **名稱 (Name)**：`mail` (這代表您將接收寄給 `*@mail.yihua.app` 的信件)
+   - **郵件伺服器 (Mail server)**：`mail.yihua.app`
+   - **優先權 (Priority)**：`10`
+
+等待 DNS 生效後，任何寄到 `anything@mail.yihua.app` 的信件都會被成功轉發到您的 AI Mail Butler 伺服器了。
+
 ## 授權條款
 
 本軟體使用 The Unlicense 或 CC0 1.0 Universal 發布，詳細內容請參閱 `LICENSE` 檔案。
