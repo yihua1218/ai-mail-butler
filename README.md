@@ -47,9 +47,9 @@ docker-compose up --build -d
 
 ## Cloudflare DNS Configuration (MX Records)
 
-To receive emails at your custom domain using AI Mail Butler, you need to configure your DNS settings. Here is an example of configuring MX records in Cloudflare for `mail.yihua.app`:
+To receive emails at your custom domain using AI Mail Butler, you need to configure your DNS settings. Here is an example of configuring MX records in Cloudflare for `mail.example.com`:
 
-1. Log in to your Cloudflare dashboard and select your domain (`yihua.app`).
+1. Log in to your Cloudflare dashboard and select your domain (`example.com`).
 2. Navigate to the **DNS** -> **Records** section.
 3. First, ensure you have an `A` record pointing to your server's IP address:
    - **Type**: `A`
@@ -58,11 +58,19 @@ To receive emails at your custom domain using AI Mail Butler, you need to config
    - **Proxy status**: DNS only (Turn OFF the orange cloud, as Cloudflare proxy only supports HTTP/HTTPS, not SMTP).
 4. Add the `MX` record to direct emails to your server:
    - **Type**: `MX`
-   - **Name**: `mail` (This means you will receive emails at `*@mail.yihua.app`)
-   - **Mail server**: `mail.yihua.app`
+   - **Name**: `mail` (This means you will receive emails at `*@mail.example.com`)
+   - **Mail server**: `mail.example.com`
    - **Priority**: `10`
 
-Once DNS propagates, any email sent to `anything@mail.yihua.app` will be routed to your AI Mail Butler instance.
+Once DNS propagates, any email sent to `anything@mail.example.com` will be routed to your AI Mail Butler instance.
+
+## Microsoft 365 OAuth 2.0 Configuration
+
+If you plan to use a Microsoft 365 (M365) account to send emails, you must configure OAuth 2.0 and use the Microsoft Graph API, as Basic Authentication (SMTP AUTH) is deprecated.
+
+Please refer to the detailed setup instructions:
+- [English M365 Setup Guide](docs/M365_OAUTH_SETUP.md)
+- [繁體中文 M365 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
 
 ## License
 

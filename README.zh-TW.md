@@ -47,9 +47,9 @@ docker-compose up --build -d
 
 ## Cloudflare DNS 設定 (MX 紀錄)
 
-為了讓您的 AI Mail Butler 能夠順利接收自訂網域的電子郵件，您需要設定 DNS 紀錄。以下是以在 Cloudflare 設定 `mail.yihua.app` 為例的教學：
+為了讓您的 AI Mail Butler 能夠順利接收自訂網域的電子郵件，您需要設定 DNS 紀錄。以下是以在 Cloudflare 設定 `mail.example.com` 為例的教學：
 
-1. 登入 Cloudflare 儀表板，並選擇您的網域（例如：`yihua.app`）。
+1. 登入 Cloudflare 儀表板，並選擇您的網域（例如：`example.com`）。
 2. 進入 **DNS** -> **Records (紀錄)** 頁面。
 3. 首先，請確保您有一個 `A` 紀錄指向您伺服器的 IP 位址：
    - **類型 (Type)**：`A`
@@ -58,11 +58,19 @@ docker-compose up --build -d
    - **Proxy 狀態 (Proxy status)**：僅限 DNS / DNS only（**請務必關閉橘色雲朵**，因為 Cloudflare 的 Proxy 只支援 HTTP/HTTPS，不支援 SMTP 協定）。
 4. 新增 `MX` 紀錄，將郵件導向您的伺服器：
    - **類型 (Type)**：`MX`
-   - **名稱 (Name)**：`mail` (這代表您將接收寄給 `*@mail.yihua.app` 的信件)
-   - **郵件伺服器 (Mail server)**：`mail.yihua.app`
+   - **名稱 (Name)**：`mail` (這代表您將接收寄給 `*@mail.example.com` 的信件)
+   - **郵件伺服器 (Mail server)**：`mail.example.com`
    - **優先權 (Priority)**：`10`
 
-等待 DNS 生效後，任何寄到 `anything@mail.yihua.app` 的信件都會被成功轉發到您的 AI Mail Butler 伺服器了。
+等待 DNS 生效後，任何寄到 `anything@mail.example.com` 的信件都會被成功轉發到您的 AI Mail Butler 伺服器了。
+
+## Microsoft 365 OAuth 2.0 授權設定
+
+如果您計畫使用 Microsoft 365 (M365) 帳戶來讓系統自動寄信，由於微軟已全面淘汰基本驗證（SMTP AUTH），您必須使用 OAuth 2.0 授權機制與 Microsoft Graph API。
+
+詳細設定方式請參考以下文件：
+- [繁體中文 M365 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
+- [English M365 Setup Guide](docs/M365_OAUTH_SETUP.md)
 
 ## 授權條款
 

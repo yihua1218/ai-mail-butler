@@ -42,7 +42,7 @@ async fn get_me(
             .bind(&new_id)
             .bind(&email)
             .execute(&state.pool).await.unwrap();
-        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None }));
+        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None, magic_token: None }));
     }
     Json(None)
 }
@@ -160,10 +160,81 @@ async fn get_about() -> Json<BuildInfo> {
     })
 }
 
+#[derive(Deserialize)]
+struct MagicLinkRequest {
+    email: String,
+}
+
+async fn post_magic_link(
+    State(state): State<AppState>,
+    Json(payload): Json<MagicLinkRequest>,
+) -> Json<serde_json::Value> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let email = payload.email;
+    
+    // Upsert user and set token
+    let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences, magic_token FROM users WHERE email = ?")
+        .bind(&email)
+        .fetch_optional(&state.pool).await.unwrap_or(None);
+        
+    if let Some(u) = user {
+        sqlx::query("UPDATE users SET magic_token = ? WHERE id = ?")
+            .bind(&token)
+            .bind(&u.id)
+            .execute(&state.pool).await.unwrap();
+    } else {
+        let new_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users (id, email, magic_token) VALUES (?, ?, ?)")
+            .bind(&new_id)
+            .bind(&email)
+            .bind(&token)
+            .execute(&state.pool).await.unwrap();
+    }
+    
+    let login_url = format!("http://localhost:3000/login?token={}", token);
+    
+    // MOCK SEND EMAIL:
+    tracing::info!("--- MOCK EMAIL ---");
+    tracing::info!("To: {}", email);
+    tracing::info!("Subject: Your AI Mail Butler Login Link");
+    tracing::info!("Body: Click here to login: {}", login_url);
+    tracing::info!("------------------");
+    
+    Json(serde_json::json!({ "status": "success", "message": "Magic link sent to console mock" }))
+}
+
+#[derive(Deserialize)]
+struct VerifyRequest {
+    token: String,
+}
+
+async fn post_verify(
+    State(state): State<AppState>,
+    Json(payload): Json<VerifyRequest>,
+) -> Json<Option<User>> {
+    let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences, magic_token FROM users WHERE magic_token = ?")
+        .bind(&payload.token)
+        .fetch_optional(&state.pool).await.unwrap_or(None);
+        
+    if let Some(mut u) = user {
+        // Clear token
+        sqlx::query("UPDATE users SET magic_token = NULL WHERE id = ?")
+            .bind(&u.id)
+            .execute(&state.pool).await.unwrap();
+            
+        u.magic_token = None;
+        Json(Some(u))
+    } else {
+        Json(None)
+    }
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/about", get(get_about))
+        .route("/auth/magic-link", post(post_magic_link))
+        .route("/auth/verify", post(post_verify))
         .route("/me", get(get_me))
         .route("/dashboard", get(get_dashboard))
         .route("/chat", post(post_chat));

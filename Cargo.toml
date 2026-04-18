@@ -3,7 +3,7 @@ name = "ai-mail-butler"
 version = "0.1.0"
 edition = "2021"
 description = "A self-hosted email processing assistant platform"
-authors = ["Yihua <yihua@yihua.app>"]
+authors = ["Yihua <yihua@example.com>"]
 license = "Unlicense OR CC0-1.0" # Based on the user's license preference
 
 [dependencies]
@@ -23,3 +23,4 @@ dotenvy = "0.15"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
+samotop-delivery = "0.12"

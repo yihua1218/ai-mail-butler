@@ -29,9 +29,13 @@ async fn main() -> Result<()> {
     let ai_client = ai::AiClient::new(&config);
 
     // 3. Start SMTP Server
-    tokio::spawn(async move {
-        if let Err(e) = mail::MailService::start().await {
-            tracing::error!("Mail server failed: {}", e);
+    tokio::spawn({
+        let pool = pool.clone();
+        let ai_client = ai_client.clone();
+        async move {
+            if let Err(e) = mail::MailService::start(pool, ai_client).await {
+                tracing::error!("Mail server failed: {}", e);
+            }
         }
     });
 

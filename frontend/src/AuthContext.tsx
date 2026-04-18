@@ -10,7 +10,9 @@ export interface User {
 
 interface AuthContextType {
   user: User | null;
-  login: (email: string) => Promise<void>;
+  requestMagicLink: (email: string) => Promise<void>;
+  verifyToken: (token: string) => Promise<void>;
+  refreshUser: () => Promise<void>;
   logout: () => void;
   loading: boolean;
 }
@@ -21,35 +23,49 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchUser = async (email: string) => {
-    try {
-      const res = await axios.get(`/api/me?email=${email}`);
-      if (res.data) {
-        setUser(res.data);
-        localStorage.setItem('user_email', email);
-      } else {
-        setUser(null);
-      }
-    } catch (e) {
-      console.error(e);
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
     const savedEmail = localStorage.getItem('user_email');
     if (savedEmail) {
-      fetchUser(savedEmail);
+      axios.get(`/api/me?email=${savedEmail}`)
+        .then(res => {
+          if (res.data) setUser(res.data);
+          else localStorage.removeItem('user_email');
+        })
+        .finally(() => setLoading(false));
     } else {
       setLoading(false);
     }
   }, []);
 
-  const login = async (email: string) => {
+  const requestMagicLink = async (email: string) => {
+    await axios.post('/api/auth/magic-link', { email });
+  };
+
+  const refreshUser = async () => {
+    const savedEmail = localStorage.getItem('user_email');
+    if (savedEmail) {
+      try {
+        const res = await axios.get(`/api/me?email=${savedEmail}`);
+        if (res.data) setUser(res.data);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const verifyToken = async (token: string) => {
     setLoading(true);
-    await fetchUser(email);
+    try {
+      const res = await axios.post('/api/auth/verify', { token });
+      if (res.data) {
+        setUser(res.data);
+        localStorage.setItem('user_email', res.data.email);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const logout = () => {
@@ -58,7 +74,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, requestMagicLink, verifyToken, refreshUser, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );

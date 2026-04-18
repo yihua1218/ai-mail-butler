@@ -5,12 +5,12 @@
 **Version**: 1.0 (Draft)  
 **Date**: [Insert Date]  
 
-The AI Mail Butler is a self-hosted email processing assistant platform. It consists of a dedicated Mail Server and a Web-based GUI. Users forward selected emails from their own mail servers to the assistant's mailbox on the `mail.yihua.app` domain. The assistant intelligently identifies the forwarding user, onboards new users via email inquiry, performs AI-driven actions (e.g., translation, auto-reply), and provides a transparent web dashboard for monitoring all processed emails and actions.
+The AI Mail Butler is a self-hosted email processing assistant platform. It consists of a dedicated Mail Server and a Web-based GUI. Users forward selected emails from their own mail servers to the assistant's mailbox on the `mail.example.com` domain. The assistant intelligently identifies the forwarding user, onboards new users via email inquiry, performs AI-driven actions (e.g., translation, auto-reply), and provides a transparent web dashboard for monitoring all processed emails and actions.
 
 The system aims to act as a personal email delegate, reducing manual workload while maintaining full user control and privacy.
 
 ## 2. System Architecture
-- **Mail Server**: Fully managed SMTP/IMAP server registered under the domain `mail.yihua.app`. A dedicated assistant mailbox (e.g., `assistant@mail.yihua.app` or similar) will be created.
+- **Mail Server**: Fully managed SMTP/IMAP server registered under the domain `mail.example.com`. A dedicated assistant mailbox (e.g., `assistant@mail.example.com` or similar) will be created.
 - **Web GUI**: Secure web application providing user dashboard and management interface.
 - **Core Components**:
   - Email forwarding detection & parsing engine
@@ -22,8 +22,8 @@ The system aims to act as a personal email delegate, reducing manual workload wh
 ## 3. Functional Requirements
 
 ### 3.1 Mail Server & Domain Setup
-- Register and maintain the mail domain `mail.yihua.app`.
-- Provision a system mailbox for the AI assistant (e.g., `assistant@mail.yihua.app`).
+- Register and maintain the mail domain `mail.example.com`.
+- Provision a system mailbox for the AI assistant (e.g., `assistant@mail.example.com`).
 - Support receiving forwarded emails from external user mail servers via a built-in lightweight Rust SMTP server.
 - Support sending outbound emails (onboarding inquiries, translated emails, auto-replies, magic login links).
 
@@ -69,7 +69,7 @@ The system aims to act as a personal email delegate, reducing manual workload wh
 ## 5. Out of Scope (Phase 1)
 - Direct sending/receiving of non-forwarded emails by end users.
 - Full email client replacement.
-- Multi-domain support (single domain `mail.yihua.app` only in initial version).
+- Multi-domain support (single domain `mail.example.com` only in initial version).
 
 ## 6. Acceptance Criteria
 - Successful end-to-end flow: user forwards email → assistant identifies user → onboarding or processing → action executed → visible in web dashboard.
@@ -78,6 +78,6 @@ The system aims to act as a personal email delegate, reducing manual workload wh
 - All logs and email histories are auditable via the web GUI.
 
 ## 7. Appendices
-- Domain: `mail.yihua.app`
-- Assistant mailbox example: `assistant@mail.yihua.app`
+- Domain: `mail.example.com`
+- Assistant mailbox example: `assistant@mail.example.com`
 - Target language for translation: Traditional Chinese (繁體中文)

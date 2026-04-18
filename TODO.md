@@ -7,11 +7,11 @@
 - [x] Initialize React frontend project with Ant Design (Apple-style aesthetic).
 
 ## Medium Priority
-- [ ] Implement AI Chat functionality (WebSocket or REST).
-- [ ] Implement email parser to extract forwarded content and sender identity.
-- [ ] Develop AI integration for email translation and auto-reply.
-- [ ] Create email magic-link authentication flow.
+- [x] Implement AI Chat functionality (WebSocket or REST).
+- [x] Implement email parser to extract forwarded content and sender identity.
+- [x] Develop AI integration for email translation and auto-reply.
+- [x] Create email magic-link authentication flow.
 
 ## Low Priority
 - [ ] Add unit tests and integration tests.
-- [ ] Refine Docker build process to include frontend assets.
+- [x] Refine Docker build process to include frontend assets.

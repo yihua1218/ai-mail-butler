@@ -83,9 +83,26 @@ const Dashboard: React.FC = () => {
 
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();
-  const { user, login, logout, loading } = useAuth();
+  const { user, requestMagicLink, verifyToken, logout, loading } = useAuth();
   const [activeMenu, setActiveMenu] = useState('1');
   const [loginEmail, setLoginEmail] = useState('test@example.com');
+  const [isLinkSent, setIsLinkSent] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (token) {
+      verifyToken(token).then(() => {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      });
+    }
+  }, []);
+
+  const handleLogin = async () => {
+    await requestMagicLink(loginEmail);
+    setIsLinkSent(true);
+    setTimeout(() => setIsLinkSent(false), 5000);
+  };
 
   const changeLanguage = (lng: string) => {
     i18n.changeLanguage(lng);
@@ -136,9 +153,15 @@ const App: React.FC = () => {
             {user ? (
               <Button type="text" onClick={logout} icon={<LogoutOutlined />}>Logout</Button>
             ) : (
-              <div style={{ display: 'flex', gap: 8 }}>
-                <Input size="small" placeholder="Email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} />
-                <Button size="small" type="primary" onClick={() => login(loginEmail)} icon={<LoginOutlined />}>Login</Button>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {isLinkSent ? (
+                  <span style={{ color: '#34c759', fontSize: '14px' }}>Magic Link Sent! Check console.</span>
+                ) : (
+                  <>
+                    <Input size="small" placeholder="Email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} />
+                    <Button size="small" type="primary" onClick={handleLogin} icon={<LoginOutlined />}>Login</Button>
+                  </>
+                )}
               </div>
             )}
             <Dropdown menu={languageMenu} placement="bottomRight">

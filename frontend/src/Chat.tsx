@@ -12,7 +12,7 @@ interface Message {
 }
 
 export const Chat: React.FC = () => {
-  const { user, login } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -47,7 +47,7 @@ export const Chat: React.FC = () => {
       setMessages(prev => [...prev, { sender: 'ai', text: res.data.reply }]);
       // Refresh user context implicitly or explicitly if needed
       if (!user.is_onboarded && res.data.reply.includes("noted down")) {
-        login(user.email); // Re-fetch to update onboarded status
+        refreshUser(); // Re-fetch to update onboarded status
       }
     } catch (e) {
       setMessages(prev => [...prev, { sender: 'ai', text: 'Sorry, I encountered an error communicating with the server.' }]);

@@ -36,6 +36,7 @@ dependencies = [
  "mailparse",
  "reqwest",
  "samotop",
+ "samotop-delivery",
  "serde",
  "serde_json",
  "sqlx",

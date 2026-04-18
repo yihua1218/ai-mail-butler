@@ -7,6 +7,7 @@ pub struct User {
     pub email: String,
     pub is_onboarded: bool,
     pub preferences: Option<String>,
+    pub magic_token: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
