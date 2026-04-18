@@ -6,7 +6,7 @@ use samotop::mail::Builder;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio::fs;
-use crate::models::{User, EmailRecord};
+use crate::models::User;
 use crate::ai::AiClient;
 use sqlx::SqlitePool;
 use uuid::Uuid;
