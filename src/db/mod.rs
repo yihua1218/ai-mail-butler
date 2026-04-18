@@ -24,6 +24,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 1").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN display_name TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN role TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN email_format TEXT NOT NULL DEFAULT 'both'").execute(&pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS emails (

@@ -284,22 +284,56 @@ async fn post_magic_link(
     let from_addr: lettre::message::Mailbox = state.config.assistant_email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
     let to_addr: lettre::message::Mailbox = email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
     let subject = "Your AI Mail Butler Login Link / 您的登入連結";
-
     if smtp_ready {
         let host = state.config.smtp_relay_host.as_ref().unwrap();
         let port = state.config.smtp_relay_port;
         let user = state.config.smtp_relay_user.clone().unwrap_or_default();
         let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
 
-        // Build message using mail-send's builder (it handles MIME better)
-        let message = MessageBuilder::new()
+        let user_pref: String = sqlx::query_scalar("SELECT email_format FROM users WHERE email = ?")
+            .bind(&email)
+            .fetch_optional(&state.pool).await
+            .unwrap_or(Some("both".to_string()))
+            .unwrap_or("both".to_string());
+
+        let html_body = format!(
+            r#"<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 40px; background-color: #f5f5f7; color: #1d1d1f;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 32px; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+        <h1 style="font-size: 24px; font-weight: 600; margin-bottom: 16px;">AI Mail Butler</h1>
+        <p style="font-size: 16px; line-height: 1.5; margin-bottom: 24px;">您好！請點擊下方的按鈕以登入您的 AI 郵件助理管理後台。</p>
+        <div style="text-align: center; margin: 32px 0;">
+            <a href="{}" style="display: inline-block; padding: 14px 32px; background-color: #007aff; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: 500; font-size: 16px;">登入管理後台</a>
+        </div>
+        <p style="font-size: 14px; color: #86868b; margin-top: 24px;">如果按鈕無法運作，請複製以下連結至瀏覽器：<br>
+        <span style="word-break: break-all; color: #007aff;">{}</span></p>
+        <hr style="border: none; border-top: 1px solid #d2d2d7; margin: 32px 0;">
+        <p style="font-size: 12px; color: #86868b;">如果您沒有要求此連結，請忽略此郵件。為了您的帳號安全，請勿將此連結轉寄給他人。</p>
+    </div>
+</body>
+</html>"#,
+            login_url, login_url
+        );
+
+        // Build message using mail-send's builder
+        let mut builder = MessageBuilder::new()
             .from(from_addr.to_string())
             .to(to_addr.to_string())
-            .subject(subject)
-            .text_body(plain_text.clone());
+            .subject(subject);
+
+        match user_pref.as_str() {
+            "html" => { builder = builder.html_body(html_body); },
+            "plain" => { builder = builder.text_body(plain_text.clone()); },
+            _ => { 
+                builder = builder.text_body(plain_text.clone()).html_body(html_body);
+            }
+        }
+        
+        let message = builder;
 
         let is_implicit = port == 465;
-        tracing::debug!(">>> [SMTP] Connecting to {}:{} (Implicit TLS: {})", host, port, is_implicit);
+        tracing::debug!(">>> [SMTP] Connecting to {}:{} (Implicit TLS: {}, Format: {})", host, port, is_implicit, user_pref);
 
         let send_task = async move {
             let mut builder = SmtpClientBuilder::new(host.as_str(), port);

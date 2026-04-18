@@ -14,8 +14,12 @@ pub struct User {
     pub auto_reply: bool,
     #[serde(default = "default_true")]
     pub dry_run: bool,
+    #[serde(default = "default_both")]
+    pub email_format: String,
     pub display_name: Option<String>,
 }
+
+fn default_both() -> String { "both".to_string() }
 
 fn default_true() -> bool { true }
 
