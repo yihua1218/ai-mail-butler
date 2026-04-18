@@ -40,6 +40,17 @@ jobs:
           - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
+
+      - name: Log build machine specs
+        run: |
+          echo "=== Build Machine Hardware ==="
+          echo "CPU Model   : $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+          echo "CPU Cores   : $(nproc)"
+          echo "Total RAM   : $(awk '/MemTotal/{printf "%.1f GiB\n", $2/1024/1024}' /proc/meminfo)"
+          echo "Root Disk   : $(df -BG / | awk 'NR==2{print $2}')"
+          echo "Runner OS   : $(uname -a)"
+          echo "=============================="
+
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
       - name: Build backend

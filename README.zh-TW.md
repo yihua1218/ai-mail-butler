@@ -64,15 +64,23 @@ docker-compose up --build -d
    - **郵件伺服器 (Mail server)**：`mail.example.com`
    - **優先權 (Priority)**：`10`
 
-等待 DNS 生效後，任何寄到 `anything@mail.example.com` 的信件都會被成功轉發到您的 AI Mail Butler 伺服器了。
+等候 DNS 生效後，任何寄到 `anything@mail.example.com` 的信件都會被成功轉發到您的 AI Mail Butler 伺服器了。
 
-## Microsoft 365 OAuth 2.0 授權設定
+## SMTP 寄信設定 (Gmail / M365)
 
-如果您計畫使用 Microsoft 365 (M365) 帳戶來讓系統自動寄信，由於微軟已全面淘汰基本驗證（SMTP AUTH），您必須使用 OAuth 2.0 授權機制與 Microsoft Graph API。
+為了發送登入連結 (Magic Link) 與 AI 自動回覆，您需要設定 SMTP 轉發伺服器。
 
-詳細設定方式請參考以下文件：
-- [繁體中文 M365 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
-- [English M365 Setup Guide](docs/M365_OAUTH_SETUP.md)
+### Gmail
+- [Gmail SMTP 設定指南 (繁中/EN)](docs/GMAIL-SMTP-SETUP.md)
+
+### Microsoft 365 (M365)
+如果您計畫使用 Microsoft 365 (M365) 帳戶來寄信，您有兩種選擇：
+
+1.  **應用程式密碼 (SMTP AUTH)**：適合個人或小規模使用，設定最快。
+    - [M365 SMTP 設定指南 (繁中/EN)](docs/SMTP-SETUP.md)
+2.  **OAuth 2.0 (Microsoft Graph)**：生產環境推薦，若組織禁用了 SMTP AUTH 則必須使用此方式。
+    - [繁體中文 OAuth 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
+    - [English OAuth Setup Guide](docs/M365_OAUTH_SETUP.md)
 
 ## 角色存取控制 (RBAC)
 

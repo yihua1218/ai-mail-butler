@@ -14,6 +14,7 @@ pub struct User {
     pub auto_reply: bool,
     #[serde(default = "default_true")]
     pub dry_run: bool,
+    pub display_name: Option<String>,
 }
 
 fn default_true() -> bool { true }

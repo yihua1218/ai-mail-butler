@@ -9,6 +9,7 @@ export interface User {
   role: 'admin' | 'user';
   auto_reply: boolean;
   dry_run: boolean;
+  display_name: string | null;
 }
 
 interface AuthContextType {
@@ -63,9 +64,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (res.data) {
         setUser(res.data);
         localStorage.setItem('user_email', res.data.email);
+      } else {
+        throw new Error('Invalid token');
       }
     } catch (e) {
-      console.error(e);
+      console.error('Verification error:', e);
+      throw e;
     } finally {
       setLoading(false);
     }

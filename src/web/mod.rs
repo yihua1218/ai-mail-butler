@@ -34,23 +34,24 @@ async fn get_me(
 ) -> Json<Option<User>> {
     if let Some(email) = query.email {
         if email.is_empty() { return Json(None); }
+        
+        // Use UPSERT logic or separate check to handle concurrency/re-registrations
+        let role = if Some(&email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
+        let new_id = uuid::Uuid::new_v4().to_string();
+        
+        let _ = sqlx::query("INSERT OR IGNORE INTO users (id, email) VALUES (?, ?)")
+            .bind(&new_id)
+            .bind(&email)
+            .execute(&state.pool).await;
+
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(&state.pool).await.unwrap_or(None);
             
-        let role = if Some(&email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
-        
         if let Some(mut u) = user { 
             u.role = role;
             return Json(Some(u)); 
         }
-
-        let new_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO users (id, email) VALUES (?, ?)")
-            .bind(&new_id)
-            .bind(&email)
-            .execute(&state.pool).await.unwrap();
-        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None, magic_token: None, role, auto_reply: false, dry_run: true }));
     }
     Json(None)
 }
@@ -65,12 +66,14 @@ async fn get_dashboard(
     let users_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(pool).await.unwrap_or(0);
     let received_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails").fetch_one(pool).await.unwrap_or(0);
     let replied_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE status = 'replied'").fetch_one(pool).await.unwrap_or(0);
+    let ai_replies_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_logs").fetch_one(pool).await.unwrap_or(0);
     
     let global_stats = serde_json::json!({
         "registered_users": users_count,
         "emails_received": received_count,
         "emails_replied": replied_count,
         "emails_sent": 0,
+        "ai_replies": ai_replies_count,
     });
     
     if let Some(email) = query.email {
@@ -128,6 +131,7 @@ async fn get_dashboard(
 struct ChatRequest {
     message: String,
     email: String,
+    guest_name: Option<String>,
 }
 
 async fn post_chat(
@@ -136,15 +140,15 @@ async fn post_chat(
 ) -> Json<serde_json::Value> {
     let email = payload.email;
     let message = payload.message;
+    let guest_name = payload.guest_name;
     let pool = &state.pool;
 
-    if !email.is_empty() {
+    let reply = if !email.is_empty() {
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(pool).await.unwrap_or(None);
 
         if let Some(mut user) = user {
-            // AI Integration
             let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -152,34 +156,34 @@ async fn post_chat(
                     user.preferences.clone().unwrap_or_default()
                 }
             };
-
             sqlx::query("UPDATE users SET preferences = ?, is_onboarded = true WHERE id = ?")
                 .bind(&new_pref)
                 .bind(&user.id)
-                .execute(pool).await.unwrap();
-
+                .execute(pool).await.ok();
             user.preferences = Some(new_pref);
-            
-            let reply = match OnboardingService::generate_reply(&state.ai_client, &user, &message).await {
+
+            match OnboardingService::generate_reply(&state.ai_client, &user, &message).await {
                 Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("Failed to generate reply: {}", e);
-                    "Sorry, I am having trouble connecting to my AI brain right now.".to_string()
-                }
-            };
-
-            return Json(serde_json::json!({ "reply": reply }));
+                Err(e) => { tracing::error!("Failed to generate reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
+            }
+        } else {
+            match OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name).await {
+                Ok(r) => r,
+                Err(e) => { tracing::error!("Failed to generate anonymous reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
+            }
         }
-    }
-
-    // Anonymous Chat
-    let reply = match OnboardingService::generate_anonymous_reply(&state.ai_client, &message).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Failed to generate anonymous reply: {}", e);
-            "Sorry, I am having trouble connecting to my AI brain right now.".to_string()
+    } else {
+        match OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name).await {
+            Ok(r) => r,
+            Err(e) => { tracing::error!("Failed to generate anonymous reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
         }
     };
+
+    // Record this AI reply in chat_logs (NULL email for anonymous)
+    let log_email = if email.is_empty() { None } else { Some(email.clone()) };
+    sqlx::query("INSERT INTO chat_logs (user_email) VALUES (?)")
+        .bind(&log_email)
+        .execute(pool).await.ok();
 
     Json(serde_json::json!({ "reply": reply }))
 }
@@ -192,6 +196,11 @@ struct BuildInfo {
     profile: &'static str,
     git_commit: &'static str,
     build_date: &'static str,
+    // Build-machine hardware fingerprint
+    build_cpu_cores: &'static str,
+    build_cpu_model: &'static str,
+    build_ram: &'static str,
+    build_disk: &'static str,
 }
 
 async fn get_about() -> Json<BuildInfo> {
@@ -202,6 +211,10 @@ async fn get_about() -> Json<BuildInfo> {
         profile: env!("BUILD_PROFILE"),
         git_commit: env!("GIT_COMMIT"),
         build_date: env!("BUILD_DATE"),
+        build_cpu_cores: env!("BUILD_CPU_CORES"),
+        build_cpu_model: env!("BUILD_CPU_MODEL"),
+        build_ram: env!("BUILD_RAM"),
+        build_disk: env!("BUILD_DISK"),
     })
 }
 
@@ -210,96 +223,177 @@ struct MagicLinkRequest {
     email: String,
 }
 
-use lettre::{Message, SmtpTransport, Transport};
+use lettre::message::Message;
 use lettre::transport::smtp::authentication::Credentials;
-use lettre::message::{header, MultiPart, SinglePart};
+use lettre::{SmtpTransport, Transport};
+use lettre::message::SinglePart;
 
 async fn post_magic_link(
     State(state): State<AppState>,
     Json(payload): Json<MagicLinkRequest>,
 ) -> Json<serde_json::Value> {
+    let email = payload.email.trim().to_lowercase();
     let token = uuid::Uuid::new_v4().to_string();
-    let email = payload.email;
-    
-    // Upsert user and set token
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
-        .bind(&email)
-        .fetch_optional(&state.pool).await.unwrap_or(None);
-        
-    if let Some(u) = user {
-        sqlx::query("UPDATE users SET magic_token = ? WHERE id = ?")
-            .bind(&token)
-            .bind(&u.id)
-            .execute(&state.pool).await.unwrap();
-    } else {
-        let new_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO users (id, email, magic_token) VALUES (?, ?, ?)")
-            .bind(&new_id)
-            .bind(&email)
-            .bind(&token)
-            .execute(&state.pool).await.unwrap();
+
+    // Use a true UPSERT to avoid UNIQUE constraint race conditions:
+    // If email already exists, just update the token; otherwise insert.
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let result = sqlx::query(
+        "INSERT INTO users (id, email, magic_token) VALUES (?, ?, ?)
+         ON CONFLICT(email) DO UPDATE SET magic_token = excluded.magic_token"
+    )
+    .bind(&new_id)
+    .bind(&email)
+    .bind(&token)
+    .execute(&state.pool).await;
+
+    if let Err(e) = result {
+        tracing::error!("DB error during magic link upsert: {:?}", e);
+        return Json(serde_json::json!({ "status": "error", "message": "Internal server error" }));
     }
-    
-    let login_url = format!("http://localhost:3000/login?token={}", token);
-    
-    // Construct real email using Lettre
-    let plain_text = format!("Welcome to AI Mail Butler! / 歡迎使用 AI Mail Butler！\n\nClick the link below to securely login without a password. / 請點擊下方連結安全無密碼登入：\n{}", login_url);
-    let html_text = format!(
-        "<h3>Welcome to AI Mail Butler! / 歡迎使用 AI Mail Butler！</h3>
-        <p>Click the button below to securely login without a password. / 請點擊下方按鈕安全無密碼登入：</p>
-        <a href=\"{}\" style=\"display: inline-block; padding: 10px 20px; background-color: #0071e3; color: white; text-decoration: none; border-radius: 5px;\">Login / 登入</a>
-        <br><br>
-        <p>If the button doesn't work, copy and paste this link / 如果按鈕無效，請複製貼上此連結：<br>{}</p>",
-        login_url, login_url
+
+    // Determine the public base URL for the login link
+    let base_url = std::env::var("PUBLIC_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{}", state.config.server_port));
+    let login_url = format!("{}/login?token={}", base_url, token);
+
+    // ALWAYS log the magic link to terminal so it's usable even without SMTP
+    let log_box = format!(
+        "\n\
+        ╔══════════════════════════════════════════════════════════════════════════════════════════╗\n\
+        ║  MAGIC LOGIN LINK (debug)                                                                ║\n\
+        ║  To : {:<82} ║\n\
+        ║  URL: {:<82} ║\n\
+        ╚══════════════════════════════════════════════════════════════════════════════════════════╝",
+        email, login_url
+    );
+    tracing::info!("{}", log_box);
+
+    let plain_text = format!(
+        "Welcome to AI Mail Butler! / 歡迎使用 AI Mail Butler！\n\nClick the link below to securely login without a password. / 請點擊下方連結安全無密碼登入：\n{}",
+        login_url
     );
 
-    let email_msg = Message::builder()
-        .from(state.config.assistant_email.parse().unwrap())
-        .to(email.parse().unwrap())
-        .subject("Your AI Mail Butler Login Link / 您的登入連結")
-        .multipart(
-            MultiPart::alternative()
-                .singlepart(
-                    SinglePart::builder()
-                        .header(header::ContentType::TEXT_PLAIN)
-                        .body(plain_text),
-                )
-                .singlepart(
-                    SinglePart::builder()
-                        .header(header::ContentType::TEXT_HTML)
-                        .body(html_text),
-                ),
-        )
-        .unwrap();
+    // Check if SMTP is configured with real values (not placeholder)
+    let smtp_ready = state.config.smtp_relay_host.as_deref()
+        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
+        .unwrap_or(false);
 
-    let mailer = if let Some(host) = &state.config.smtp_relay_host {
-        let mut builder = SmtpTransport::relay(&host).unwrap().port(state.config.smtp_relay_port);
-        if let (Some(user), Some(pass)) = (&state.config.smtp_relay_user, &state.config.smtp_relay_pass) {
-            let creds = Credentials::new(user.to_string(), pass.to_string());
-            builder = builder.credentials(creds);
-        }
-        Some(builder.build())
-    } else {
-        // Fallback to mock if no SMTP is configured
-        None
-    };
+    let from_addr: lettre::message::Mailbox = state.config.assistant_email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
+    let to_addr: lettre::message::Mailbox = email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
+    let subject = "Your AI Mail Butler Login Link / 您的登入連結";
 
-    if let Some(mailer) = mailer {
-        match mailer.send(&email_msg) {
-            Ok(_) => {
-                tracing::info!("Magic link sent successfully to {}", email);
-                return Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }));
-            },
+    if smtp_ready {
+        let host = state.config.smtp_relay_host.as_ref().unwrap();
+        match Message::builder().from(from_addr.clone()).to(to_addr.clone()).subject(subject).singlepart(SinglePart::plain(plain_text.clone())) {
+            Ok(email_msg) => {
+                let mut builder = match SmtpTransport::relay(host) {
+                    Ok(b) => b.port(state.config.smtp_relay_port),
+                    Err(e) => {
+                        tracing::error!("SMTP relay config error: {:?}", e);
+                        return Json(serde_json::json!({ "status": "ok_debug", "message": "SMTP config error; login URL logged to console" }));
+                    }
+                };
+                if let (Some(user), Some(pass)) = (&state.config.smtp_relay_user, &state.config.smtp_relay_pass) {
+                    builder = builder.credentials(Credentials::new(user.clone(), pass.clone()));
+                }
+                match builder.build().send(&email_msg) {
+                    Ok(_) => {
+                        tracing::info!("Magic link email sent successfully to {}", email);
+                        Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }))
+                    }
+                    Err(e) => {
+                        tracing::error!("SMTP send failed: {:?}", e);
+                        Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
+                    }
+                }
+            }
             Err(e) => {
-                tracing::error!("Could not send email: {:?}", e);
-                return Json(serde_json::json!({ "status": "error", "message": "Failed to send email" }));
+                tracing::error!("Email build error: {:?}", e);
+                Json(serde_json::json!({ "status": "ok_debug", "message": "Email build error; login URL logged to console" }))
             }
         }
     } else {
-        tracing::warn!("No SMTP configured. Mocking email delivery to console:");
-        tracing::info!("To: {}\nLink: {}", email, login_url);
-        return Json(serde_json::json!({ "status": "success", "message": "Magic link sent to console mock" }));
+        // No relay configured — try direct MX delivery to the recipient's mail server.
+        // This may land in spam but it works without any relay setup.
+        let domain = email.split('@').nth(1).unwrap_or("").to_string();
+        let mx_host = lookup_mx_host(&domain).await;
+
+        if let Some(mx) = mx_host {
+            tracing::info!("No SMTP relay configured. Attempting direct MX delivery to {} ({})", mx, domain);
+            match Message::builder().from(from_addr).to(to_addr).subject(subject).singlepart(SinglePart::plain(plain_text)) {
+                Ok(email_msg) => {
+                    // Direct SMTP: connect to MX on port 25, STARTTLS if available
+                    match SmtpTransport::relay(&mx) {
+                        Ok(builder) => {
+                            match builder.port(25).build().send(&email_msg) {
+                                Ok(_) => {
+                                    tracing::info!("Direct MX delivery succeeded to {} via {}", email, mx);
+                                    return Json(serde_json::json!({ "status": "success", "message": "Magic link sent via direct delivery (may be in spam)" }));
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Direct MX delivery failed: {:?}. Login URL is in server console.", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Could not build direct SMTP transport: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Email build error for direct delivery: {:?}", e),
+            }
+        } else {
+            tracing::warn!("Could not resolve MX for domain '{}'. Login URL is in server console.", domain);
+        }
+
+        Json(serde_json::json!({ "status": "ok_debug", "message": "No SMTP relay configured — login URL printed to server console" }))
     }
+}
+
+/// Look up the highest-priority MX record for a domain using `dig`.
+/// Returns the MX hostname (without trailing dot) or None if lookup fails.
+async fn lookup_mx_host(domain: &str) -> Option<String> {
+    tracing::debug!("Looking up MX records for domain: {}", domain);
+    // Try `dig +short MX {domain}` — available on Linux and macOS
+    match tokio::process::Command::new("dig")
+        .args(["+short", "MX", domain])
+        .output()
+        .await {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.trim().is_empty() {
+                    tracing::warn!("dig returned empty results for MX lookup of {}", domain);
+                    return None;
+                }
+                parse_mx_records(&stdout)
+            },
+            Err(e) => {
+                tracing::error!("Failed to execute 'dig' command: {}. Make sure 'dnsutils' or 'bind9-host' is installed.", e);
+                None
+            }
+        }
+}
+
+/// Parse `dig +short MX` output lines like "10 alt1.gmail-smtp-in.l.google.com."
+/// Returns the hostname of the lowest-priority (most preferred) MX record.
+fn parse_mx_records(output: &str) -> Option<String> {
+    let mut records: Vec<(u32, String)> = output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                let priority: u32 = parts[0].parse().ok()?;
+                let host = parts[1].trim_end_matches('.').to_string();
+                if !host.is_empty() { Some((priority, host)) } else { None }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    records.sort_by_key(|(p, _)| *p);
+    records.into_iter().next().map(|(_, host)| host)
 }
 
 #[derive(Deserialize)]
@@ -311,21 +405,42 @@ async fn post_verify(
     State(state): State<AppState>,
     Json(payload): Json<VerifyRequest>,
 ) -> Json<Option<User>> {
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE magic_token = ?")
-        .bind(&payload.token)
-        .fetch_optional(&state.pool).await.unwrap_or(None);
+    let token = payload.token.trim();
+    tracing::info!(">>> [AUTH] Attempting to verify token: '{}'", token);
+    
+    // Debug: check total tokens in DB
+    let total_tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE magic_token IS NOT NULL")
+        .fetch_one(&state.pool).await.unwrap_or(0);
+    tracing::info!(">>> [AUTH] System current has {} active magic tokens in DB.", total_tokens);
+
+    let query_result = sqlx::query_as::<_, User>("SELECT * FROM users WHERE magic_token = ?")
+        .bind(token)
+        .fetch_optional(&state.pool).await;
         
-    if let Some(mut u) = user {
-        // Clear token
-        sqlx::query("UPDATE users SET magic_token = NULL WHERE id = ?")
-            .bind(&u.id)
-            .execute(&state.pool).await.unwrap();
+    match query_result {
+        Ok(Some(mut u)) => {
+            tracing::info!(">>> [AUTH] SUCCESS: Token match found for user: {}", u.email);
+            // Clear token after use
+            let clear_res = sqlx::query("UPDATE users SET magic_token = NULL WHERE id = ?")
+                .bind(&u.id)
+                .execute(&state.pool).await;
             
-        u.magic_token = None;
-        u.role = if Some(&u.email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
-        Json(Some(u))
-    } else {
-        Json(None)
+            if let Err(e) = clear_res {
+                tracing::error!(">>> [AUTH] FAILED to clear token for user {}: {:?}", u.email, e);
+            }
+                
+            u.magic_token = None;
+            u.role = if Some(&u.email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
+            Json(Some(u))
+        },
+        Ok(None) => {
+            tracing::warn!(">>> [AUTH] FAILED: No user found with token '{}'.", token);
+            Json(None)
+        },
+        Err(e) => {
+            tracing::error!(">>> [AUTH] DATABASE ERROR during verification: {:?}", e);
+            Json(None)
+        }
     }
 }
 
@@ -334,15 +449,17 @@ struct SettingsRequest {
     email: String,
     auto_reply: bool,
     dry_run: bool,
+    display_name: Option<String>,
 }
 
 async fn post_settings(
     State(state): State<AppState>,
     Json(payload): Json<SettingsRequest>,
 ) -> Json<serde_json::Value> {
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ? WHERE email = ?")
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, display_name = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
+        .bind(payload.display_name)
         .bind(&payload.email)
         .execute(&state.pool).await;
         

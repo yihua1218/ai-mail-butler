@@ -66,13 +66,20 @@ To receive emails at your custom domain using AI Mail Butler, you need to config
 
 Once DNS propagates, any email sent to `anything@mail.example.com` will be routed to your AI Mail Butler instance.
 
-## Microsoft 365 OAuth 2.0 Configuration
+## SMTP Configuration (Gmail / M365)
 
-If you plan to use a Microsoft 365 (M365) account to send emails, you must configure OAuth 2.0 and use the Microsoft Graph API, as Basic Authentication (SMTP AUTH) is deprecated.
+To send emails (for Magic Links and AI replies), you need to configure an SMTP relay.
 
-Please refer to the detailed setup instructions:
-- [English M365 Setup Guide](docs/M365_OAUTH_SETUP.md)
-- [繁體中文 M365 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
+### Gmail
+- [Gmail SMTP Setup Guide](docs/GMAIL-SMTP-SETUP.md)
+
+### Microsoft 365 (M365)
+If you use a Microsoft 365 (M365) account to send emails, you have two options:
+1.  **App Passwords (SMTP AUTH)**: Easier for small-scale/personal use.
+    - [M365 SMTP Setup Guide](docs/SMTP-SETUP.md)
+2.  **OAuth 2.0 (Microsoft Graph)**: Recommended for production (required if SMTP AUTH is disabled by your organization).
+    - [English OAuth Setup Guide](docs/M365_OAUTH_SETUP.md)
+    - [繁體中文 OAuth 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
 
 ## Role-Based Access Control (RBAC)
 

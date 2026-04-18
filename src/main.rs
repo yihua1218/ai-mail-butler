@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
     // 1. Initialize Database
     let pool = db::connect(&config.database_url).await?;
     info!("Database connected successfully.");
+    db::run_startup_diagnostics(&pool).await?;
 
     // 2. Initialize AI Client
     let ai_client = ai::AiClient::new(&config);

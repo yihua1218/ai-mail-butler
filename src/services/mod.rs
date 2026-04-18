@@ -14,10 +14,16 @@ impl OnboardingService {
     }
 
     pub async fn generate_reply(client: &AiClient, user: &User, current_message: &str) -> Result<String> {
-        let system_prompt = if !user.is_onboarded {
-            "You are an AI Mail Butler. The user has just onboarded. Welcome them, acknowledge their preferences, and ask if there's anything else they need help with."
+        let name_context = if let Some(name) = &user.display_name {
+            format!("The user's name is {}. Address them by their name when appropriate.\n", name)
         } else {
-            "You are an AI Mail Butler. Acknowledge the user's message based on their known preferences, and ask how you can assist them today."
+            "".to_string()
+        };
+
+        let system_prompt = if !user.is_onboarded {
+            format!("{}You are an AI Mail Butler. The user has just onboarded. Welcome them, acknowledge their preferences, and ask if there's anything else they need help with.\nIMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context)
+        } else {
+            format!("{}You are an AI Mail Butler. Acknowledge the user's message based on their known preferences, and ask how you can assist them today.\nIMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context)
         };
         
         let prompt_with_context = format!("{} \nUser preferences context: {}", system_prompt, user.preferences.as_deref().unwrap_or("None"));
@@ -25,17 +31,24 @@ impl OnboardingService {
         Ok(reply)
     }
 
-    pub async fn generate_anonymous_reply(client: &AiClient, current_message: &str) -> Result<String> {
-        let system_prompt = "You are AI Mail Butler, an intelligent, self-hosted email processing assistant.
+    pub async fn generate_anonymous_reply(client: &AiClient, current_message: &str, guest_name: Option<String>) -> Result<String> {
+        let name_context = if let Some(name) = guest_name {
+            format!("The person you are talking to is named {}. Address them by their name when appropriate.\n", name)
+        } else {
+            "".to_string()
+        };
+
+        let system_prompt = format!("{}You are AI Mail Butler, an intelligent, self-hosted email processing assistant.
 Your capabilities include:
 - Auto-replying to forwarded emails based on user instructions.
 - A 'Dry Run' mode to let users review drafted responses before sending them to external recipients.
 - A Dashboard to view stats and processed emails.
 - Role-Based Access Control (Admin vs Regular User).
 - Passwordless login using Magic Links.
-You are currently talking to an anonymous visitor. Explain these features if asked, and encourage them to enter their email in the navigation bar to login via Magic Link to use the dashboard and configure you.";
+You are currently talking to an anonymous visitor. Explain these features if asked, and encourage them to enter their email in the navigation bar to login via Magic Link to use the dashboard and configure you.
+IMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context);
         
-        let reply = client.chat(system_prompt, current_message).await?;
+        let reply = client.chat(&system_prompt, current_message).await?;
         Ok(reply)
     }
 }

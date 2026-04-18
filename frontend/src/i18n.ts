@@ -13,6 +13,7 @@ const en = {
     stats_emails_received: "Emails Received",
     stats_emails_replied: "Emails Replied",
     stats_emails_sent: "Emails Sent",
+    stats_ai_replies: "AI Chat Replies",
   }
 };
 
@@ -28,6 +29,7 @@ const zhTW = {
     stats_emails_received: "總收件數",
     stats_emails_replied: "自動回覆數",
     stats_emails_sent: "主動寄出數",
+    stats_ai_replies: "AI 助理回覆次數",
   }
 };
 
