@@ -1,0 +1,22 @@
+# Compiled output
+/target
+
+# Logs
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables
+.env
+.env.*
+!.env.example
