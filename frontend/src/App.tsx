@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ConfigProvider, Layout, Menu, Typography, Button, Dropdown, Row, Col, Card, Statistic, Table, Input } from 'antd';
-import { GlobalOutlined, UserOutlined, MailOutlined, SendOutlined, MessageOutlined, LoginOutlined, LogoutOutlined } from '@ant-design/icons';
+import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './AuthContext';
 import { Chat } from './Chat';
@@ -14,34 +14,115 @@ const Dashboard: React.FC = () => {
   const { t } = useTranslation();
   const { user } = useAuth();
   const [personalEmails, setPersonalEmails] = useState<any[]>([]);
+  const [allEmails, setAllEmails] = useState<any[]>([]);
+  const [globalStats, setGlobalStats] = useState<any>(null);
+  const [personalStats, setPersonalStats] = useState<any>(null);
 
   useEffect(() => {
-    if (user) {
-      axios.get(`/api/dashboard?email=${user.email}`).then(res => {
-        if (res.data.type === 'personal') {
-          setPersonalEmails(res.data.emails);
-        }
-      });
-    }
+    // If user is logged in, use their email, else fetch without email
+    const url = user ? `/api/dashboard?email=${user.email}` : `/api/dashboard`;
+    axios.get(url).then(res => {
+      setGlobalStats(res.data.global_stats);
+      if (res.data.type === 'admin') {
+        setPersonalEmails(res.data.personal_emails);
+        setPersonalStats(res.data.personal_stats);
+        setAllEmails(res.data.all_emails);
+      } else if (res.data.type === 'personal') {
+        setPersonalEmails(res.data.personal_emails);
+        setPersonalStats(res.data.personal_stats);
+      }
+    });
   }, [user]);
 
-  if (user) {
+  const GlobalStatsDisplay = () => (
+    globalStats ? (
+      <div style={{ marginBottom: 32 }}>
+        <Title level={4}>System Overview</Title>
+        <Row gutter={[16, 16]}>
+          <Col xs={12} sm={8} md={6}>
+            <Card bordered={false} hoverable bodyStyle={{ padding: '16px' }}>
+              <Statistic title={t('stats_registered_users')} value={globalStats.registered_users} prefix={<UserOutlined style={{ color: '#0071e3' }} />} />
+            </Card>
+          </Col>
+          <Col xs={12} sm={8} md={6}>
+            <Card bordered={false} hoverable bodyStyle={{ padding: '16px' }}>
+              <Statistic title={t('stats_emails_received')} value={globalStats.emails_received} prefix={<MailOutlined style={{ color: '#34c759' }} />} />
+            </Card>
+          </Col>
+          <Col xs={12} sm={8} md={6}>
+            <Card bordered={false} hoverable bodyStyle={{ padding: '16px' }}>
+              <Statistic title={t('stats_emails_replied')} value={globalStats.emails_replied} prefix={<MessageOutlined style={{ color: '#ff9500' }} />} />
+            </Card>
+          </Col>
+        </Row>
+      </div>
+    ) : null
+  );
+
+  const PersonalStatsDisplay = () => (
+    personalStats ? (
+      <div style={{ marginBottom: 32 }}>
+        <Title level={4}>Your Processing Status</Title>
+        <Row gutter={[16, 16]}>
+          <Col xs={12} sm={8} md={6}>
+            <Card bordered={false} hoverable bodyStyle={{ padding: '16px' }}>
+              <Statistic title="Your Received" value={personalStats.emails_received} prefix={<MailOutlined style={{ color: '#34c759' }} />} />
+            </Card>
+          </Col>
+          <Col xs={12} sm={8} md={6}>
+            <Card bordered={false} hoverable bodyStyle={{ padding: '16px' }}>
+              <Statistic title="Your Replied" value={personalStats.emails_replied} prefix={<MessageOutlined style={{ color: '#ff9500' }} />} />
+            </Card>
+          </Col>
+        </Row>
+      </div>
+    ) : null
+  );
+
+  const columns = [
+    { title: 'Subject', dataIndex: 'subject', key: 'subject' },
+    { title: 'Status', dataIndex: 'status', key: 'status' },
+    { title: 'Received At', dataIndex: 'received_at', key: 'received_at' }
+  ];
+
+  if (user?.role === 'admin') {
+    return (
+      <div>
+        <div style={{ marginBottom: 32 }}>
+          <Title level={2}>{t('welcome')}, Admin ({user.email})</Title>
+        </div>
+        
+        <GlobalStatsDisplay />
+        <PersonalStatsDisplay />
+
+        <Row gutter={[24, 24]}>
+          <Col xs={24} lg={12}>
+            <Card bordered={false} title="Your Emails">
+              <Table dataSource={personalEmails} rowKey="id" columns={columns} pagination={{ pageSize: 5 }} />
+            </Card>
+          </Col>
+          <Col xs={24} lg={12}>
+            <Card bordered={false} title="All Processed Emails (System-wide)">
+              <Table dataSource={allEmails} rowKey="id" columns={columns} pagination={{ pageSize: 5 }} />
+            </Card>
+          </Col>
+        </Row>
+      </div>
+    );
+  }
+
+  if (user?.role === 'user') {
     return (
       <div>
         <div style={{ marginBottom: 32 }}>
           <Title level={2}>{t('welcome')}, {user.email}</Title>
-          <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>Here are your forwarded emails and tasks.</Paragraph>
         </div>
+
+        <GlobalStatsDisplay />
+        <PersonalStatsDisplay />
+
         <Card bordered={false} title="Your Emails">
-          <Table 
-            dataSource={personalEmails} 
-            rowKey="id"
-            columns={[
-              { title: 'Subject', dataIndex: 'subject', key: 'subject' },
-              { title: 'Status', dataIndex: 'status', key: 'status' },
-              { title: 'Received At', dataIndex: 'received_at', key: 'received_at' }
-            ]}
-          />
+          <Table dataSource={personalEmails} rowKey="id" columns={columns} />
         </Card>
       </div>
     );
@@ -52,31 +133,14 @@ const Dashboard: React.FC = () => {
     <div>
       <div style={{ marginBottom: 32 }}>
         <Title level={2}>{t('welcome')}</Title>
-        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>Your intelligent email assistant is actively processing emails.</Paragraph>
+        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>Your intelligent email assistant is processing emails across the network.</Paragraph>
       </div>
       
-      <Row gutter={[24, 24]}>
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered={false} hoverable>
-            <Statistic title={t('stats_registered_users')} value={12} prefix={<UserOutlined style={{ color: '#0071e3' }} />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered={false} hoverable>
-            <Statistic title={t('stats_emails_received')} value={1248} prefix={<MailOutlined style={{ color: '#34c759' }} />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered={false} hoverable>
-            <Statistic title={t('stats_emails_replied')} value={93} prefix={<MessageOutlined style={{ color: '#ff9500' }} />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} md={6}>
-          <Card bordered={false} hoverable>
-            <Statistic title={t('stats_emails_sent')} value={45} prefix={<SendOutlined style={{ color: '#af52de' }} />} />
-          </Card>
-        </Col>
-      </Row>
+      <GlobalStatsDisplay />
+
+      <div style={{ textAlign: 'center', marginTop: 60 }}>
+        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>Please login to access your personal dashboard and processing status.</Paragraph>
+      </div>
     </div>
   );
 };

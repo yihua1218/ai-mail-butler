@@ -5,7 +5,8 @@ export interface User {
   id: string;
   email: string;
   is_onboarded: boolean;
-  preferences?: string;
+  preferences: string | null;
+  role: 'admin' | 'user';
 }
 
 interface AuthContextType {

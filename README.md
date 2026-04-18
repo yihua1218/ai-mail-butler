@@ -15,6 +15,7 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 - **AI processing module**: English to Traditional Chinese translation, rule-based auto-reply.
 - **AI Chat Interface**: Converse directly with your email assistant via the Web UI.
 - **User configuration & onboarding**: Automated onboarding flow via email.
+- **Role-Based Access Control (RBAC)**: Supports Admin, User, and Anonymous roles with strict data isolation.
 - **Passwordless Authentication**: Magic link login.
 - **Web Dashboard**: View history of received emails and actions taken, featuring an Apple-style aesthetic inspired by Ant Design.
 - **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment.
@@ -71,6 +72,10 @@ If you plan to use a Microsoft 365 (M365) account to send emails, you must confi
 Please refer to the detailed setup instructions:
 - [English M365 Setup Guide](docs/M365_OAUTH_SETUP.md)
 - [繁體中文 M365 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
+
+## Role-Based Access Control (RBAC)
+
+The system supports strict role-based data isolation. For details on configuring an administrator and the permissions for each role, please read the [RBAC Documentation](docs/RBAC.md).
 
 ## License
 

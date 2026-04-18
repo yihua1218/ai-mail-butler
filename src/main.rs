@@ -40,7 +40,8 @@ async fn main() -> Result<()> {
     });
 
     // 4. Start Web Server
-    let state = web::AppState { pool, ai_client };
+    let admin_email = std::env::var("ADMIN_EMAIL").ok();
+    let state = web::AppState { pool, ai_client, admin_email };
     web::start_server(config.server_port, state).await?;
 
     Ok(())

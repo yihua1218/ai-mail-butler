@@ -19,6 +19,7 @@ use crate::services::OnboardingService;
 pub struct AppState {
     pub pool: SqlitePool,
     pub ai_client: AiClient,
+    pub admin_email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -35,24 +36,22 @@ async fn get_me(
         let user = sqlx::query_as::<_, User>("SELECT id, email, is_onboarded, preferences FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(&state.pool).await.unwrap_or(None);
-        if let Some(user) = user { return Json(Some(user)); }
+            
+        let role = if Some(&email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
+        
+        if let Some(mut u) = user { 
+            u.role = role;
+            return Json(Some(u)); 
+        }
 
         let new_id = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO users (id, email) VALUES (?, ?)")
             .bind(&new_id)
             .bind(&email)
             .execute(&state.pool).await.unwrap();
-        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None, magic_token: None }));
+        return Json(Some(User { id: new_id, email, is_onboarded: false, preferences: None, magic_token: None, role }));
     }
     Json(None)
-}
-
-#[derive(Serialize)]
-struct DashboardStats {
-    registered_users: i64,
-    emails_received: i64,
-    emails_replied: i64,
-    emails_sent: i64,
 }
 
 async fn get_dashboard(
@@ -60,33 +59,67 @@ async fn get_dashboard(
     Query(query): Query<AuthQuery>,
 ) -> Json<serde_json::Value> {
     let pool = &state.pool;
-    if let Some(email) = query.email {
-        if !email.is_empty() {
-            let user_id: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
-                .bind(&email)
-                .fetch_optional(pool).await.unwrap_or(None);
-            if let Some((uid,)) = user_id {
-                let records = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
-                    .bind(&uid)
-                    .fetch_all(pool).await.unwrap_or(vec![]);
-                return Json(serde_json::json!({ "type": "personal", "emails": records }));
-            }
-        }
-    }
     
-    // Anonymous stats
+    // Always fetch global stats
     let users_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(pool).await.unwrap_or(0);
     let received_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails").fetch_one(pool).await.unwrap_or(0);
     let replied_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE status = 'replied'").fetch_one(pool).await.unwrap_or(0);
     
-    Json(serde_json::json!({
-        "type": "public",
-        "stats": DashboardStats {
-            registered_users: users_count,
-            emails_received: received_count,
-            emails_replied: replied_count,
-            emails_sent: 0, // Mock
+    let global_stats = serde_json::json!({
+        "registered_users": users_count,
+        "emails_received": received_count,
+        "emails_replied": replied_count,
+        "emails_sent": 0,
+    });
+    
+    if let Some(email) = query.email {
+        if !email.is_empty() {
+            let is_admin = Some(&email) == state.admin_email.as_ref();
+            
+            let user_id: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
+                .bind(&email)
+                .fetch_optional(pool).await.unwrap_or(None);
+                
+            if let Some((uid,)) = user_id {
+                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                    .bind(&uid)
+                    .fetch_all(pool).await.unwrap_or(vec![]);
+                    
+                let p_received: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?").bind(&uid).fetch_one(pool).await.unwrap_or(0);
+                let p_replied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ? AND status = 'replied'").bind(&uid).fetch_one(pool).await.unwrap_or(0);
+                
+                let personal_stats = serde_json::json!({
+                    "emails_received": p_received,
+                    "emails_replied": p_replied,
+                });
+
+                if is_admin {
+                    let all_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, CAST(received_at AS TEXT) as received_at FROM emails ORDER BY received_at DESC")
+                        .fetch_all(pool).await.unwrap_or(vec![]);
+                        
+                    return Json(serde_json::json!({ 
+                        "type": "admin", 
+                        "global_stats": global_stats,
+                        "personal_stats": personal_stats,
+                        "personal_emails": personal_emails,
+                        "all_emails": all_emails
+                    }));
+                } else {
+                    return Json(serde_json::json!({ 
+                        "type": "personal", 
+                        "global_stats": global_stats,
+                        "personal_stats": personal_stats,
+                        "personal_emails": personal_emails
+                    }));
+                }
+            }
         }
+    }
+    
+    // Anonymous
+    Json(serde_json::json!({
+        "type": "anonymous",
+        "global_stats": global_stats
     }))
 }
 
@@ -223,6 +256,7 @@ async fn post_verify(
             .execute(&state.pool).await.unwrap();
             
         u.magic_token = None;
+        u.role = if Some(&u.email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
         Json(Some(u))
     } else {
         Json(None)
