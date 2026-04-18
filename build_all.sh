@@ -17,10 +17,10 @@ if ! command -v cross &> /dev/null; then
     echo "cross not found. Installing cross..."
     cargo install cross --git https://github.com/cross-rs/cross
 fi
-cross build --release --target x86_64-unknown-linux-gnu
+CROSS_CUSTOM_TOOLCHAIN=1 cross build --release --target x86_64-unknown-linux-gnu
 
 echo "[4/4] Building for Linux aarch64 (arm64) via cross..."
-cross build --release --target aarch64-unknown-linux-gnu
+CROSS_CUSTOM_TOOLCHAIN=1 cross build --release --target aarch64-unknown-linux-gnu
 
 echo "=== Organizing Binaries for Docker ==="
 mkdir -p bin/amd64 bin/arm64

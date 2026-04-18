@@ -139,9 +139,31 @@ async fn post_chat(
     Json(serde_json::json!({ "reply": "Please login first." }))
 }
 
+#[derive(Serialize)]
+struct BuildInfo {
+    version: &'static str,
+    target: &'static str,
+    host: &'static str,
+    profile: &'static str,
+    git_commit: &'static str,
+    build_date: &'static str,
+}
+
+async fn get_about() -> Json<BuildInfo> {
+    Json(BuildInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        target: env!("BUILD_TARGET"),
+        host: env!("BUILD_HOST"),
+        profile: env!("BUILD_PROFILE"),
+        git_commit: env!("GIT_COMMIT"),
+        build_date: env!("BUILD_DATE"),
+    })
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
+        .route("/about", get(get_about))
         .route("/me", get(get_me))
         .route("/dashboard", get(get_dashboard))
         .route("/chat", post(post_chat));

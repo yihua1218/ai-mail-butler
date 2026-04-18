@@ -4,6 +4,7 @@ import { GlobalOutlined, UserOutlined, MailOutlined, SendOutlined, MessageOutlin
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './AuthContext';
 import { Chat } from './Chat';
+import { About } from './About';
 import axios from 'axios';
 
 const { Header, Content, Footer } = Layout;
@@ -124,10 +125,11 @@ const App: React.FC = () => {
         <Header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backdropFilter: 'saturate(180%) blur(20px)', position: 'sticky', top: 0, zIndex: 1, borderBottom: '1px solid rgba(0,0,0,0.1)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
             <Title level={4} style={{ margin: 0 }}>AI Mail Butler</Title>
-            <Menu mode="horizontal" selectedKeys={[activeMenu]} onSelect={(i) => setActiveMenu(i.key)} style={{ flex: 1, minWidth: 300, border: 'none', background: 'transparent' }} items={[
+            <Menu mode="horizontal" selectedKeys={[activeMenu]} onSelect={(i) => setActiveMenu(i.key)} style={{ flex: 1, minWidth: 400, border: 'none', background: 'transparent' }} items={[
               { key: '1', label: t('dashboard') },
               { key: '2', label: t('ai_chat') },
               { key: '3', label: t('settings') },
+              { key: '4', label: 'About' },
             ]} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
@@ -148,6 +150,7 @@ const App: React.FC = () => {
           {activeMenu === '1' && <Dashboard />}
           {activeMenu === '2' && <Chat />}
           {activeMenu === '3' && <Card><p>Settings coming soon...</p></Card>}
+          {activeMenu === '4' && <About />}
         </Content>
         <Footer style={{ textAlign: 'center', color: '#86868b' }}>
           AI Mail Butler ©{new Date().getFullYear()} - Released into the Public Domain
