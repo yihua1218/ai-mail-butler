@@ -227,6 +227,8 @@ use lettre::message::Message;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{SmtpTransport, Transport};
 use lettre::message::SinglePart;
+use mail_send::SmtpClientBuilder;
+use mail_send::mail_builder::MessageBuilder;
 
 async fn post_magic_link(
     State(state): State<AppState>,
@@ -285,32 +287,40 @@ async fn post_magic_link(
 
     if smtp_ready {
         let host = state.config.smtp_relay_host.as_ref().unwrap();
-        match Message::builder().from(from_addr.clone()).to(to_addr.clone()).subject(subject).singlepart(SinglePart::plain(plain_text.clone())) {
-            Ok(email_msg) => {
-                let mut builder = match SmtpTransport::relay(host) {
-                    Ok(b) => b.port(state.config.smtp_relay_port),
-                    Err(e) => {
-                        tracing::error!("SMTP relay config error: {:?}", e);
-                        return Json(serde_json::json!({ "status": "ok_debug", "message": "SMTP config error; login URL logged to console" }));
-                    }
-                };
-                if let (Some(user), Some(pass)) = (&state.config.smtp_relay_user, &state.config.smtp_relay_pass) {
-                    builder = builder.credentials(Credentials::new(user.clone(), pass.clone()));
-                }
-                match builder.build().send(&email_msg) {
-                    Ok(_) => {
-                        tracing::info!("Magic link email sent successfully to {}", email);
-                        Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }))
-                    }
-                    Err(e) => {
-                        tracing::error!("SMTP send failed: {:?}", e);
-                        Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
-                    }
-                }
+        let port = state.config.smtp_relay_port;
+        let user = state.config.smtp_relay_user.clone().unwrap_or_default();
+        let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
+
+        // Build message using mail-send's builder (it handles MIME better)
+        let message = MessageBuilder::new()
+            .from(from_addr.to_string())
+            .to(to_addr.to_string())
+            .subject(subject)
+            .text_body(plain_text.clone());
+
+        let is_implicit = port == 465;
+        tracing::debug!(">>> [SMTP] Connecting to {}:{} (Implicit TLS: {})", host, port, is_implicit);
+
+        let send_task = async move {
+            let mut builder = SmtpClientBuilder::new(host.as_str(), port);
+            builder = builder.implicit_tls(is_implicit);
+            
+            if !user.is_empty() {
+                builder = builder.credentials((user.as_str(), pass.as_str()));
+            }
+            
+            let mut client = builder.connect().await?;
+            client.send(message).await
+        };
+
+        match send_task.await {
+            Ok(_) => {
+                tracing::info!("Magic link email sent successfully via mail-send to {}", email);
+                Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }))
             }
             Err(e) => {
-                tracing::error!("Email build error: {:?}", e);
-                Json(serde_json::json!({ "status": "ok_debug", "message": "Email build error; login URL logged to console" }))
+                tracing::error!("mail-send delivery failed: {:?}. Login URL is in server console.", e);
+                Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
             }
         }
     } else {
