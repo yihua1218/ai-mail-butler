@@ -32,13 +32,16 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct UsageInfo {
     total_tokens: u32,
+    #[allow(dead_code)]
     completion_tokens: u32,
+    #[allow(dead_code)]
     prompt_tokens: u32,
 }
 
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatMessageResponse,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +53,7 @@ pub struct ChatResult {
     pub content: String,
     pub total_tokens: u32,
     pub duration_ms: u64,
+    pub finish_reason: Option<String>,
 }
 
 impl AiClient {
@@ -88,6 +92,7 @@ impl AiClient {
                 content: choice.message.content.clone(),
                 total_tokens,
                 duration_ms: duration,
+                finish_reason: choice.finish_reason.clone(),
             })
         } else {
             Err(anyhow::anyhow!("No choices returned from AI API"))

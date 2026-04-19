@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Card, Input, Button, List, Avatar, Tag, Modal, Space } from 'antd';
-import { SendOutlined, RobotOutlined, UserOutlined, EditOutlined } from '@ant-design/icons';
+import { Card, Input, Button, List, Avatar, Tag, Modal, Space, Tooltip } from 'antd';
+import { 
+  SendOutlined, RobotOutlined, UserOutlined, EditOutlined, 
+  BulbOutlined, DashboardOutlined, FieldBinaryOutlined, ClockCircleOutlined 
+} from '@ant-design/icons';
 import axios from 'axios';
 import { useAuth } from './AuthContext';
 
@@ -10,6 +13,8 @@ interface Message {
   timestamp?: string;
   tokens?: number;
   duration_ms?: number;
+  finish_reason?: string;
+  debug?: any; // raw API response for debugging
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +195,11 @@ export const Chat: React.FC = () => {
       const aiMsg: Message = { 
         sender: 'ai', 
         text: res.data.reply,
-        timestamp: res.data.timestamp,
+        timestamp: res.data.timestamp || new Date().toISOString(),
         tokens: res.data.total_tokens,
-        duration_ms: res.data.duration_ms
+        duration_ms: res.data.duration_ms,
+        finish_reason: res.data.finish_reason,
+        debug: res.data
       };
 
       setMessages(prev => [...prev, aiMsg]);
@@ -243,11 +250,12 @@ export const Chat: React.FC = () => {
           itemLayout="horizontal"
           dataSource={messages}
           renderItem={(msg) => {
-            const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+            const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
             const speed = (msg.tokens && msg.duration_ms) ? (msg.tokens / (msg.duration_ms / 1000)).toFixed(1) : null;
+            const durationSec = msg.duration_ms ? (msg.duration_ms / 1000).toFixed(2) : null;
 
             return (
-              <List.Item style={{ borderBottom: 'none', justifyContent: msg.sender === 'user' ? 'flex-end' : 'flex-start', padding: '8px 0' }}>
+              <List.Item style={{ borderBottom: 'none', justifyContent: msg.sender === 'user' ? 'flex-end' : 'flex-start', padding: '12px 0' }}>
                 <div style={{
                   display: 'flex',
                   flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row',
@@ -274,38 +282,66 @@ export const Chat: React.FC = () => {
                       padding: '12px 16px',
                       background: msg.sender === 'user' ? '#0071e3' : '#f5f5f7',
                       color: msg.sender === 'user' ? '#fff' : '#1d1d1f',
-                      borderRadius: 16,
-                      borderTopRightRadius: msg.sender === 'user' ? 4 : 16,
-                      borderTopLeftRadius: msg.sender === 'ai' ? 4 : 16,
+                      borderRadius: 18,
+                      borderTopRightRadius: msg.sender === 'user' ? 4 : 18,
+                      borderTopLeftRadius: msg.sender === 'ai' ? 4 : 18,
                       maxWidth: '70vw',
-                      boxShadow: '0 2px 6px rgba(0,0,0,0.05)',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
                     }}>
-                      <div style={{ fontSize: '14px' }}>
+                      <div style={{ fontSize: '15px', lineHeight: '1.5' }}>
                         <MessageContent text={msg.text} />
                       </div>
                     </div>
                     
                     <div style={{ 
-                      marginTop: 4, 
-                      fontSize: '10px', 
-                      color: '#86868b', 
+                      marginTop: 8, 
                       display: 'flex', 
-                      gap: '8px',
-                      padding: '0 4px'
+                      flexDirection: 'column',
+                      alignItems: msg.sender === 'user' ? 'flex-end' : 'flex-start'
                     }}>
-                      <span>{timeStr}</span>
-                      {msg.sender === 'ai' && msg.tokens !== undefined && msg.tokens > 0 && (
-                        <>
-                          <span>•</span>
-                          <span>{msg.tokens} tokens</span>
-                          {speed && (
-                            <>
-                              <span>•</span>
-                              <span>{speed} t/s</span>
-                            </>
-                          )}
-                        </>
-                      )}
+                      <div style={{ 
+                        display: 'flex', 
+                        alignItems: 'center',
+                        gap: '6px',
+                        flexWrap: 'wrap'
+                      }}>
+                        {msg.sender === 'ai' && msg.debug && (
+                          <Tooltip 
+                            title={<pre style={{ margin: 0, fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>{JSON.stringify(msg.debug, null, 2)}</pre>} 
+                            placement="bottomLeft"
+                            overlayStyle={{ maxWidth: '600px' }}
+                          >
+                            <BulbOutlined style={{ color: '#86868b', fontSize: '14px', cursor: 'help', marginRight: 4 }} />
+                          </Tooltip>
+                        )}
+
+                        <span style={{ fontSize: '11px', color: '#86868b', marginRight: 4 }}>{timeStr}</span>
+
+                        {msg.sender === 'ai' && (
+                          <>
+                            {speed && (
+                              <Tag bordered={false} icon={<DashboardOutlined />} style={{ borderRadius: 12, margin: 0, fontSize: '11px', background: '#f5f5f7', color: '#424245' }}>
+                                {speed} tok/sec
+                              </Tag>
+                            )}
+                            {msg.tokens !== undefined && msg.tokens > 0 && (
+                              <Tag bordered={false} icon={<FieldBinaryOutlined />} style={{ borderRadius: 12, margin: 0, fontSize: '11px', background: '#f5f5f7', color: '#424245' }}>
+                                {msg.tokens} tokens
+                              </Tag>
+                            )}
+                            {durationSec && (
+                              <Tag bordered={false} icon={<ClockCircleOutlined />} style={{ borderRadius: 12, margin: 0, fontSize: '11px', background: '#f5f5f7', color: '#424245' }}>
+                                {durationSec}s
+                              </Tag>
+                            )}
+                            {msg.finish_reason && (
+                              <Tag bordered={false} style={{ borderRadius: 12, margin: 0, fontSize: '11px', background: '#f5f5f7', color: '#424245' }}>
+                                Stop reason: {msg.finish_reason}
+                              </Tag>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>

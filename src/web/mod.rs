@@ -164,7 +164,7 @@ async fn post_chat(
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Failed to generate reply: {}", e);
-                    crate::ai::ChatResult { content: "Sorry, I am having trouble connecting to my AI brain.".to_string(), total_tokens: 0, duration_ms: 0 }
+                    crate::ai::ChatResult { content: "Sorry, I am having trouble connecting to my AI brain.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None }
                 }
             };
 
@@ -196,11 +196,11 @@ async fn post_chat(
             res
         } else {
             OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email).await
-                .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0 })
+                .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
         }
     } else {
         OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email).await
-            .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0 })
+            .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
     };
 
     // Record this AI reply in chat_logs
@@ -212,6 +212,7 @@ async fn post_chat(
         "reply": chat_res.content, 
         "total_tokens": chat_res.total_tokens,
         "duration_ms": chat_res.duration_ms,
+        "finish_reason": chat_res.finish_reason,
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
 }
