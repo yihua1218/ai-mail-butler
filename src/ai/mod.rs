@@ -26,6 +26,14 @@ struct ChatRequest {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    usage: Option<UsageInfo>,
+}
+
+#[derive(Deserialize)]
+struct UsageInfo {
+    total_tokens: u32,
+    completion_tokens: u32,
+    prompt_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +46,12 @@ struct ChatMessageResponse {
     content: String,
 }
 
+pub struct ChatResult {
+    pub content: String,
+    pub total_tokens: u32,
+    pub duration_ms: u64,
+}
+
 impl AiClient {
     pub fn new(config: &Config) -> Self {
         Self {
@@ -48,7 +62,7 @@ impl AiClient {
         }
     }
 
-    pub async fn chat(&self, system_prompt: &str, user_message: &str) -> Result<String> {
+    pub async fn chat(&self, system_prompt: &str, user_message: &str) -> Result<ChatResult> {
         let req_body = ChatRequest {
             model: self.model_name.clone(),
             messages: vec![
@@ -64,10 +78,17 @@ impl AiClient {
             req = req.bearer_auth(&self.api_key);
         }
 
+        let start = std::time::Instant::now();
         let res = req.send().await?.json::<ChatResponse>().await?;
+        let duration = start.elapsed().as_millis() as u64;
         
         if let Some(choice) = res.choices.first() {
-            Ok(choice.message.content.clone())
+            let total_tokens = res.usage.map(|u| u.total_tokens).unwrap_or(0);
+            Ok(ChatResult {
+                content: choice.message.content.clone(),
+                total_tokens,
+                duration_ms: duration,
+            })
         } else {
             Err(anyhow::anyhow!("No choices returned from AI API"))
         }

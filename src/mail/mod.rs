@@ -2,7 +2,7 @@ use anyhow::Result;
 use tracing::{info, error};
 use samotop::server::TcpServer;
 use samotop::mail::Builder;
-// use samotop_delivery::dir::Dir; // Not needed
+use mailparse::MailHeaderMap;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio::fs;
@@ -12,9 +12,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::config::Config;
-use lettre::{Message, SmtpTransport, Transport};
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::message::{header, SinglePart};
+
 
 pub struct MailService;
 
@@ -86,11 +84,28 @@ impl MailService {
                                         .bind(&id).bind(&u.id).bind(&subject).bind(&preview)
                                         .execute(&pool).await.unwrap_or_default();
 
-                                    if u.is_onboarded {
-                                        info!("Triggering AI for email {}", id);
-                                        let memory = crate::services::OnboardingService::get_memory(&pool, &u.id).await;
-                                        match crate::services::OnboardingService::generate_reply(&ai_client, &u, &body, &memory).await {
-                                            Ok(ai_reply) => {
+                                let mut pdf_texts = Vec::new();
+                                let passwords: Vec<String> = u.pdf_passwords.as_ref()
+                                    .and_then(|s| serde_json::from_str(s).ok())
+                                    .unwrap_or_default();
+
+                                for part in parsed.subparts.iter() {
+                                    if part.get_headers().get_first_header("Content-Type").map(|h| h.get_value()).unwrap_or_default().contains("application/pdf") {
+                                        if let Ok(data) = part.get_body_raw() {
+                                            if let Ok(text) = crate::services::OnboardingService::extract_pdf_text(&data, &passwords) {
+                                                pdf_texts.push(text);
+                                            }
+                                        }
+                                    }
+                                }
+                                let pdf_context = if pdf_texts.is_empty() { None } else { Some(pdf_texts.join("\n---\n")) };
+
+                                if u.is_onboarded {
+                                    info!("Triggering AI for email {}", id);
+                                    let memory = crate::services::OnboardingService::get_memory(&pool, &u.id).await;
+                                    match crate::services::OnboardingService::generate_reply(&ai_client, &u, &body, &memory, &config.assistant_email, pdf_context).await {
+                                            Ok(res) => {
+                                                let ai_reply = res.content;
                                                 // Update memory asynchronously
                                                 let ai_client_clone = ai_client.clone();
                                                 let pool_clone = pool.clone();
@@ -107,48 +122,45 @@ impl MailService {
                                                     from_addr.clone() // Send to original sender
                                                 };
 
-                                                let email_subject = format!("Re: {}", subject);
+                                                let _email_subject = format!("Re: {}", subject);
                                                 
                                                 if u.dry_run || u.auto_reply {
                                                     info!("Sending AI reply to {} (dry_run: {}, auto_reply: {})", target_email, u.dry_run, u.auto_reply);
                                                     
-                                                    let email_msg = Message::builder()
-                                                        .from(config.assistant_email.parse().unwrap())
-                                                        .to(target_email.replace("<", "").replace(">", "").parse().unwrap_or_else(|_| u.email.parse().unwrap()))
-                                                        .subject(&email_subject)
-                                                        .singlepart(
-                                                            SinglePart::builder()
-                                                                .header(header::ContentType::TEXT_PLAIN)
-                                                                .body(ai_reply),
-                                                        )
-                                                        .unwrap();
+                                                    let host = config.smtp_relay_host.clone().unwrap_or_default();
+                                                    let port = config.smtp_relay_port;
+                                                    let user = config.smtp_relay_user.clone().unwrap_or_default();
+                                                    let pass = config.smtp_relay_pass.clone().unwrap_or_default();
+                                                    
+                                                    let message = mail_send::mail_builder::MessageBuilder::new()
+                                                        .from(config.assistant_email.clone())
+                                                        .to(target_email.replace("<", "").replace(">", ""))
+                                                        .subject(format!("Re: {}", subject))
+                                                        .text_body(ai_reply);
 
-                                                    let mailer = if let Some(host) = &config.smtp_relay_host {
-                                                        let mut builder = SmtpTransport::relay(&host).unwrap().port(config.smtp_relay_port);
-                                                        if let (Some(user), Some(pass)) = (&config.smtp_relay_user, &config.smtp_relay_pass) {
-                                                            let creds = Credentials::new(user.to_string(), pass.to_string());
-                                                            builder = builder.credentials(creds);
-                                                        }
-                                                        Some(builder.build())
-                                                    } else { None };
+                                                    let is_implicit = port == 465;
+                                                    let pool_clone = pool.clone();
+                                                    let email_id = id.clone();
 
-                                                    if let Some(mailer) = mailer {
-                                                        match mailer.send(&email_msg) {
-                                                            Ok(_) => {
-                                                                sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
-                                                                    .bind(&id).execute(&pool).await.unwrap_or_default();
-                                                            },
-                                                            Err(e) => error!("Could not send email: {:?}", e)
+                                                    tokio::spawn(async move {
+                                                        let mut builder = mail_send::SmtpClientBuilder::new(host.as_str(), port);
+                                                        builder = builder.implicit_tls(is_implicit);
+                                                        if !user.is_empty() {
+                                                            builder = builder.credentials((user.as_str(), pass.as_str()));
                                                         }
-                                                    } else {
-                                                        info!("--- MOCK SMTP DELIVERY ---");
-                                                        info!("To: {}", target_email);
-                                                        info!("Subject: {}", email_subject);
-                                                        info!("Body:\n{}", String::from_utf8_lossy(&email_msg.formatted()));
-                                                        info!("--------------------------");
-                                                        sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
-                                                            .bind(&id).execute(&pool).await.unwrap_or_default();
-                                                    }
+                                                        
+                                                        match builder.connect().await {
+                                                            Ok(mut client) => {
+                                                                if let Err(e) = client.send(message).await {
+                                                                    error!("Failed to send AI reply via mail-send: {:?}", e);
+                                                                } else {
+                                                                    sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
+                                                                        .bind(&email_id).execute(&pool_clone).await.unwrap_or_default();
+                                                                }
+                                                            }
+                                                            Err(e) => error!("Failed to connect to SMTP for AI reply: {:?}", e),
+                                                        }
+                                                    });
                                                 } else {
                                                     info!("Skipping reply for {} (dry_run: false, auto_reply: false)", id);
                                                     sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")

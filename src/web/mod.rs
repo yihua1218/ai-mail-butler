@@ -8,6 +8,7 @@ use tower_http::cors::CorsLayer;
 use std::net::SocketAddr;
 use tracing::info;
 use anyhow::Result;
+
 use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
 
@@ -143,68 +144,76 @@ async fn post_chat(
     let guest_name = payload.guest_name;
     let pool = &state.pool;
 
-    let reply = if !email.is_empty() {
+    let chat_res = if !email.is_empty() {
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(pool).await.unwrap_or(None);
 
         if let Some(mut user) = user {
-            // Update preferences (existing logic)
+            // Update preferences
             let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
                 Ok(p) => p,
-                Err(e) => {
-                    tracing::error!("Failed to extract preferences: {}", e);
-                    user.preferences.clone().unwrap_or_default()
-                }
+                Err(_) => user.preferences.clone().unwrap_or_default()
             };
             sqlx::query("UPDATE users SET preferences = ?, is_onboarded = true WHERE id = ?")
-                .bind(&new_pref)
-                .bind(&user.id)
-                .execute(pool).await.ok();
+                .bind(&new_pref).bind(&user.id).execute(pool).await.ok();
             user.preferences = Some(new_pref);
 
-            // Fetch Memory
             let memory = OnboardingService::get_memory(pool, &user.id).await;
-
-            let ai_reply = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory).await {
+            let mut res = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory, &state.config.assistant_email, None).await {
                 Ok(r) => r,
-                Err(e) => { tracing::error!("Failed to generate reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
+                Err(e) => {
+                    tracing::error!("Failed to generate reply: {}", e);
+                    crate::ai::ChatResult { content: "Sorry, I am having trouble connecting to my AI brain.".to_string(), total_tokens: 0, duration_ms: 0 }
+                }
             };
 
-            // Periodically update memory (we do it every time for now as requested "定期整理", but could be optimized)
+            // Detect repetitive questions (simple keyword for now)
+            let lower_msg = message.to_lowercase();
+            if lower_msg.contains("forward") || lower_msg.contains("email") || lower_msg.contains("信箱") || lower_msg.contains("轉寄") {
+                let _ = OnboardingService::log_activity(pool, &user.id, "ask_forwarding_info").await;
+            }
+
+            // Append Onboarding Question if needed
+            if user.onboarding_step < 3 {
+                if let Some(question) = OnboardingService::get_next_onboarding_question(&user).await {
+                    res.content = format!("{}\n\n---\n💡 [Onboarding] {}", res.content, question);
+                }
+                // Advance onboarding step
+                sqlx::query("UPDATE users SET onboarding_step = onboarding_step + 1 WHERE id = ?")
+                    .bind(&user.id).execute(pool).await.ok();
+            }
+
             let ai_client_clone = state.ai_client.clone();
             let pool_clone = state.pool.clone();
             let user_id = user.id.clone();
             let msg_clone = message.clone();
-            let reply_clone = ai_reply.clone();
-            
+            let reply_clone = res.content.clone();
             tokio::spawn(async move {
-                if let Err(e) = OnboardingService::update_memory(&ai_client_clone, &pool_clone, &user_id, &msg_clone, &reply_clone).await {
-                    tracing::error!("Failed to update user memory: {}", e);
-                }
+                let _ = OnboardingService::update_memory(&ai_client_clone, &pool_clone, &user_id, &msg_clone, &reply_clone).await;
             });
 
-            ai_reply
+            res
         } else {
-            match OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name).await {
-                Ok(r) => r,
-                Err(e) => { tracing::error!("Failed to generate anonymous reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
-            }
+            OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email).await
+                .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0 })
         }
     } else {
-        match OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name).await {
-            Ok(r) => r,
-            Err(e) => { tracing::error!("Failed to generate anonymous reply: {}", e); "Sorry, I am having trouble connecting to my AI brain right now.".to_string() }
-        }
+        OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email).await
+            .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0 })
     };
 
-    // Record this AI reply in chat_logs (NULL email for anonymous)
+    // Record this AI reply in chat_logs
     let log_email = if email.is_empty() { None } else { Some(email.clone()) };
     sqlx::query("INSERT INTO chat_logs (user_email) VALUES (?)")
-        .bind(&log_email)
-        .execute(pool).await.ok();
+        .bind(&log_email).execute(pool).await.ok();
 
-    Json(serde_json::json!({ "reply": reply }))
+    Json(serde_json::json!({ 
+        "reply": chat_res.content, 
+        "total_tokens": chat_res.total_tokens,
+        "duration_ms": chat_res.duration_ms,
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    }))
 }
 
 #[derive(Serialize)]
@@ -242,12 +251,10 @@ struct MagicLinkRequest {
     email: String,
 }
 
-use lettre::message::Message;
-use lettre::transport::smtp::authentication::Credentials;
+use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
+use lettre::message::{Message, SinglePart};
 use lettre::{SmtpTransport, Transport};
-use lettre::message::SinglePart;
-use mail_send::SmtpClientBuilder;
-use mail_send::mail_builder::MessageBuilder;
+
 
 async fn post_magic_link(
     State(state): State<AppState>,
@@ -388,8 +395,9 @@ async fn post_magic_link(
                 Ok(email_msg) => {
                     // Direct SMTP: connect to MX on port 25, STARTTLS if available
                     match SmtpTransport::relay(&mx) {
-                        Ok(builder) => {
-                            match builder.port(25).build().send(&email_msg) {
+                        Ok(t_builder) => {
+                            let mailer = t_builder.port(25).build();
+                            match mailer.send(&email_msg) {
                                 Ok(_) => {
                                     tracing::info!("Direct MX delivery succeeded to {} via {}", email, mx);
                                     return Json(serde_json::json!({ "status": "success", "message": "Magic link sent via direct delivery (may be in spam)" }));
@@ -514,19 +522,42 @@ struct SettingsRequest {
     dry_run: bool,
     email_format: String,
     display_name: Option<String>,
+    assistant_name_zh: Option<String>,
+    assistant_name_en: Option<String>,
+    assistant_tone_zh: Option<String>,
+    assistant_tone_en: Option<String>,
+    pdf_passwords: Option<Vec<String>>,
 }
 
 async fn post_settings(
     State(state): State<AppState>,
     Json(payload): Json<SettingsRequest>,
 ) -> Json<serde_json::Value> {
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, display_name = ? WHERE email = ?")
+    let pdf_passwords_json = payload.pdf_passwords.as_ref().and_then(|v| serde_json::to_string(v).ok());
+    
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, display_name = ?, \
+                              assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
         .bind(&payload.display_name)
+        .bind(&payload.assistant_name_zh)
+        .bind(&payload.assistant_name_en)
+        .bind(&payload.assistant_tone_zh)
+        .bind(&payload.assistant_tone_en)
+        .bind(pdf_passwords_json)
         .bind(&payload.email)
         .execute(&state.pool).await;
+
+        
+    if result.is_ok() {
+        let user_id = &payload.email; // Using email as user_id for stats for now
+        let _ = OnboardingService::log_activity(&state.pool, user_id, "change_settings").await;
+        if payload.auto_reply { let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_auto_reply").await; }
+        if payload.dry_run { let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_dry_run").await; }
+    }
+
+
         
     match result {
         Ok(_) => Json(serde_json::json!({ "status": "success" })),

@@ -25,3 +25,4 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 samotop-delivery = "0.12"
 mail-send = "0.4"
+lopdf = "0.33"

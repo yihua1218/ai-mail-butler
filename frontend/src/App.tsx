@@ -176,6 +176,10 @@ const Settings: React.FC = () => {
         auto_reply: user.auto_reply,
         dry_run: user.dry_run,
         email_format: user.email_format,
+        assistant_name_zh: user.assistant_name_zh,
+        assistant_name_en: user.assistant_name_en,
+        assistant_tone_zh: user.assistant_tone_zh,
+        assistant_tone_en: user.assistant_tone_en,
       });
     } else {
       // Guest settings from localStorage
@@ -206,7 +210,7 @@ const Settings: React.FC = () => {
   };
 
   return (
-    <Card title="System Settings" bordered={false} style={{ maxWidth: 600, margin: '0 auto' }}>
+    <Card title="System Settings" bordered={false} style={{ maxWidth: 650, margin: '0 auto' }}>
       {!user && (
         <Alert 
           message="Guest Mode" 
@@ -217,11 +221,41 @@ const Settings: React.FC = () => {
         />
       )}
       <Form form={form} layout="vertical" onFinish={onFinish}>
-        <Form.Item name="display_name" label="Display Name (顯示名稱)" tooltip="How the AI assistant and system should call you.">
+        <Title level={5} style={{ marginBottom: 16 }}>Personal Info</Title>
+        <Form.Item name="display_name" label="Your Display Name (顯示名稱)" tooltip="How the AI assistant and system should call you.">
           <Input placeholder="e.g. Yihua, Master, etc." />
         </Form.Item>
+        
         {user && (
           <>
+            <Title level={5} style={{ margin: '24px 0 16px' }}>{t('assistant_identity')}</Title>
+            <Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 16 }}>{t('identity_desc')}</Paragraph>
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item name="assistant_name_zh" label={t('assistant_name_zh')}>
+                  <Input placeholder="e.g. 小管家" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item name="assistant_name_en" label={t('assistant_name_en')}>
+                  <Input placeholder="e.g. Butler" />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item name="assistant_tone_zh" label={t('assistant_tone_zh')} tooltip="設定中文回覆時的語氣，例如：專業、親切、簡短、幽默。">
+                  <Input placeholder="e.g. 專業且快速" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item name="assistant_tone_en" label={t('assistant_tone_en')} tooltip="Set the tone for English replies, e.g. professional, friendly, concise, witty.">
+                  <Input placeholder="e.g. witty and brief" />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            <Title level={5} style={{ margin: '24px 0 16px' }}>Processing Preferences</Title>
             <Form.Item name="dry_run" label="Dry Run Mode (試運行模式)" valuePropName="checked" tooltip="When enabled, AI replies are drafted and sent to your own email for review. When disabled, they are sent directly to the original sender.">
               <Switch />
             </Form.Item>
@@ -237,8 +271,8 @@ const Settings: React.FC = () => {
             </Form.Item>
           </>
         )}
-        <Form.Item>
-          <Button type="primary" htmlType="submit" loading={loading} icon={<SettingOutlined />}>
+        <Form.Item style={{ marginTop: 32 }}>
+          <Button type="primary" htmlType="submit" loading={loading} icon={<SettingOutlined />} block>
             Save Settings
           </Button>
         </Form.Item>

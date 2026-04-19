@@ -14,7 +14,11 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 
 - **Email forwarding detection & parsing**: Identifies the original user who forwarded the email.
 - **AI processing module**: English to Traditional Chinese translation, rule-based auto-reply.
-- **AI Chat Interface**: Converse directly with your email assistant via the Web UI. Anonymous visitors can also chat with the AI to learn about the system.
+- **AI Chat Interface**: Converse directly with your email assistant via the Web UI. Anonymous visitors can also chat with the AI to learn about the system. Features detailed chat stats (token count and generation speed).
+- **Long-term Memory**: The AI assistant maintains memory of past interactions to provide more personalized and context-aware responses.
+- **Interactive Onboarding**: New users are guided through a series of onboarding questions to set up their preferences and assistant identity.
+- **Custom AI Persona**: Users can define their assistant's Chinese and English names, as well as its reply tone (e.g., professional, friendly).
+- **Behavioral Analytics**: Automatically tracks user activity and repetitive questions to provide insights for assistant optimization.
 - **User configuration & onboarding**: Automated onboarding flow via email.
 - **Role-Based Access Control (RBAC)**: Supports Admin, User, and Anonymous roles with strict data isolation.
 - **Passwordless Authentication**: Magic link login via email (supports Plain Text & HTML Rich Text, bilingual).
@@ -44,10 +48,14 @@ cargo test
 ```
 
 ### Docker Deployment
-To build and run using Docker:
+Build and run in background using Docker Compose:
 ```bash
 docker-compose up --build -d
 ```
+
+Detailed Deployment Guides (including AWS EC2 implementation):
+- [Docker Deployment Guide (English)](DOCKER_AWS_GUIDE.md)
+- [Docker 部署指南 (繁體中文)](DOCKER_AWS_GUIDE.zh-TW.md)
 
 ## Cloudflare DNS Configuration (MX Records)
 

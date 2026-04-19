@@ -4,11 +4,12 @@ import { SendOutlined, RobotOutlined, UserOutlined, EditOutlined } from '@ant-de
 import axios from 'axios';
 import { useAuth } from './AuthContext';
 
-
-
 interface Message {
   sender: 'ai' | 'user';
   text: string;
+  timestamp?: string;
+  tokens?: number;
+  duration_ms?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,11 +139,11 @@ export const Chat: React.FC = () => {
       const name = user?.display_name || guestName;
       const greetingName = name ? `${name}!` : 'there!';
       if (!user) {
-        setMessages([{ sender: 'ai', text: `Hello ${greetingName} I am your AI Mail Butler assistant. Feel free to ask me anything about email management, or login to unlock personalised features.` }]);
+        setMessages([{ sender: 'ai', text: `Hello ${greetingName} I am your AI Mail Butler assistant. Feel free to ask me anything about email management, or login to unlock personalised features.`, timestamp: new Date().toISOString() }]);
       } else if (!user.is_onboarded) {
-        setMessages([{ sender: 'ai', text: `Welcome ${name || user.email}! I am your AI Mail Butler. I noticed you are new here. What kind of emails do you usually handle, and how would you like me to process them?` }]);
+        setMessages([{ sender: 'ai', text: `Welcome ${name || user.email}! I am your AI Mail Butler. I noticed you are new here. What kind of emails do you usually handle, and how would you like me to process them?`, timestamp: new Date().toISOString() }]);
       } else {
-        setMessages([{ sender: 'ai', text: `Welcome back ${name || user.email}! Your current preferences are: ${user.preferences || 'None'}. How can I assist you today?` }]);
+        setMessages([{ sender: 'ai', text: `Welcome back ${name || user.email}! Your current preferences are: ${user.preferences || 'None'}. How can I assist you today?`, timestamp: new Date().toISOString() }]);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -174,23 +175,32 @@ export const Chat: React.FC = () => {
     if (!input.trim()) return;
 
     const userMsg = input.trim();
-    setMessages(prev => [...prev, { sender: 'user', text: userMsg }]);
+    const now = new Date().toISOString();
+    setMessages(prev => [...prev, { sender: 'user', text: userMsg, timestamp: now }]);
     setInput('');
     setLoading(true);
 
     try {
-      // Pass guest_name to backend if user is anonymous (we can extend the API to accept it)
       const res = await axios.post('/api/chat', { 
         email: user?.email ?? '', 
         message: userMsg,
         guest_name: !user ? guestName : undefined
       });
-      setMessages(prev => [...prev, { sender: 'ai', text: res.data.reply }]);
+      
+      const aiMsg: Message = { 
+        sender: 'ai', 
+        text: res.data.reply,
+        timestamp: res.data.timestamp,
+        tokens: res.data.total_tokens,
+        duration_ms: res.data.duration_ms
+      };
+
+      setMessages(prev => [...prev, aiMsg]);
       if (user && !user.is_onboarded && res.data.reply.toLowerCase().includes('noted')) {
         refreshUser();
       }
     } catch {
-      setMessages(prev => [...prev, { sender: 'ai', text: 'Sorry, I encountered an error communicating with the server.' }]);
+      setMessages(prev => [...prev, { sender: 'ai', text: 'Sorry, I encountered an error communicating with the server.', timestamp: new Date().toISOString() }]);
     } finally {
       setLoading(false);
     }
@@ -201,8 +211,6 @@ export const Chat: React.FC = () => {
     setGuestName(tempName);
     setIsNameModalVisible(false);
   };
-
-
 
   const cardTitle = (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
@@ -234,45 +242,76 @@ export const Chat: React.FC = () => {
         <List
           itemLayout="horizontal"
           dataSource={messages}
-          renderItem={(msg) => (
-            <List.Item style={{ borderBottom: 'none', justifyContent: msg.sender === 'user' ? 'flex-end' : 'flex-start' }}>
-              <div style={{
-                display: 'flex',
-                flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row',
-                alignItems: 'flex-start',
-              }}>
-                {msg.sender === 'ai' ? (
-                  <Avatar
-                    icon={<RobotOutlined />}
-                    style={{ backgroundColor: '#0071e3', flexShrink: 0, marginRight: 12 }}
-                  />
-                ) : avatarUrl ? (
-                  <Avatar
-                    src={avatarUrl}
-                    style={{ flexShrink: 0, marginLeft: 12 }}
-                  />
-                ) : (
-                  <Avatar
-                    icon={<UserOutlined />}
-                    style={{ backgroundColor: '#34c759', flexShrink: 0, marginLeft: 12 }}
-                  />
-                )}
+          renderItem={(msg) => {
+            const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+            const speed = (msg.tokens && msg.duration_ms) ? (msg.tokens / (msg.duration_ms / 1000)).toFixed(1) : null;
+
+            return (
+              <List.Item style={{ borderBottom: 'none', justifyContent: msg.sender === 'user' ? 'flex-end' : 'flex-start', padding: '8px 0' }}>
                 <div style={{
-                  padding: '12px 16px',
-                  background: msg.sender === 'user' ? '#0071e3' : '#f5f5f7',
-                  color: msg.sender === 'user' ? '#fff' : '#1d1d1f',
-                  borderRadius: 16,
-                  borderTopRightRadius: msg.sender === 'user' ? 4 : 16,
-                  borderTopLeftRadius: msg.sender === 'ai' ? 4 : 16,
-                  maxWidth: '70vw',
+                  display: 'flex',
+                  flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row',
+                  alignItems: 'flex-start',
                 }}>
-                  <div style={{ fontSize: '14px' }}>
-                    <MessageContent text={msg.text} />
+                  {msg.sender === 'ai' ? (
+                    <Avatar
+                      icon={<RobotOutlined />}
+                      style={{ backgroundColor: '#0071e3', flexShrink: 0, marginRight: 12 }}
+                    />
+                  ) : avatarUrl ? (
+                    <Avatar
+                      src={avatarUrl}
+                      style={{ flexShrink: 0, marginLeft: 12 }}
+                    />
+                  ) : (
+                    <Avatar
+                      icon={<UserOutlined />}
+                      style={{ backgroundColor: '#34c759', flexShrink: 0, marginLeft: 12 }}
+                    />
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: msg.sender === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <div style={{
+                      padding: '12px 16px',
+                      background: msg.sender === 'user' ? '#0071e3' : '#f5f5f7',
+                      color: msg.sender === 'user' ? '#fff' : '#1d1d1f',
+                      borderRadius: 16,
+                      borderTopRightRadius: msg.sender === 'user' ? 4 : 16,
+                      borderTopLeftRadius: msg.sender === 'ai' ? 4 : 16,
+                      maxWidth: '70vw',
+                      boxShadow: '0 2px 6px rgba(0,0,0,0.05)',
+                    }}>
+                      <div style={{ fontSize: '14px' }}>
+                        <MessageContent text={msg.text} />
+                      </div>
+                    </div>
+                    
+                    <div style={{ 
+                      marginTop: 4, 
+                      fontSize: '10px', 
+                      color: '#86868b', 
+                      display: 'flex', 
+                      gap: '8px',
+                      padding: '0 4px'
+                    }}>
+                      <span>{timeStr}</span>
+                      {msg.sender === 'ai' && msg.tokens !== undefined && msg.tokens > 0 && (
+                        <>
+                          <span>•</span>
+                          <span>{msg.tokens} tokens</span>
+                          {speed && (
+                            <>
+                              <span>•</span>
+                              <span>{speed} t/s</span>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            </List.Item>
-          )}
+              </List.Item>
+            );
+          }}
         />
       </div>
       <div style={{ padding: '20px', borderTop: '1px solid #f0f0f0' }}>

@@ -18,6 +18,12 @@ const en = {
     format_both: "Both (HTML + Plain)",
     format_html: "HTML Only",
     format_plain: "Plain Text Only",
+    assistant_identity: "AI Assistant Identity",
+    assistant_name_zh: "Assistant Chinese Name",
+    assistant_name_en: "Assistant English Name",
+    assistant_tone_zh: "Chinese Reply Tone",
+    assistant_tone_en: "English Reply Tone",
+    identity_desc: "Customize how your AI assistant identifies itself and its speaking style."
   }
 };
 
@@ -38,6 +44,12 @@ const zhTW = {
     format_both: "雙格式 (HTML + 純文字)",
     format_html: "僅 HTML",
     format_plain: "僅純文字",
+    assistant_identity: "AI 助理身份定義",
+    assistant_name_zh: "助理中文名稱",
+    assistant_name_en: "助理英文名稱",
+    assistant_tone_zh: "中文回覆語氣",
+    assistant_tone_en: "英文回覆語氣",
+    identity_desc: "自訂 AI 助理的自我介紹名稱與說話風格。"
   }
 };
 

@@ -17,6 +17,13 @@ pub struct User {
     #[serde(default = "default_both")]
     pub email_format: String,
     pub display_name: Option<String>,
+    pub assistant_name_zh: Option<String>,
+    pub assistant_name_en: Option<String>,
+    pub assistant_tone_zh: Option<String>,
+    pub assistant_tone_en: Option<String>,
+    #[serde(default)]
+    pub onboarding_step: i32,
+    pub pdf_passwords: Option<String>,
 }
 
 fn default_both() -> String { "both".to_string() }

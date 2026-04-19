@@ -25,6 +25,25 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN display_name TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN role TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN email_format TEXT NOT NULL DEFAULT 'both'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_name_zh TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_name_en TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_zh TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_en TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN onboarding_step INTEGER NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN pdf_passwords TEXT").execute(&pool).await;
+
+    // Table for tracking repetitive behaviors/questions for analytics
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user_activity_stats (
+            user_id TEXT NOT NULL,
+            activity_key TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 1,
+            last_occurred DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(user_id, activity_key)
+        );"
+    )
+    .execute(&pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS emails (
