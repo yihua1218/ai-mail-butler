@@ -1,10 +1,25 @@
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
 use anyhow::Result;
+use std::str::FromStr;
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool> {
+    // Ensure the parent directory exists before SQLite tries to create the file.
+    // Strips the "sqlite:" prefix to get the file path.
+    let file_path = database_url
+        .trim_start_matches("sqlite:")
+        .trim_start_matches("//");
+    if let Some(parent) = std::path::Path::new(file_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let options = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(database_url)
+        .connect_with(options)
         .await?;
 
     sqlx::query(
