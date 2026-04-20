@@ -1,0 +1,6 @@
+[future-incompat-report]
+# nom v6.1.2 (pulled in by samotop-delivery) triggers a trailing-semicolon-in-macro
+# future-incompatibility lint. The warning is in third-party code we cannot directly
+# upgrade (nom 6.2.x has a memchr version conflict with samotop). Suppress the report
+# until samotop is updated to use nom 7+.
+frequency = "never"

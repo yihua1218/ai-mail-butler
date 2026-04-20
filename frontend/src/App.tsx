@@ -165,6 +165,7 @@ const Dashboard: React.FC = () => {
 };
 
 const Settings: React.FC = () => {
+  const { t } = useTranslation();
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
@@ -280,9 +281,6 @@ const Settings: React.FC = () => {
     </Card>
   );
 };
-
-// ... Alert import missing below, adding it to antd imports above
-import { Alert } from 'antd';
 
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();

@@ -10,6 +10,11 @@ export interface User {
   auto_reply: boolean;
   dry_run: boolean;
   display_name: string | null;
+  email_format: string | null;
+  assistant_name_zh: string | null;
+  assistant_name_en: string | null;
+  assistant_tone_zh: string | null;
+  assistant_tone_en: string | null;
 }
 
 interface AuthContextType {
