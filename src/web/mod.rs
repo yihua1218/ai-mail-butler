@@ -348,6 +348,14 @@ struct ChatRequest {
     guest_name: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ChatFeedbackRequest {
+    email: Option<String>,
+    ai_reply: String,
+    rating: String,
+    suggestion: Option<String>,
+}
+
 async fn post_chat(
     State(state): State<AppState>,
     Json(payload): Json<ChatRequest>,
@@ -430,6 +438,52 @@ async fn post_chat(
         "finish_reason": chat_res.finish_reason,
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
+}
+
+async fn post_chat_feedback(
+    State(state): State<AppState>,
+    Json(payload): Json<ChatFeedbackRequest>,
+) -> Json<serde_json::Value> {
+    let rating = payload.rating.trim().to_ascii_lowercase();
+    if rating != "up" && rating != "down" {
+        return Json(serde_json::json!({ "status": "error", "message": "Invalid rating" }));
+    }
+
+    let ai_reply = payload.ai_reply.trim();
+    if ai_reply.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing ai_reply" }));
+    }
+
+    let normalized_email = payload
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase());
+    let suggestion = payload
+        .suggestion
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+
+    let result = sqlx::query(
+        "INSERT INTO chat_feedback (user_email, ai_reply, rating, suggestion) VALUES (?, ?, ?, ?)"
+    )
+    .bind(normalized_email)
+    .bind(ai_reply)
+    .bind(rating)
+    .bind(suggestion)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Err(e) => {
+            tracing::error!("Failed to save chat feedback: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Save failed" }))
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -725,6 +779,100 @@ fn parse_mx_records(output: &str) -> Option<String> {
 
     records.sort_by_key(|(p, _)| *p);
     records.into_iter().next().map(|(_, host)| host)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_email_rule_detects_common_intents() {
+        assert!(looks_like_email_rule("請幫我把帳單通知都轉寄並提醒我"));
+        assert!(looks_like_email_rule("When I receive invoice emails, remind me to reply quickly"));
+        assert!(!looks_like_email_rule("hi"));
+        assert!(!looks_like_email_rule("just browsing this dashboard"));
+    }
+
+    #[test]
+    fn sanitize_path_component_normalizes_unsafe_chars() {
+        assert_eq!(sanitize_path_component("A/B C?.txt"), "A_B_C_.txt");
+        assert_eq!(sanitize_path_component("<>") , "__");
+    }
+
+    #[test]
+    fn parse_mx_records_returns_highest_priority_host() {
+        let output = "20 alt2.gmail-smtp-in.l.google.com.\n5 alt1.gmail-smtp-in.l.google.com.\n";
+        assert_eq!(
+            parse_mx_records(output),
+            Some("alt1.gmail-smtp-in.l.google.com".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_mx_records_ignores_invalid_rows() {
+        let output = "invalid line\nabc mail.example.com.\n";
+        assert_eq!(parse_mx_records(output), None);
+    }
+
+    #[tokio::test]
+    async fn capture_rule_from_chat_inserts_once_and_deduplicates() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("create in-memory db");
+
+        sqlx::query(
+            "CREATE TABLE email_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                rule_text TEXT NOT NULL,
+                source TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("create email_rules");
+
+        let user_id = "u1";
+        let msg = "forward invoices to me and remind me";
+        capture_rule_from_chat(&pool, user_id, msg).await;
+        capture_rule_from_chat(&pool, user_id, msg).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn capture_rule_from_chat_skips_non_rule_messages() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("create in-memory db");
+
+        sqlx::query(
+            "CREATE TABLE email_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                rule_text TEXT NOT NULL,
+                source TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL
+            )"
+        )
+        .execute(&pool)
+        .await
+        .expect("create email_rules");
+
+        capture_rule_from_chat(&pool, "u1", "hello there").await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules")
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+        assert_eq!(count, 0);
+    }
 }
 
 #[derive(Deserialize)]
@@ -1286,6 +1434,7 @@ async fn post_confirm_data_deletion(
     let _ = sqlx::query("DELETE FROM user_activity_stats WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
     let _ = sqlx::query("DELETE FROM mail_errors WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
     let _ = sqlx::query("DELETE FROM chat_logs WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM chat_feedback WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
     let _ = sqlx::query("UPDATE data_deletion_requests SET status = 'finalized', finalized_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(&row.id)
         .execute(&mut *tx)
@@ -1322,7 +1471,8 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
-        .route("/chat", post(post_chat));
+        .route("/chat", post(post_chat))
+        .route("/chat/feedback", post(post_chat_feedback));
 
     let app = Router::new()
         .nest("/api", api_router)

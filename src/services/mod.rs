@@ -158,3 +158,48 @@ IMPORTANT: Detect the language of the user's message. Default to Traditional Chi
         client.chat(&system_prompt, current_message).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::User;
+
+    #[test]
+    fn extract_pdf_text_returns_error_for_invalid_bytes() {
+        let bad_pdf = b"this is not a pdf";
+        let err = OnboardingService::extract_pdf_text(bad_pdf, &[]).unwrap_err();
+        assert!(err.to_string().contains("Failed to load PDF"));
+    }
+
+    #[tokio::test]
+    async fn onboarding_question_progression_is_correct() {
+        let mut user = User {
+            id: "u1".to_string(),
+            email: "u1@example.com".to_string(),
+            is_onboarded: false,
+            preferences: None,
+            magic_token: None,
+            role: "user".to_string(),
+            auto_reply: false,
+            dry_run: true,
+            email_format: "both".to_string(),
+            display_name: None,
+            onboarding_step: 0,
+            assistant_name_zh: None,
+            assistant_name_en: None,
+            assistant_tone_zh: None,
+            assistant_tone_en: None,
+            pdf_passwords: None,
+            timezone: "UTC".to_string(),
+            preferred_language: "zh-TW".to_string(),
+        };
+
+        assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
+        user.onboarding_step = 1;
+        assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
+        user.onboarding_step = 2;
+        assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
+        user.onboarding_step = 3;
+        assert!(OnboardingService::get_next_onboarding_question(&user).await.is_none());
+    }
+}

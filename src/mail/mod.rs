@@ -151,6 +151,81 @@ fn infer_attachment_filename(part: &mailparse::ParsedMail<'_>, index: usize) -> 
     format!("attachment_{index:02}.{ext}")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_email_address_handles_common_formats() {
+        assert_eq!(
+            first_email_address("Alice <Alice.Example+Tag@Example.COM>"),
+            Some("alice.example+tag@example.com".to_string())
+        );
+        assert_eq!(
+            first_email_address("<bob@example.com>"),
+            Some("bob@example.com".to_string())
+        );
+        assert_eq!(first_email_address("no-at-symbol"), None);
+    }
+
+    #[test]
+    fn sanitize_path_component_replaces_unsafe_chars() {
+        assert_eq!(sanitize_path_component("a/b c:?.pdf"), "a_b_c__.pdf");
+        assert_eq!(sanitize_path_component("***"), "___");
+    }
+
+    #[test]
+    fn extension_from_mime_maps_known_types() {
+        assert_eq!(extension_from_mime("application/pdf"), "pdf");
+        assert_eq!(extension_from_mime("text/html"), "html");
+        assert_eq!(extension_from_mime("application/unknown"), "bin");
+    }
+
+    #[test]
+    fn attachment_and_inline_part_collection_work() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "To: assistant@example.com\r\n",
+            "Subject: test\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=\"b\"\r\n",
+            "\r\n",
+            "--b\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "hello\r\n",
+            "--b\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>hello</p>\r\n",
+            "--b\r\n",
+            "Content-Type: application/pdf; name=\"r/eport.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"r/eport.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "SGVsbG8=\r\n",
+            "--b--\r\n"
+        );
+
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("parse mail");
+
+        let mut attachments = Vec::new();
+        collect_attachment_parts(&parsed, &mut attachments);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(infer_attachment_filename(attachments[0], 1), "r_eport.pdf");
+
+        let mut inline_parts = Vec::new();
+        collect_inline_text_parts(&parsed, &mut inline_parts);
+        assert_eq!(inline_parts.len(), 2);
+        assert!(inline_parts
+            .iter()
+            .any(|p| p.ctype.mimetype.eq_ignore_ascii_case("text/plain")));
+        assert!(inline_parts
+            .iter()
+            .any(|p| p.ctype.mimetype.eq_ignore_ascii_case("text/html")));
+    }
+}
+
 async fn log_mail_event(
     pool: &SqlitePool,
     level: &str,

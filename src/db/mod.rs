@@ -103,6 +103,20 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // User feedback for AI replies, including optional improvement suggestions.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS chat_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_email TEXT,
+            ai_reply TEXT NOT NULL,
+            rating TEXT NOT NULL,
+            suggestion TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
     // User long-term memory for AI personalization
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS user_memories (

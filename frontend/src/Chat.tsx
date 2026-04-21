@@ -1,19 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Card, Input, Button, List, Avatar, Tag, Modal, Space, Tooltip } from 'antd';
+import { Card, Input, Button, List, Avatar, Tag, Modal, Space, Tooltip, message as antdMessage } from 'antd';
 import { 
   SendOutlined, RobotOutlined, UserOutlined, EditOutlined, 
-  BulbOutlined, DashboardOutlined, FieldBinaryOutlined, ClockCircleOutlined 
+  BulbOutlined, DashboardOutlined, FieldBinaryOutlined, ClockCircleOutlined,
+  LikeOutlined, DislikeOutlined
 } from '@ant-design/icons';
 import axios from 'axios';
 import { useAuth } from './AuthContext';
 
 interface Message {
+  id: string;
   sender: 'ai' | 'user';
   text: string;
   timestamp?: string;
   tokens?: number;
   duration_ms?: number;
   finish_reason?: string;
+  feedback?: 'up' | 'down';
+  feedback_submitted?: boolean;
   debug?: any; // raw API response for debugging
 }
 
@@ -107,10 +111,17 @@ function getStorageKey(email: string | undefined): string {
   return STORAGE_KEY_PREFIX + (email ?? 'anonymous');
 }
 
+function createMessageId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function loadMessages(email: string | undefined): Message[] {
   try {
     const raw = localStorage.getItem(getStorageKey(email));
-    if (raw) return JSON.parse(raw) as Message[];
+    if (raw) {
+      const parsed = JSON.parse(raw) as Message[];
+      return parsed.map((m) => ({ ...m, id: m.id || createMessageId() }));
+    }
   } catch { /* ignore */ }
   return [];
 }
@@ -133,6 +144,10 @@ export const Chat: React.FC = () => {
   const [guestName, setGuestName] = useState<string>(() => localStorage.getItem(GUEST_NAME_KEY) || '');
   const [isNameModalVisible, setIsNameModalVisible] = useState(false);
   const [tempName, setTempName] = useState(guestName);
+  const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
+  const [feedbackMessageId, setFeedbackMessageId] = useState<string | null>(null);
+  const [feedbackSuggestion, setFeedbackSuggestion] = useState('');
+  const [submittingFeedback, setSubmittingFeedback] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Load messages from localStorage when user identity changes
@@ -144,11 +159,11 @@ export const Chat: React.FC = () => {
       const name = user?.display_name || guestName;
       const greetingName = name ? `${name}!` : 'there!';
       if (!user) {
-        setMessages([{ sender: 'ai', text: `Hello ${greetingName} I am your AI Mail Butler assistant. Feel free to ask me anything about email management, or login to unlock personalised features.`, timestamp: new Date().toISOString() }]);
+        setMessages([{ id: createMessageId(), sender: 'ai', text: `Hello ${greetingName} I am your AI Mail Butler assistant. Feel free to ask me anything about email management, or login to unlock personalised features.`, timestamp: new Date().toISOString() }]);
       } else if (!user.is_onboarded) {
-        setMessages([{ sender: 'ai', text: `Welcome ${name || user.email}! I am your AI Mail Butler. I noticed you are new here. What kind of emails do you usually handle, and how would you like me to process them?`, timestamp: new Date().toISOString() }]);
+        setMessages([{ id: createMessageId(), sender: 'ai', text: `Welcome ${name || user.email}! I am your AI Mail Butler. I noticed you are new here. What kind of emails do you usually handle, and how would you like me to process them?`, timestamp: new Date().toISOString() }]);
       } else {
-        setMessages([{ sender: 'ai', text: `Welcome back ${name || user.email}! Your current preferences are: ${user.preferences || 'None'}. How can I assist you today?`, timestamp: new Date().toISOString() }]);
+        setMessages([{ id: createMessageId(), sender: 'ai', text: `Welcome back ${name || user.email}! Your current preferences are: ${user.preferences || 'None'}. How can I assist you today?`, timestamp: new Date().toISOString() }]);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -181,7 +196,7 @@ export const Chat: React.FC = () => {
 
     const userMsg = input.trim();
     const now = new Date().toISOString();
-    setMessages(prev => [...prev, { sender: 'user', text: userMsg, timestamp: now }]);
+    setMessages(prev => [...prev, { id: createMessageId(), sender: 'user', text: userMsg, timestamp: now }]);
     setInput('');
     setLoading(true);
 
@@ -193,6 +208,7 @@ export const Chat: React.FC = () => {
       });
       
       const aiMsg: Message = { 
+        id: createMessageId(),
         sender: 'ai', 
         text: res.data.reply,
         timestamp: res.data.timestamp || new Date().toISOString(),
@@ -207,11 +223,70 @@ export const Chat: React.FC = () => {
         refreshUser();
       }
     } catch {
-      setMessages(prev => [...prev, { sender: 'ai', text: 'Sorry, I encountered an error communicating with the server.', timestamp: new Date().toISOString() }]);
+      setMessages(prev => [...prev, { id: createMessageId(), sender: 'ai', text: 'Sorry, I encountered an error communicating with the server.', timestamp: new Date().toISOString() }]);
     } finally {
       setLoading(false);
     }
   }, [input, user, guestName, refreshUser]);
+
+  const submitFeedback = useCallback(async (target: Message, rating: 'up' | 'down', suggestion?: string) => {
+    try {
+      await axios.post('/api/chat/feedback', {
+        email: user?.email,
+        ai_reply: target.text,
+        rating,
+        suggestion,
+      });
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === target.id ? { ...m, feedback: rating, feedback_submitted: true } : m
+        )
+      );
+      antdMessage.success(rating === 'up' ? '感謝你的肯定回饋！' : '已收到，我會持續改進。');
+    } catch {
+      antdMessage.error('回饋送出失敗，請稍後再試。');
+    }
+  }, [user?.email]);
+
+  const onFeedbackClick = useCallback((target: Message, rating: 'up' | 'down') => {
+    if (target.feedback_submitted) return;
+    if (rating === 'up') {
+      submitFeedback(target, 'up');
+      return;
+    }
+
+    setFeedbackMessageId(target.id);
+    setFeedbackSuggestion('');
+    setFeedbackModalOpen(true);
+  }, [submitFeedback]);
+
+  const handleSubmitDownFeedback = useCallback(async () => {
+    const target = messages.find((m) => m.id === feedbackMessageId && m.sender === 'ai');
+    if (!target) {
+      setFeedbackModalOpen(false);
+      return;
+    }
+    setSubmittingFeedback(true);
+    await submitFeedback(target, 'down', feedbackSuggestion.trim() || undefined);
+    setSubmittingFeedback(false);
+    setFeedbackModalOpen(false);
+    setFeedbackMessageId(null);
+    setFeedbackSuggestion('');
+  }, [feedbackMessageId, feedbackSuggestion, messages, submitFeedback]);
+
+  const handleSkipSuggestion = useCallback(async () => {
+    const target = messages.find((m) => m.id === feedbackMessageId && m.sender === 'ai');
+    if (!target) {
+      setFeedbackModalOpen(false);
+      return;
+    }
+    setSubmittingFeedback(true);
+    await submitFeedback(target, 'down');
+    setSubmittingFeedback(false);
+    setFeedbackModalOpen(false);
+    setFeedbackMessageId(null);
+    setFeedbackSuggestion('');
+  }, [feedbackMessageId, messages, submitFeedback]);
 
   const saveGuestName = () => {
     localStorage.setItem(GUEST_NAME_KEY, tempName);
@@ -339,6 +414,27 @@ export const Chat: React.FC = () => {
                                 Stop reason: {msg.finish_reason}
                               </Tag>
                             )}
+                            <Space size={4}>
+                              <Button
+                                type={msg.feedback === 'up' ? 'primary' : 'text'}
+                                size="small"
+                                icon={<LikeOutlined />}
+                                disabled={!!msg.feedback_submitted}
+                                onClick={() => onFeedbackClick(msg, 'up')}
+                              >
+                                👍
+                              </Button>
+                              <Button
+                                type={msg.feedback === 'down' ? 'primary' : 'text'}
+                                danger={msg.feedback === 'down'}
+                                size="small"
+                                icon={<DislikeOutlined />}
+                                disabled={!!msg.feedback_submitted}
+                                onClick={() => onFeedbackClick(msg, 'down')}
+                              >
+                                👎
+                              </Button>
+                            </Space>
                           </>
                         )}
                       </div>
@@ -379,6 +475,33 @@ export const Chat: React.FC = () => {
         <p style={{ marginTop: 12, color: '#86868b', fontSize: '12px' }}>
           This will be stored in your browser so I can address you by name.
         </p>
+      </Modal>
+
+      <Modal
+        title="這則回覆不理想嗎？"
+        open={feedbackModalOpen}
+        onCancel={handleSkipSuggestion}
+        footer={[
+          <Button key="skip" onClick={handleSkipSuggestion} disabled={submittingFeedback}>
+            略過建議，直接送出 👎
+          </Button>,
+          <Button
+            key="submit"
+            type="primary"
+            loading={submittingFeedback}
+            onClick={handleSubmitDownFeedback}
+          >
+            送出改善建議
+          </Button>
+        ]}
+      >
+        <p style={{ marginBottom: 10 }}>是否要補充你期待的回答方向？</p>
+        <Input.TextArea
+          rows={4}
+          value={feedbackSuggestion}
+          onChange={(e) => setFeedbackSuggestion(e.target.value)}
+          placeholder="例如：希望更精簡、要先列重點、語氣改成更正式..."
+        />
       </Modal>
     </Card>
   );
