@@ -36,6 +36,7 @@ const KEY_TO_PATH: Record<string, string> = {
 const Dashboard: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
+  const isPrivileged = user?.role === 'admin' || user?.role === 'developer';
   const defaultRecentFrom = (days: number = 1) => {
     const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const year = d.getFullYear();
@@ -55,6 +56,54 @@ const Dashboard: React.FC = () => {
   const [logKeyword, setLogKeyword] = useState<string>('');
   const [logTimeFrom, setLogTimeFrom] = useState<string>(defaultRecentFrom());
   const [logTimeTo, setLogTimeTo] = useState<string>('');
+  const [feedbackRows, setFeedbackRows] = useState<any[]>([]);
+  const [replyingFeedback, setReplyingFeedback] = useState<any | null>(null);
+  const [replyText, setReplyText] = useState<string>('');
+  const [replying, setReplying] = useState(false);
+
+  const loadFeedback = async () => {
+    if (!user?.email) return;
+    try {
+      const res = await axios.get(`/api/feedback?email=${encodeURIComponent(user.email)}`);
+      setFeedbackRows(res.data.feedback || []);
+    } catch {
+      setFeedbackRows([]);
+    }
+  };
+
+  const markFeedbackRead = async (feedbackId: number, isRead: boolean) => {
+    if (!user?.email || !isPrivileged) return;
+    try {
+      await axios.post('/api/feedback/mark-read', {
+        email: user.email,
+        feedback_id: feedbackId,
+        is_read: isRead,
+      });
+      loadFeedback();
+    } catch {
+      message.error('Failed to update feedback read state.');
+    }
+  };
+
+  const submitFeedbackReply = async () => {
+    if (!user?.email || !replyingFeedback || !replyText.trim()) return;
+    setReplying(true);
+    try {
+      await axios.post('/api/feedback/reply', {
+        email: user.email,
+        feedback_id: replyingFeedback.id,
+        reply_message: replyText.trim(),
+      });
+      message.success('Reply sent as AI assistant.');
+      setReplyingFeedback(null);
+      setReplyText('');
+      loadFeedback();
+    } catch {
+      message.error('Failed to send feedback reply.');
+    } finally {
+      setReplying(false);
+    }
+  };
 
   useEffect(() => {
     const url = user ? `/api/dashboard?email=${user.email}` : `/api/dashboard`;
@@ -68,7 +117,7 @@ const Dashboard: React.FC = () => {
         setPersonalStats(res.data.personal_stats);
       }
     });
-    if (user?.role === 'admin') {
+    if (isPrivileged) {
       axios.get(`/api/admin/errors?email=${user.email}`).then(res => {
         setMailErrors(res.data.errors || []);
       }).catch(() => {});
@@ -77,7 +126,8 @@ const Dashboard: React.FC = () => {
         setMailErrors(res.data.errors || []);
       }).catch(() => {});
     }
-  }, [user]);
+    loadFeedback();
+  }, [user, isPrivileged]);
 
   const GlobalStatsDisplay = () => (
     globalStats ? (
@@ -308,11 +358,70 @@ const Dashboard: React.FC = () => {
     </div>
   );
 
-  if (user?.role === 'admin') {
+  const feedbackColumns = [
+    ...(isPrivileged ? [{ title: 'User', dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' }] : []),
+    {
+      title: 'Rating',
+      dataIndex: 'rating',
+      key: 'rating',
+      width: 90,
+      render: (v: string) => <Tag color={v === 'up' ? 'green' : 'volcano'}>{v === 'up' ? '👍' : '👎'}</Tag>,
+    },
+    {
+      title: 'Suggestion',
+      dataIndex: 'suggestion',
+      key: 'suggestion',
+      render: (v: string) => v || '-',
+    },
+    {
+      title: 'Read',
+      dataIndex: 'is_read',
+      key: 'is_read',
+      width: 100,
+      render: (v: boolean) => <Tag color={v ? 'green' : 'orange'}>{v ? 'Read' : 'Unread'}</Tag>,
+    },
+    {
+      title: 'AI Reply',
+      dataIndex: 'admin_reply',
+      key: 'admin_reply',
+      render: (v: string) => v || '-',
+    },
+    {
+      title: 'Time',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 170,
+    },
+    ...(isPrivileged ? [{
+      title: 'Action',
+      key: 'action',
+      width: 260,
+      render: (_: unknown, record: any) => (
+        <Space>
+          <Button size="small" onClick={() => markFeedbackRead(record.id, !record.is_read)}>
+            {record.is_read ? 'Mark Unread' : 'Mark Read'}
+          </Button>
+          <Button
+            size="small"
+            type="primary"
+            disabled={!record.user_email}
+            onClick={() => {
+              setReplyingFeedback(record);
+              setReplyText(record.admin_reply || '');
+            }}
+          >
+            Reply as AI
+          </Button>
+        </Space>
+      ),
+    }] : []),
+  ];
+
+  if (isPrivileged) {
     return (
       <div>
         <div style={{ marginBottom: 32 }}>
-          <Title level={2}>{t('welcome')}, Admin ({user.display_name || user.email})</Title>
+          <Title level={2}>{t('welcome')}, {user?.role === 'developer' ? 'Developer' : 'Admin'} ({user?.display_name || user?.email})</Title>
         </div>
         <GlobalStatsDisplay />
         <PersonalStatsDisplay />
@@ -339,7 +448,30 @@ const Dashboard: React.FC = () => {
                 : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 10 }} size="small" />}
             </Card>
           </Col>
+          <Col xs={24}>
+            <Card bordered={false} title="User Feedback Suggestions">
+              <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} pagination={{ pageSize: 8 }} size="small" />
+            </Card>
+          </Col>
         </Row>
+
+        <Modal
+          title="Reply to Feedback (sent as AI assistant)"
+          open={!!replyingFeedback}
+          onCancel={() => {
+            setReplyingFeedback(null);
+            setReplyText('');
+          }}
+          onOk={submitFeedbackReply}
+          confirmLoading={replying}
+        >
+          <Input.TextArea
+            rows={5}
+            value={replyText}
+            onChange={(e) => setReplyText(e.target.value)}
+            placeholder="Type reply that will be emailed to the user from AI assistant mailbox"
+          />
+        </Modal>
       </div>
     );
   }
@@ -360,6 +492,11 @@ const Dashboard: React.FC = () => {
           {mailErrors.length === 0
             ? <Alert message="No logs related to your account." type="success" showIcon />
             : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 8 }} size="small" />}
+        </Card>
+        <Card bordered={false} title="Your Feedback Suggestions" style={{ marginTop: 24 }}>
+          {feedbackRows.length === 0
+            ? <Alert message="No feedback submitted yet." type="info" showIcon />
+            : <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} pagination={{ pageSize: 8 }} size="small" />}
         </Card>
       </div>
     );

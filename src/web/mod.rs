@@ -41,6 +41,21 @@ struct EmailRule {
     updated_at: Option<String>,
 }
 
+#[derive(sqlx::FromRow, Serialize)]
+struct ChatFeedback {
+    id: i64,
+    user_email: Option<String>,
+    ai_reply: String,
+    rating: String,
+    suggestion: Option<String>,
+    is_read: bool,
+    read_at: Option<String>,
+    admin_reply: Option<String>,
+    replied_at: Option<String>,
+    replied_by: Option<String>,
+    created_at: String,
+}
+
 async fn log_mail_event(
     pool: &SqlitePool,
     level: &str,
@@ -238,7 +253,22 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub ai_client: AiClient,
     pub admin_email: Option<String>,
+    pub developer_email: Option<String>,
     pub config: std::sync::Arc<crate::config::Config>,
+}
+
+fn is_admin_or_developer(state: &AppState, email: &str) -> bool {
+    Some(email) == state.admin_email.as_deref() || Some(email) == state.developer_email.as_deref()
+}
+
+fn role_for_email(state: &AppState, email: &str) -> String {
+    if Some(email) == state.admin_email.as_deref() {
+        "admin".to_string()
+    } else if Some(email) == state.developer_email.as_deref() {
+        "developer".to_string()
+    } else {
+        "user".to_string()
+    }
 }
 
 #[derive(Deserialize)]
@@ -254,7 +284,7 @@ async fn get_me(
         if email.is_empty() { return Json(None); }
         
         // Use UPSERT logic or separate check to handle concurrency/re-registrations
-        let role = if Some(&email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
+        let role = role_for_email(&state, &email);
         let new_id = uuid::Uuid::new_v4().to_string();
         
         let _ = sqlx::query("INSERT OR IGNORE INTO users (id, email) VALUES (?, ?)")
@@ -296,7 +326,7 @@ async fn get_dashboard(
     
     if let Some(email) = query.email {
         if !email.is_empty() {
-            let is_admin = Some(&email) == state.admin_email.as_ref();
+            let is_admin = is_admin_or_developer(&state, &email);
             
             let user_id: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
                 .bind(&email)
@@ -468,9 +498,9 @@ async fn post_chat_feedback(
         .map(|v| v.to_string());
 
     let result = sqlx::query(
-        "INSERT INTO chat_feedback (user_email, ai_reply, rating, suggestion) VALUES (?, ?, ?, ?)"
+        "INSERT INTO chat_feedback (user_email, ai_reply, rating, suggestion, is_read) VALUES (?, ?, ?, ?, 0)"
     )
-    .bind(normalized_email)
+    .bind(normalized_email.clone())
     .bind(ai_reply)
     .bind(rating)
     .bind(suggestion)
@@ -478,12 +508,178 @@ async fn post_chat_feedback(
     .await;
 
     match result {
-        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Ok(_) => {
+            if let Some(admin_email) = state.admin_email.clone() {
+                let preview = if ai_reply.chars().count() > 240 {
+                    format!("{}...", ai_reply.chars().take(240).collect::<String>())
+                } else {
+                    ai_reply.to_string()
+                };
+                let suggestion_text = payload.suggestion
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("(none)");
+                let sender = normalized_email.as_deref().unwrap_or("anonymous");
+                let subject = format!("[AI Mail Butler] New feedback from {}", sender);
+                let text_body = format!(
+                    "A new feedback was submitted.\n\nFrom: {}\nRating: {}\nSuggestion: {}\n\nAI Reply Preview:\n{}\n",
+                    sender,
+                    payload.rating,
+                    suggestion_text,
+                    preview
+                );
+                let html_body = format!(
+                    "<h3>New feedback submitted</h3><p><strong>From:</strong> {}</p><p><strong>Rating:</strong> {}</p><p><strong>Suggestion:</strong> {}</p><p><strong>AI Reply Preview:</strong><br/>{}</p>",
+                    sender,
+                    payload.rating,
+                    suggestion_text,
+                    preview.replace('\n', "<br/>")
+                );
+                let _ = send_system_email_as_assistant(&state, &admin_email, &subject, &text_body, &html_body).await;
+            }
+            Json(serde_json::json!({ "status": "success" }))
+        }
         Err(e) => {
             tracing::error!("Failed to save chat feedback: {}", e);
             Json(serde_json::json!({ "status": "error", "message": "Save failed" }))
         }
     }
+}
+
+async fn get_feedback(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+    if email.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    }
+
+    let is_privileged = is_admin_or_developer(&state, &email);
+    let feedback = if is_privileged {
+        sqlx::query_as::<_, ChatFeedback>(
+            "SELECT id, user_email, ai_reply, rating, suggestion, is_read, CAST(read_at AS TEXT) as read_at, admin_reply, CAST(replied_at AS TEXT) as replied_at, replied_by, CAST(created_at AS TEXT) as created_at \
+             FROM chat_feedback ORDER BY created_at DESC LIMIT 500"
+        )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query_as::<_, ChatFeedback>(
+            "SELECT id, user_email, ai_reply, rating, suggestion, is_read, CAST(read_at AS TEXT) as read_at, admin_reply, CAST(replied_at AS TEXT) as replied_at, replied_by, CAST(created_at AS TEXT) as created_at \
+             FROM chat_feedback WHERE lower(user_email) = lower(?) ORDER BY created_at DESC LIMIT 500"
+        )
+        .bind(email)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    Json(serde_json::json!({ "status": "success", "feedback": feedback }))
+}
+
+#[derive(Deserialize)]
+struct MarkFeedbackReadRequest {
+    email: String,
+    feedback_id: i64,
+    is_read: bool,
+}
+
+async fn post_mark_feedback_read(
+    State(state): State<AppState>,
+    Json(payload): Json<MarkFeedbackReadRequest>,
+) -> Json<serde_json::Value> {
+    if !is_admin_or_developer(&state, &payload.email) {
+        return Json(serde_json::json!({ "status": "error", "message": "Unauthorized" }));
+    }
+
+    let result = if payload.is_read {
+        sqlx::query("UPDATE chat_feedback SET is_read = 1, read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE id = ?")
+            .bind(payload.feedback_id)
+            .execute(&state.pool)
+            .await
+    } else {
+        sqlx::query("UPDATE chat_feedback SET is_read = 0, read_at = NULL WHERE id = ?")
+            .bind(payload.feedback_id)
+            .execute(&state.pool)
+            .await
+    };
+
+    match result {
+        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Err(e) => {
+            tracing::error!("Failed to update feedback read state: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Update failed" }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ReplyFeedbackRequest {
+    email: String,
+    feedback_id: i64,
+    reply_message: String,
+}
+
+async fn post_reply_feedback(
+    State(state): State<AppState>,
+    Json(payload): Json<ReplyFeedbackRequest>,
+) -> Json<serde_json::Value> {
+    if !is_admin_or_developer(&state, &payload.email) {
+        return Json(serde_json::json!({ "status": "error", "message": "Unauthorized" }));
+    }
+
+    let reply_message = payload.reply_message.trim();
+    if reply_message.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Reply cannot be empty" }));
+    }
+
+    let feedback_target: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT user_email, suggestion FROM chat_feedback WHERE id = ?"
+    )
+    .bind(payload.feedback_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some((user_email_opt, suggestion_opt)) = feedback_target else {
+        return Json(serde_json::json!({ "status": "error", "message": "Feedback not found" }));
+    };
+
+    let result = sqlx::query(
+        "UPDATE chat_feedback SET admin_reply = ?, replied_at = CURRENT_TIMESTAMP, replied_by = ?, is_read = 1, read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE id = ?"
+    )
+    .bind(reply_message)
+    .bind(&payload.email)
+    .bind(payload.feedback_id)
+    .execute(&state.pool)
+    .await;
+
+    if let Err(e) = result {
+        tracing::error!("Failed to save feedback reply: {}", e);
+        return Json(serde_json::json!({ "status": "error", "message": "Reply save failed" }));
+    }
+
+    if let Some(user_email) = user_email_opt {
+        let subject = "AI 助理已回覆你的建議 / AI Assistant Reply to Your Feedback";
+        let suggestion = suggestion_opt.unwrap_or_else(|| "(none)".to_string());
+        let text_body = format!(
+            "你好，\n\n我們已收到你提供的回饋，AI 助理回覆如下：\n\n{}\n\n你的原始建議：{}\n\n感謝你的協助！",
+            reply_message,
+            suggestion
+        );
+        let html_body = format!(
+            "<p>你好，</p><p>我們已收到你提供的回饋，AI 助理回覆如下：</p><blockquote>{}</blockquote><p><strong>你的原始建議：</strong> {}</p><p>感謝你的協助！</p>",
+            reply_message.replace('\n', "<br/>"),
+            suggestion.replace('\n', "<br/>")
+        );
+        let _ = send_system_email_as_assistant(&state, &user_email, subject, &text_body, &html_body).await;
+    }
+
+    Json(serde_json::json!({ "status": "success" }))
 }
 
 #[derive(Serialize)]
@@ -526,6 +722,51 @@ struct MagicLinkRequest {
 use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
 use lettre::message::{Message, SinglePart};
 use lettre::{SmtpTransport, Transport};
+
+async fn send_system_email_as_assistant(
+    state: &AppState,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+    html_body: &str,
+) -> bool {
+    let smtp_ready = state.config.smtp_relay_host.as_deref()
+        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
+        .unwrap_or(false);
+    if !smtp_ready {
+        tracing::warn!("SMTP relay is not configured, skip sending email to {}", to_email);
+        return false;
+    }
+
+    let host = state.config.smtp_relay_host.clone().unwrap_or_default();
+    let port = state.config.smtp_relay_port;
+    let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
+    let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
+    let assistant_name = "AI 助理";
+    let assistant_mailbox = format!("{} <{}>", assistant_name, state.config.assistant_email);
+
+    let message = MessageBuilder::new()
+        .from(assistant_mailbox.clone())
+        .reply_to(assistant_mailbox)
+        .to(to_email.to_string())
+        .subject(subject)
+        .text_body(text_body.to_string())
+        .html_body(html_body.to_string());
+
+    let is_implicit = port == 465;
+    let mut builder = SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
+    if !smtp_user.is_empty() {
+        builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
+    }
+
+    match builder.connect().await {
+        Ok(mut client) => client.send(message).await.is_ok(),
+        Err(e) => {
+            tracing::error!("Failed to connect SMTP for system email: {:?}", e);
+            false
+        }
+    }
+}
 
 
 async fn post_magic_link(
@@ -909,7 +1150,7 @@ async fn post_verify(
             }
                 
             u.magic_token = None;
-            u.role = if Some(&u.email) == state.admin_email.as_ref() { "admin".to_string() } else { "user".to_string() };
+            u.role = role_for_email(&state, &u.email);
             Json(Some(u))
         },
         Ok(None) => {
@@ -1035,7 +1276,7 @@ async fn get_admin_errors(
     Query(query): Query<AuthQuery>,
 ) -> Json<serde_json::Value> {
     let is_admin = query.email.as_deref()
-        .map(|e| Some(e) == state.admin_email.as_deref())
+        .map(|e| is_admin_or_developer(&state, e))
         .unwrap_or(false);
 
     if !is_admin {
@@ -1197,14 +1438,13 @@ async fn send_data_deletion_confirmation_email(
     preferred_language: &str,
     snapshot: &DataDeletionSnapshot,
     confirm_url: &str,
-) -> bool {
+) -> Result<(), String> {
     let smtp_ready = state.config.smtp_relay_host.as_deref()
         .map(|h| !h.is_empty() && h != "smtp.your-server-address")
         .unwrap_or(false);
 
     if !smtp_ready {
-        tracing::warn!("SMTP relay is not configured. Data deletion confirmation URL: {}", confirm_url);
-        return false;
+        return Err("SMTP relay is not configured (SMTP_RELAY_HOST missing or placeholder).".to_string());
     }
 
     let host = state.config.smtp_relay_host.clone().unwrap_or_default();
@@ -1296,10 +1536,26 @@ async fn send_data_deletion_confirmation_email(
     }
 
     match builder.connect().await {
-        Ok(mut client) => client.send(message).await.is_ok(),
+        Ok(mut client) => {
+            match client.send(message).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!(
+                    "SMTP send failed to {} via {}:{} ({})",
+                    user_email,
+                    host,
+                    port,
+                    e
+                )),
+            }
+        }
         Err(e) => {
-            tracing::error!("Failed to connect SMTP for data deletion confirmation: {:?}", e);
-            false
+            Err(format!(
+                "SMTP connect failed to {}:{} while sending GDPR confirmation to {} ({})",
+                host,
+                port,
+                user_email,
+                e
+            ))
         }
     }
 }
@@ -1338,10 +1594,13 @@ async fn post_request_data_deletion(
         .unwrap_or_else(|_| format!("http://localhost:{}", state.config.server_port));
     let confirm_url = format!("{}/gdpr-delete?token={}", base_url, token);
 
-    let delivered = send_data_deletion_confirmation_email(&state, &email, &preferred_language, &snapshot, &confirm_url).await;
-    if !delivered {
-        let msg = format!("Failed to deliver data deletion confirmation email to {}", email);
-        log_mail_event(&state.pool, "ERROR", "gdpr_email_send", &msg, Some(&confirm_url), Some(&user_id)).await;
+    let send_result = send_data_deletion_confirmation_email(&state, &email, &preferred_language, &snapshot, &confirm_url).await;
+    let delivered = send_result.is_ok();
+    if let Err(reason) = send_result {
+        let msg = format!("Failed to deliver data deletion confirmation email to {}: {}", email, reason);
+        tracing::error!("{}", msg);
+        let context = format!("confirm_url={}; reason={}", confirm_url, reason);
+        log_mail_event(&state.pool, "ERROR", "gdpr_email_send", &msg, Some(&context), Some(&user_id)).await;
     }
 
     Json(serde_json::json!({
@@ -1471,6 +1730,9 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
+        .route("/feedback", get(get_feedback))
+        .route("/feedback/mark-read", post(post_mark_feedback_read))
+        .route("/feedback/reply", post(post_reply_feedback))
         .route("/chat", post(post_chat))
         .route("/chat/feedback", post(post_chat_feedback));
 

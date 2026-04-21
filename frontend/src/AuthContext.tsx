@@ -6,7 +6,7 @@ export interface User {
   email: string;
   is_onboarded: boolean;
   preferences: string | null;
-  role: 'admin' | 'user';
+  role: 'admin' | 'developer' | 'user';
   auto_reply: boolean;
   dry_run: boolean;
   display_name: string | null;

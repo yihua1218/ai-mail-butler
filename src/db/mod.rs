@@ -111,11 +111,22 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             ai_reply TEXT NOT NULL,
             rating TEXT NOT NULL,
             suggestion TEXT,
+            is_read BOOLEAN NOT NULL DEFAULT 0,
+            read_at DATETIME,
+            admin_reply TEXT,
+            replied_at DATETIME,
+            replied_by TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );"
     )
     .execute(&pool)
     .await?;
+
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN is_read BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN read_at DATETIME").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN admin_reply TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_at DATETIME").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_by TEXT").execute(&pool).await;
 
     // User long-term memory for AI personalization
     sqlx::query(

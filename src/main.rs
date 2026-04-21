@@ -45,7 +45,8 @@ async fn main() -> Result<()> {
 
     // 4. Start Web Server
     let admin_email = std::env::var("ADMIN_EMAIL").ok();
-    let state = web::AppState { pool, ai_client, admin_email, config: config_arc.clone() };
+    let developer_email = config_arc.developer_email.clone();
+    let state = web::AppState { pool, ai_client, admin_email, developer_email, config: config_arc.clone() };
     web::start_server(state.config.server_port, state).await?;
 
     Ok(())
