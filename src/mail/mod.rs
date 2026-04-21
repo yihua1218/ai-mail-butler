@@ -162,8 +162,8 @@ impl MailService {
         fs::create_dir_all(spool_dir).await?;
         fs::create_dir_all(processed_dir).await?;
 
-        let listener = TcpListener::bind("0.0.0.0:2525").await?;
-        info!("SMTP server listening on 0.0.0.0:2525  (spool: {})", spool_dir);
+        let listener = TcpListener::bind("0.0.0.0:25").await?;
+        info!("SMTP server listening on 0.0.0.0:25  (spool: {})", spool_dir);
 
         let spool_owned = spool_dir.to_string();
         tokio::spawn(async move {
