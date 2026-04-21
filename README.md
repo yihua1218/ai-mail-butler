@@ -82,6 +82,8 @@ To send emails (for Magic Links and AI replies), you need to configure an SMTP r
 
 ### Gmail
 - [Gmail SMTP Setup Guide](docs/GMAIL-SMTP-SETUP.md)
+- [Gmail Filter + Forwarding Setup Guide](docs/GMAIL-FILTER-FORWARDING.md)
+- [Google Workspace Admin Forwarding Allowlist + Policy Guide](docs/GOOGLE-WORKSPACE-FORWARDING-POLICY.md)
 
 ### Microsoft 365 (M365)
 If you use a Microsoft 365 (M365) account to send emails, you have two options:

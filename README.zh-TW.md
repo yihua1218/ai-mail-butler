@@ -82,6 +82,8 @@ docker-compose up --build -d
 
 ### Gmail
 - [Gmail SMTP 設定指南 (繁中/EN)](docs/GMAIL-SMTP-SETUP.md)
+- [Gmail 篩選器與轉寄設定指南 (繁中/EN)](docs/GMAIL-FILTER-FORWARDING.md)
+- [Google Workspace 管理員轉寄白名單與政策指南 (繁中/EN)](docs/GOOGLE-WORKSPACE-FORWARDING-POLICY.md)
 
 ### Microsoft 365 (M365)
 如果您計畫使用 Microsoft 365 (M365) 帳戶來寄信，您有兩種選擇：
