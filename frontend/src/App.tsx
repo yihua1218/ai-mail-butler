@@ -40,6 +40,12 @@ const Dashboard: React.FC = () => {
   const [globalStats, setGlobalStats] = useState<any>(null);
   const [personalStats, setPersonalStats] = useState<any>(null);
   const [mailErrors, setMailErrors] = useState<any[]>([]);
+  const [logLevelFilter, setLogLevelFilter] = useState<string>('all');
+  const [logTypeFilter, setLogTypeFilter] = useState<string>('all');
+  const [logUserFilter, setLogUserFilter] = useState<string>('all');
+  const [logKeyword, setLogKeyword] = useState<string>('');
+  const [logTimeFrom, setLogTimeFrom] = useState<string>('');
+  const [logTimeTo, setLogTimeTo] = useState<string>('');
 
   useEffect(() => {
     const url = user ? `/api/dashboard?email=${user.email}` : `/api/dashboard`;
@@ -184,6 +190,111 @@ const Dashboard: React.FC = () => {
     { title: 'Time', dataIndex: 'occurred_at', key: 'occurred_at', width: 170 },
   ];
 
+  const parseLogDate = (value?: string): Date | null => {
+    if (!value) return null;
+    const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const logTypeOptions = Array.from(new Set(mailErrors.map((l) => l.error_type).filter(Boolean)));
+  const logUserOptions = Array.from(new Set(mailErrors.map((l) => l.user_email).filter(Boolean)));
+
+  const filteredMailErrors = mailErrors.filter((log) => {
+    if (logLevelFilter !== 'all' && log.level !== logLevelFilter) return false;
+    if (logTypeFilter !== 'all' && log.error_type !== logTypeFilter) return false;
+    if (logUserFilter === '__unassigned__' && !!log.user_email) return false;
+    if (logUserFilter !== 'all' && logUserFilter !== '__unassigned__' && log.user_email !== logUserFilter) return false;
+
+    if (logKeyword.trim()) {
+      const q = logKeyword.trim().toLowerCase();
+      const haystack = [log.message, log.context, log.error_type, log.user_email]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+
+    const logDate = parseLogDate(log.occurred_at);
+    if (!logDate) return false;
+    if (logTimeFrom) {
+      const from = new Date(logTimeFrom);
+      if (!Number.isNaN(from.getTime()) && logDate < from) return false;
+    }
+    if (logTimeTo) {
+      const to = new Date(logTimeTo);
+      if (!Number.isNaN(to.getTime()) && logDate > to) return false;
+    }
+
+    return true;
+  });
+
+  const LogFilterBar = () => (
+    <div style={{ marginBottom: 12 }}>
+      <Space wrap>
+        <Select
+          value={logLevelFilter}
+          style={{ width: 130 }}
+          onChange={setLogLevelFilter}
+          options={[
+            { value: 'all', label: 'All Levels' },
+            { value: 'ERROR', label: 'ERROR' },
+            { value: 'WARN', label: 'WARN' },
+          ]}
+        />
+        <Select
+          value={logTypeFilter}
+          style={{ width: 180 }}
+          onChange={setLogTypeFilter}
+          options={[
+            { value: 'all', label: 'All Types' },
+            ...logTypeOptions.map((v) => ({ value: v, label: v })),
+          ]}
+        />
+        <Select
+          value={logUserFilter}
+          style={{ width: 220 }}
+          onChange={setLogUserFilter}
+          options={[
+            { value: 'all', label: 'All Users' },
+            { value: '__unassigned__', label: 'Unassigned' },
+            ...logUserOptions.map((v) => ({ value: v, label: v })),
+          ]}
+        />
+        <Input
+          placeholder="Search message/type/context"
+          value={logKeyword}
+          onChange={(e) => setLogKeyword(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Input
+          type="datetime-local"
+          value={logTimeFrom}
+          onChange={(e) => setLogTimeFrom(e.target.value)}
+          style={{ width: 210 }}
+        />
+        <Input
+          type="datetime-local"
+          value={logTimeTo}
+          onChange={(e) => setLogTimeTo(e.target.value)}
+          style={{ width: 210 }}
+        />
+        <Button
+          onClick={() => {
+            setLogLevelFilter('all');
+            setLogTypeFilter('all');
+            setLogUserFilter('all');
+            setLogKeyword('');
+            setLogTimeFrom('');
+            setLogTimeTo('');
+          }}
+        >
+          Reset
+        </Button>
+      </Space>
+    </div>
+  );
+
   if (user?.role === 'admin') {
     return (
       <div>
@@ -210,13 +321,14 @@ const Dashboard: React.FC = () => {
                 <span>
                   <WarningOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
                   Mail Server Logs (Error + Warn)
-                  {mailErrors.length > 0 && <Badge count={mailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
+                  {mailErrors.length > 0 && <Badge count={filteredMailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
                 </span>
               }
             >
+              <LogFilterBar />
               {mailErrors.length === 0
                 ? <Alert message="No logs recorded." type="success" showIcon />
-                : <Table dataSource={mailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 10 }} size="small" />}
+                : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 10 }} size="small" />}
             </Card>
           </Col>
         </Row>
@@ -236,9 +348,10 @@ const Dashboard: React.FC = () => {
           <Table dataSource={personalEmails} rowKey="id" columns={columns} />
         </Card>
         <Card bordered={false} title="Your Mail Server Logs" style={{ marginTop: 24 }}>
+          <LogFilterBar />
           {mailErrors.length === 0
             ? <Alert message="No logs related to your account." type="success" showIcon />
-            : <Table dataSource={mailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 8 }} size="small" />}
+            : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 8 }} size="small" />}
         </Card>
       </div>
     );
