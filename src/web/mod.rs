@@ -1128,6 +1128,23 @@ use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
 use lettre::message::{Message, SinglePart};
 use lettre::{SmtpTransport, Transport};
 
+/// Extract pure email address from formats like "Name <email@domain.com>" or "email@domain.com".
+/// Returns only the email address part for use in SMTP From field.
+fn extract_pure_email(mailbox: &str) -> String {
+    let mailbox = mailbox.trim();
+    // Check if format is "Name <email@domain.com>"
+    if let Some(start) = mailbox.find('<') {
+        if let Some(end) = mailbox.find('>') {
+            if start < end {
+                let email = mailbox[start + 1..end].trim();
+                return email.to_string();
+            }
+        }
+    }
+    // Otherwise assume it's already a pure email address
+    mailbox.to_string()
+}
+
 async fn send_system_email_as_assistant(
     state: &AppState,
     to_email: &str,
@@ -1147,13 +1164,13 @@ async fn send_system_email_as_assistant(
     let port = state.config.smtp_relay_port;
     let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
     let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
-    // Use ASCII display name only: raw non-ASCII (e.g. Chinese) in the From field
-    // violates RFC 5321 and causes Gmail 555 Syntax Error.
-    let assistant_mailbox = format!("AI Mail Butler <{}>", state.config.assistant_email);
+    // RFC 5321: From MUST be the actual SMTP relay account email (no display name allowed by Gmail).
+    // Use Reply-To for any display name or alternative reply address.
+    let from_addr = extract_pure_email(&state.config.assistant_email);
 
     let message = MessageBuilder::new()
-        .from(assistant_mailbox.clone())
-        .reply_to(assistant_mailbox)
+        .from(from_addr.as_str())
+        .reply_to(from_addr.as_str())
         .to(to_email.to_string())
         .subject(subject)
         .text_body(text_body.to_string())
@@ -1250,8 +1267,9 @@ async fn post_magic_link(
             );
         }
 
-        // Use ASCII display name only — non-ASCII in From violates RFC 5321 (Gmail 555).
-        let assistant_mailbox = format!("AI Mail Butler <{}>", state.config.assistant_email);
+        // RFC 5321: From MUST be the actual SMTP relay account email (no display name allowed by Gmail).
+        // Use Reply-To for any display name or alternative reply address.
+        let from_addr = extract_pure_email(&state.config.assistant_email);
 
         let html_body = if preferred_language == "zh-TW" {
             format!(
@@ -1297,8 +1315,8 @@ async fn post_magic_link(
 
         // Build message using mail-send's builder
         let mut builder = MessageBuilder::new()
-            .from(assistant_mailbox.clone())
-            .reply_to(assistant_mailbox)
+            .from(from_addr.as_str())
+            .reply_to(from_addr.as_str())
             .to(to_addr.to_string())
             .subject(subject.as_str());
 
@@ -1982,12 +2000,13 @@ async fn send_data_deletion_confirmation_email(
         )
     };
 
-    // Use ASCII display name only — non-ASCII in From violates RFC 5321 (Gmail 555).
-    let assistant_mailbox = format!("AI Mail Butler <{}>", state.config.assistant_email);
+    // RFC 5321: From MUST be the actual SMTP relay account email (no display name allowed by Gmail).
+    // Use Reply-To for any display name or alternative reply address.
+    let from_addr = extract_pure_email(&state.config.assistant_email);
 
     let message = MessageBuilder::new()
-        .from(assistant_mailbox.clone())
-        .reply_to(assistant_mailbox)
+        .from(from_addr.as_str())
+        .reply_to(from_addr.as_str())
         .to(user_email.to_string())
         .subject(subject)
         .text_body(text_body)
