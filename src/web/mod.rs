@@ -19,9 +19,12 @@ use crate::services::OnboardingService;
 #[derive(sqlx::FromRow, Serialize)]
 struct MailError {
     id: i64,
+    level: String,
     error_type: String,
     message: String,
     context: Option<String>,
+    user_id: Option<String>,
+    user_email: Option<String>,
     occurred_at: String,
 }
 
@@ -36,13 +39,22 @@ struct EmailRule {
     updated_at: Option<String>,
 }
 
-async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context: Option<&str>) {
+async fn log_mail_event(
+    pool: &SqlitePool,
+    level: &str,
+    error_type: &str,
+    msg: &str,
+    context: Option<&str>,
+    user_id: Option<&str>,
+) {
     let _ = sqlx::query(
-        "INSERT INTO mail_errors (error_type, message, context) VALUES (?, ?, ?)"
+        "INSERT INTO mail_errors (level, error_type, message, context, user_id) VALUES (?, ?, ?, ?, ?)"
     )
+    .bind(level)
     .bind(error_type)
     .bind(msg)
     .bind(context)
+    .bind(user_id)
     .execute(pool)
     .await;
 }
@@ -467,7 +479,8 @@ async fn post_magic_link(
             Err(e) => {
                 let err_msg = format!("{:?}", e);
                 tracing::error!("mail-send delivery failed: {}. Login URL is in server console.", err_msg);
-                log_mail_error(&state.pool, "smtp_send", &err_msg, Some(&email)).await;
+                let user_id = get_user_id_by_email(&state.pool, &email).await;
+                log_mail_event(&state.pool, "ERROR", "smtp_send", &err_msg, Some(&email), user_id.as_deref()).await;
                 Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
             }
         }
@@ -698,10 +711,39 @@ async fn get_admin_errors(
     }
 
     let errors = sqlx::query_as::<_, MailError>(
-        "SELECT id, error_type, message, context, CAST(occurred_at AS TEXT) as occurred_at \
-         FROM mail_errors ORDER BY occurred_at DESC LIMIT 200"
+        "SELECT m.id, m.level, m.error_type, m.message, m.context, m.user_id, u.email as user_email, CAST(m.occurred_at AS TEXT) as occurred_at \
+         FROM mail_errors m \
+         LEFT JOIN users u ON u.id = m.user_id \
+         ORDER BY m.occurred_at DESC LIMIT 200"
     )
     .fetch_all(&state.pool).await.unwrap_or_default();
+
+    Json(serde_json::json!({ "errors": errors }))
+}
+
+async fn get_user_errors(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+
+    let Some(user_id) = get_user_id_by_email(&state.pool, &email).await else {
+        return Json(serde_json::json!({ "error": "User not found" }));
+    };
+
+    let errors = sqlx::query_as::<_, MailError>(
+        "SELECT m.id, m.level, m.error_type, m.message, m.context, m.user_id, u.email as user_email, CAST(m.occurred_at AS TEXT) as occurred_at \
+         FROM mail_errors m \
+         LEFT JOIN users u ON u.id = m.user_id \
+         WHERE m.user_id = ? \
+         ORDER BY m.occurred_at DESC LIMIT 200"
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
 
     Json(serde_json::json!({ "errors": errors }))
 }
@@ -830,6 +872,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/rules/update", post(post_update_rule))
         .route("/rules/toggle", post(post_toggle_rule))
         .route("/dashboard", get(get_dashboard))
+        .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
         .route("/chat", post(post_chat));
 

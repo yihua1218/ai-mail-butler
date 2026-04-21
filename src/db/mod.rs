@@ -119,14 +119,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS mail_errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level TEXT NOT NULL DEFAULT 'ERROR',
             error_type TEXT NOT NULL,
             message TEXT NOT NULL,
             context TEXT,
+            user_id TEXT,
             occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );"
     )
     .execute(&pool)
     .await?;
+
+    let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN level TEXT NOT NULL DEFAULT 'ERROR'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN user_id TEXT").execute(&pool).await;
 
     Ok(pool)
 }

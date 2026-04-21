@@ -151,13 +151,22 @@ fn infer_attachment_filename(part: &mailparse::ParsedMail<'_>, index: usize) -> 
     format!("attachment_{index:02}.{ext}")
 }
 
-async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context: Option<&str>) {
+async fn log_mail_event(
+    pool: &SqlitePool,
+    level: &str,
+    error_type: &str,
+    msg: &str,
+    context: Option<&str>,
+    user_id: Option<&str>,
+) {
     let _ = sqlx::query(
-        "INSERT INTO mail_errors (error_type, message, context) VALUES (?, ?, ?)"
+        "INSERT INTO mail_errors (level, error_type, message, context, user_id) VALUES (?, ?, ?, ?, ?)"
     )
+    .bind(level)
     .bind(error_type)
     .bind(msg)
     .bind(context)
+    .bind(user_id)
     .execute(pool)
     .await;
 }
@@ -351,7 +360,7 @@ impl MailService {
                         match mailparse::parse_mail(&contents) {
                             Err(e) => {
                                 error!("Failed to parse mail {:?}: {}", path.file_name(), e);
-                                log_mail_error(&pool, "parse_error", &e.to_string(), path.to_str()).await;
+                                log_mail_event(&pool, "ERROR", "parse_error", &e.to_string(), path.to_str(), None).await;
                             }
                             Ok(parsed) => {
                                 let subject = parsed.headers.iter()
@@ -602,13 +611,14 @@ impl MailService {
                                                 let ai_client_clone = ai_client.clone();
                                                 let pool_clone = pool.clone();
                                                 let user_id = u.id.clone();
+                                                let user_id_for_memory = user_id.clone();
                                                 let msg_clone = body.clone();
                                                 let reply_clone = ai_reply.clone();
                                                 tokio::spawn(async move {
                                                     let _ = crate::services::OnboardingService::update_memory(
                                                         &ai_client_clone,
                                                         &pool_clone,
-                                                        &user_id,
+                                                        &user_id_for_memory,
                                                         &msg_clone,
                                                         &reply_clone,
                                                     )
@@ -652,6 +662,7 @@ impl MailService {
                                                     let is_implicit = port == 465;
                                                     let pool_clone = pool.clone();
                                                     let email_id = id.clone();
+                                                    let user_id_for_log = user_id.clone();
 
                                                     tokio::spawn(async move {
                                                         let mut builder =
@@ -678,11 +689,13 @@ impl MailService {
                                                                         "Failed to send AI reply: {}",
                                                                         err_msg
                                                                     );
-                                                                    log_mail_error(
+                                                                    log_mail_event(
                                                                         &pool_clone,
+                                                                        "ERROR",
                                                                         "smtp_send",
                                                                         &err_msg,
                                                                         Some(&email_id),
+                                                                        Some(&user_id_for_log),
                                                                     )
                                                                     .await;
                                                                 } else {
@@ -701,11 +714,13 @@ impl MailService {
                                                                     "Failed to connect for AI reply: {}",
                                                                     err_msg
                                                                 );
-                                                                log_mail_error(
+                                                                log_mail_event(
                                                                     &pool_clone,
+                                                                    "ERROR",
                                                                     "smtp_connect",
                                                                     &err_msg,
                                                                     Some(&email_id),
+                                                                    Some(&user_id_for_log),
                                                                 )
                                                                 .await;
                                                             }
@@ -728,11 +743,13 @@ impl MailService {
                                             Err(e) => {
                                                 let err_msg = format!("{}", e);
                                                 error!("AI reply failed: {}", err_msg);
-                                                log_mail_error(
+                                                log_mail_event(
                                                     &pool,
+                                                    "ERROR",
                                                     "ai_error",
                                                     &err_msg,
                                                     Some(&id),
+                                                    Some(&u.id),
                                                 )
                                                 .await;
                                             }
@@ -744,10 +761,23 @@ impl MailService {
                                         );
                                     }
                                 } else {
-                                    warn!(
+                                    let warn_msg = format!(
                                         "No user found for sender {:?} (recipient {:?}); email discarded",
                                         from_clean, to_clean
                                     );
+                                    warn!(
+                                        "{}",
+                                        warn_msg
+                                    );
+                                    log_mail_event(
+                                        &pool,
+                                        "WARN",
+                                        "unknown_sender",
+                                        &warn_msg,
+                                        path.to_str(),
+                                        None,
+                                    )
+                                    .await;
                                 }
                             }
                         }

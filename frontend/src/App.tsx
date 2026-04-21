@@ -58,6 +58,10 @@ const Dashboard: React.FC = () => {
       axios.get(`/api/admin/errors?email=${user.email}`).then(res => {
         setMailErrors(res.data.errors || []);
       }).catch(() => {});
+    } else if (user?.role === 'user') {
+      axios.get(`/api/errors?email=${user.email}`).then(res => {
+        setMailErrors(res.data.errors || []);
+      }).catch(() => {});
     }
   }, [user]);
 
@@ -155,9 +159,18 @@ const Dashboard: React.FC = () => {
     smtp_connect: 'red',
     smtp_send: 'orange',
     ai_error: 'purple',
+    unknown_sender: 'gold',
+    parse_error: 'volcano',
   };
 
   const errorColumns = [
+    {
+      title: 'Level',
+      dataIndex: 'level',
+      key: 'level',
+      width: 90,
+      render: (v: string) => <Tag color={v === 'WARN' ? 'gold' : 'red'}>{v}</Tag>,
+    },
     {
       title: 'Type',
       dataIndex: 'error_type',
@@ -165,6 +178,7 @@ const Dashboard: React.FC = () => {
       width: 120,
       render: (v: string) => <Tag color={errorTypeColor[v] || 'default'}>{v}</Tag>,
     },
+    { title: 'User', dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' },
     { title: 'Message', dataIndex: 'message', key: 'message', ellipsis: true },
     { title: 'Context', dataIndex: 'context', key: 'context', width: 180, ellipsis: true },
     { title: 'Time', dataIndex: 'occurred_at', key: 'occurred_at', width: 170 },
@@ -195,13 +209,13 @@ const Dashboard: React.FC = () => {
               title={
                 <span>
                   <WarningOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
-                  Mail Server Error Log
+                  Mail Server Logs (Error + Warn)
                   {mailErrors.length > 0 && <Badge count={mailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
                 </span>
               }
             >
               {mailErrors.length === 0
-                ? <Alert message="No errors recorded." type="success" showIcon />
+                ? <Alert message="No logs recorded." type="success" showIcon />
                 : <Table dataSource={mailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 10 }} size="small" />}
             </Card>
           </Col>
@@ -220,6 +234,11 @@ const Dashboard: React.FC = () => {
         <PersonalStatsDisplay />
         <Card bordered={false} title="Your Emails">
           <Table dataSource={personalEmails} rowKey="id" columns={columns} />
+        </Card>
+        <Card bordered={false} title="Your Mail Server Logs" style={{ marginTop: 24 }}>
+          {mailErrors.length === 0
+            ? <Alert message="No logs related to your account." type="success" showIcon />
+            : <Table dataSource={mailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 8 }} size="small" />}
         </Card>
       </div>
     );
