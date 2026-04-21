@@ -831,8 +831,8 @@ const App: React.FC = () => {
                 { key: '1', label: t('dashboard') },
                 { key: '2', label: t('ai_chat') },
                 { key: '3', label: t('settings') },
-                { key: '4', label: 'About' },
                 { key: '5', label: 'Rules' },
+                { key: '4', label: 'About' },
               ]}
             />
           </div>
@@ -870,8 +870,8 @@ const App: React.FC = () => {
           {activeMenu === '1' && <Dashboard />}
           {activeMenu === '2' && <Chat />}
           {activeMenu === '3' && <Settings />}
-          {activeMenu === '4' && <About />}
           {activeMenu === '5' && <RulesManager />}
+          {activeMenu === '4' && <About />}
         </Content>
         <Footer style={{ textAlign: 'center', color: '#86868b' }}>
           AI Mail Butler ©{new Date().getFullYear()} - Released into the Public Domain

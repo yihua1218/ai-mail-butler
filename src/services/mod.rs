@@ -31,10 +31,12 @@ impl OnboardingService {
             ai_name_zh, ai_tone_zh, ai_name_en, ai_tone_en
         );
 
+        let scope_guard = "SCOPE RULES:\n- You are ONLY an email-assistant for forwarded-email handling, inbox workflow, reply drafting/sending preferences, email rule configuration, dashboard/log interpretation, and related troubleshooting.\n- You MAY do brief small talk/chit-chat, but keep it short and then gently guide back to email-assistant topics.\n- You MUST refuse requests unrelated to email-assistant operations (for example: coding help, writing programs/scripts, general knowledge Q&A not tied to email workflow, math homework, legal/medical analysis outside email-processing context).\n- If refusing, politely state the scope limit in the user's language and offer email-assistant alternatives.\n";
+
         let system_prompt = if !user.is_onboarded {
-            format!("{}{}You are an AI Mail Butler. You monitor the email address: {}. The user has just onboarded. Welcome them, and explain that they should forward emails they want you to process to {}. Acknowledge their preferences and ask if there's anything else they need help with.\nIMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context, identity_context, assistant_email, assistant_email)
+            format!("{}{}{}You are an AI Mail Butler. You monitor the email address: {}. The user has just onboarded. Welcome them, and explain that they should forward emails they want you to process to {}. Acknowledge their preferences and ask if there's anything else they need help with.\nIMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context, identity_context, scope_guard, assistant_email, assistant_email)
         } else {
-            format!("{}{}You are an AI Mail Butler monitoring {}. Acknowledge the user's message based on their known preferences, and ask how you can assist them today. If they ask where to send emails, tell them to forward to {}.\nIMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context, identity_context, assistant_email, assistant_email)
+            format!("{}{}{}You are an AI Mail Butler monitoring {}. Acknowledge the user's message based on their known preferences, and ask how you can assist them today. If they ask where to send emails, tell them to forward to {}.\nIMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context, identity_context, scope_guard, assistant_email, assistant_email)
         };
         
         let memory_instruction = "IMPORTANT: You have access to the user's 'Long-term memory context' below. If the user's current question relates to past conversations, facts you learned before, or previous requests, ALWAYS check the memory context first to provide a consistent and helpful answer.";
@@ -146,6 +148,11 @@ Your capabilities include:
 - Role-Based Access Control (Admin vs Regular User).
 - Passwordless login using Magic Links.
 You are currently talking to an anonymous visitor. Explain these features if asked, and encourage them to forward their emails to {} to see how you can help. Also encourage them to enter their email in the navigation bar to login via Magic Link to use the dashboard and configure you.
+    SCOPE RULES:
+    - You are ONLY for email-assistant topics related to forwarded-email processing and its settings.
+    - You MAY do short casual chit-chat, but keep it brief and guide back to email-assistant tasks.
+    - Refuse coding/programming requests and other unrelated requests.
+    - When refusing, politely explain your scope and offer email-assistant help.
 IMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context, assistant_email, assistant_email);
         
         client.chat(&system_prompt, current_message).await

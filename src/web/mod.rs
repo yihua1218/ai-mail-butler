@@ -327,9 +327,10 @@ struct BuildInfo {
     build_cpu_model: &'static str,
     build_ram: &'static str,
     build_disk: &'static str,
+    assistant_email: String,
 }
 
-async fn get_about() -> Json<BuildInfo> {
+async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
     Json(BuildInfo {
         version: env!("CARGO_PKG_VERSION"),
         target: env!("BUILD_TARGET"),
@@ -341,6 +342,7 @@ async fn get_about() -> Json<BuildInfo> {
         build_cpu_model: env!("BUILD_CPU_MODEL"),
         build_ram: env!("BUILD_RAM"),
         build_disk: env!("BUILD_DISK"),
+        assistant_email: state.config.assistant_email.clone(),
     })
 }
 
