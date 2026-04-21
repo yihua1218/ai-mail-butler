@@ -326,6 +326,7 @@ mod tests {
             assistant_name_en: None,
             assistant_tone_zh: None,
             assistant_tone_en: None,
+            mail_send_method: "direct_mx".to_string(),
             pdf_passwords: None,
             timezone: "UTC".to_string(),
             preferred_language: "zh-TW".to_string(),

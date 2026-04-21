@@ -1474,20 +1474,41 @@ async fn send_system_email_as_assistant(
     text_body: &str,
     html_body: &str,
 ) -> bool {
+    let preferred = sqlx::query_scalar::<_, String>("SELECT mail_send_method FROM users WHERE email = ? LIMIT 1")
+        .bind(to_email)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "direct_mx".to_string());
+
+    match deliver_email_with_fallback(state, to_email, subject, text_body, html_body, &preferred).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!("System email delivery failed to {}: {}", to_email, e);
+            false
+        }
+    }
+}
+
+async fn send_via_smtp_relay(
+    state: &AppState,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+    html_body: &str,
+) -> Result<(), String> {
     let smtp_ready = state.config.smtp_relay_host.as_deref()
         .map(|h| !h.is_empty() && h != "smtp.your-server-address")
         .unwrap_or(false);
     if !smtp_ready {
-        tracing::warn!("SMTP relay is not configured, skip sending email to {}", to_email);
-        return false;
+        return Err("smtp relay not configured".to_string());
     }
 
     let host = state.config.smtp_relay_host.clone().unwrap_or_default();
     let port = state.config.smtp_relay_port;
     let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
     let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
-    // RFC 5321: From MUST be the actual SMTP relay account email (no display name allowed by Gmail).
-    // Use Reply-To for any display name or alternative reply address.
     let from_addr = extract_pure_email(&state.config.assistant_email);
 
     let message = MessageBuilder::new()
@@ -1505,12 +1526,78 @@ async fn send_system_email_as_assistant(
     }
 
     match builder.connect().await {
-        Ok(mut client) => client.send(message).await.is_ok(),
-        Err(e) => {
-            tracing::error!("Failed to connect SMTP for system email: {:?}", e);
-            false
+        Ok(mut client) => client.send(message).await.map_err(|e| format!("relay send failed: {:?}", e)),
+        Err(e) => Err(format!("relay connect failed: {:?}", e)),
+    }
+}
+
+async fn send_via_direct_mx(
+    state: &AppState,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+) -> Result<(), String> {
+    let from_addr: lettre::message::Mailbox = extract_pure_email(&state.config.assistant_email)
+        .parse()
+        .unwrap_or_else(|_| "noreply@example.com".parse().expect("default mailbox"));
+    let to_addr: lettre::message::Mailbox = to_email
+        .parse()
+        .map_err(|e| format!("invalid recipient mailbox: {:?}", e))?;
+
+    let domain = to_email.split('@').nth(1).unwrap_or("").trim();
+    if domain.is_empty() {
+        return Err("recipient domain missing".to_string());
+    }
+
+    let Some(mx) = lookup_mx_host(domain).await else {
+        return Err(format!("mx lookup failed for domain {}", domain));
+    };
+
+    let email_msg = Message::builder()
+        .from(from_addr)
+        .to(to_addr)
+        .subject(subject)
+        .singlepart(SinglePart::plain(text_body.to_string()))
+        .map_err(|e| format!("direct message build failed: {:?}", e))?;
+
+    let mailer = SmtpTransport::relay(&mx)
+        .map_err(|e| format!("direct transport build failed: {:?}", e))?
+        .port(25)
+        .build();
+
+    mailer.send(&email_msg).map_err(|e| format!("direct mx send failed: {:?}", e))?;
+    Ok(())
+}
+
+async fn deliver_email_with_fallback(
+    state: &AppState,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+    html_body: &str,
+    preferred_method: &str,
+) -> Result<(), String> {
+    let methods = if preferred_method == "relay" {
+        vec!["relay", "direct_mx"]
+    } else {
+        vec!["direct_mx", "relay"]
+    };
+
+    let mut errors = Vec::new();
+
+    for method in methods {
+        let result = match method {
+            "relay" => send_via_smtp_relay(state, to_email, subject, text_body, html_body).await,
+            _ => send_via_direct_mx(state, to_email, subject, text_body).await,
+        };
+
+        match result {
+            Ok(_) => return Ok(()),
+            Err(e) => errors.push(format!("{}: {}", method, e)),
         }
     }
+
+    Err(errors.join(" | "))
 }
 
 
@@ -1555,45 +1642,33 @@ async fn post_magic_link(
     );
     tracing::info!("{}", log_box);
 
-    // Check if SMTP is configured with real values (not placeholder)
-    let smtp_ready = state.config.smtp_relay_host.as_deref()
-        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
-        .unwrap_or(false);
-
-    let from_addr: lettre::message::Mailbox = state.config.assistant_email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
-    let to_addr: lettre::message::Mailbox = email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
     let mut subject = "Your AI Mail Butler Login Link".to_string();
     let mut plain_text = format!(
         "Welcome to AI Mail Butler!\n\nClick the link below to securely login without a password:\n{}",
         login_url
     );
-    if smtp_ready {
-        let host = state.config.smtp_relay_host.as_ref().unwrap();
-        let port = state.config.smtp_relay_port;
-        let user = state.config.smtp_relay_user.clone().unwrap_or_default();
-        let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
+    let user_pref: (String, String, String) = sqlx::query_as(
+        "SELECT email_format, preferred_language, mail_send_method FROM users WHERE email = ?"
+    )
+    .bind(&email)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(Some(("both".to_string(), "en".to_string(), "direct_mx".to_string())))
+    .unwrap_or(("both".to_string(), "en".to_string(), "direct_mx".to_string()));
 
-        let user_pref: (String, String) = sqlx::query_as("SELECT email_format, preferred_language FROM users WHERE email = ?")
-            .bind(&email)
-            .fetch_optional(&state.pool).await
-            .unwrap_or(Some(("both".to_string(), "en".to_string())))
-            .unwrap_or(("both".to_string(), "en".to_string()));
-        let email_format = user_pref.0;
-        let preferred_language = user_pref.1;
+    let email_format = user_pref.0;
+    let preferred_language = user_pref.1;
+    let preferred_send_method = user_pref.2;
 
-        if preferred_language == "zh-TW" {
-            subject = "您的 AI 郵件助理登入連結".to_string();
-            plain_text = format!(
-                "歡迎使用 AI Mail Butler！\n\n請點擊下方連結安全無密碼登入：\n{}",
-                login_url
-            );
-        }
+    if preferred_language == "zh-TW" {
+        subject = "您的 AI 郵件助理登入連結".to_string();
+        plain_text = format!(
+            "歡迎使用 AI Mail Butler！\n\n請點擊下方連結安全無密碼登入：\n{}",
+            login_url
+        );
+    }
 
-        // RFC 5321: From MUST be the actual SMTP relay account email (no display name allowed by Gmail).
-        // Use Reply-To for any display name or alternative reply address.
-        let from_addr = extract_pure_email(&state.config.assistant_email);
-
-        let html_body = if preferred_language == "zh-TW" {
+    let html_body = if preferred_language == "zh-TW" {
             format!(
             r#"<!DOCTYPE html>
 <html>
@@ -1614,8 +1689,8 @@ async fn post_magic_link(
             login_url, login_url
             )
         } else {
-            format!(
-                r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 40px; background-color: #f5f5f7; color: #1d1d1f;">
     <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 32px; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
@@ -1631,91 +1706,32 @@ async fn post_magic_link(
     </div>
 </body>
 </html>"#,
-                login_url, login_url
-            )
-        };
+            login_url, login_url
+        )
+    };
 
-        // Build message using mail-send's builder
-        let mut builder = MessageBuilder::new()
-            .from(from_addr.as_str())
-            .reply_to(from_addr.as_str())
-            .to(to_addr.to_string())
-            .subject(subject.as_str());
+    let (final_text, final_html) = match email_format.as_str() {
+        "html" => ("".to_string(), html_body),
+        "plain" => (plain_text.clone(), "".to_string()),
+        _ => (plain_text.clone(), html_body),
+    };
 
-        match email_format.as_str() {
-            "html" => { builder = builder.html_body(html_body); },
-            "plain" => { builder = builder.text_body(plain_text.clone()); },
-            _ => { 
-                builder = builder.text_body(plain_text.clone()).html_body(html_body);
-            }
+    match deliver_email_with_fallback(
+        &state,
+        &email,
+        subject.as_str(),
+        final_text.as_str(),
+        final_html.as_str(),
+        &preferred_send_method,
+    )
+    .await {
+        Ok(_) => Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" })),
+        Err(err_msg) => {
+            tracing::error!("Magic link delivery failed: {}. Login URL is in server console.", err_msg);
+            let user_id = get_user_id_by_email(&state.pool, &email).await;
+            log_mail_event(&state.pool, "ERROR", "smtp_send", &err_msg, Some(&email), user_id.as_deref()).await;
+            Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
         }
-        
-        let message = builder;
-
-        let is_implicit = port == 465;
-        tracing::debug!(">>> [SMTP] Connecting to {}:{} (Implicit TLS: {}, Format: {}, Lang: {})", host, port, is_implicit, email_format, preferred_language);
-
-        let send_task = async move {
-            let mut builder = SmtpClientBuilder::new(host.as_str(), port);
-            builder = builder.implicit_tls(is_implicit);
-            
-            if !user.is_empty() {
-                builder = builder.credentials((user.as_str(), pass.as_str()));
-            }
-            
-            let mut client = builder.connect().await?;
-            client.send(message).await
-        };
-
-        match send_task.await {
-            Ok(_) => {
-                tracing::info!("Magic link email sent successfully via mail-send to {}", email);
-                Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }))
-            }
-            Err(e) => {
-                let err_msg = format!("{:?}", e);
-                tracing::error!("mail-send delivery failed: {}. Login URL is in server console.", err_msg);
-                let user_id = get_user_id_by_email(&state.pool, &email).await;
-                log_mail_event(&state.pool, "ERROR", "smtp_send", &err_msg, Some(&email), user_id.as_deref()).await;
-                Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
-            }
-        }
-    } else {
-        // No relay configured — try direct MX delivery to the recipient's mail server.
-        // This may land in spam but it works without any relay setup.
-        let domain = email.split('@').nth(1).unwrap_or("").to_string();
-        let mx_host = lookup_mx_host(&domain).await;
-
-        if let Some(mx) = mx_host {
-            tracing::info!("No SMTP relay configured. Attempting direct MX delivery to {} ({})", mx, domain);
-            match Message::builder().from(from_addr).to(to_addr).subject(subject.as_str()).singlepart(SinglePart::plain(plain_text)) {
-                Ok(email_msg) => {
-                    // Direct SMTP: connect to MX on port 25, STARTTLS if available
-                    match SmtpTransport::relay(&mx) {
-                        Ok(t_builder) => {
-                            let mailer = t_builder.port(25).build();
-                            match mailer.send(&email_msg) {
-                                Ok(_) => {
-                                    tracing::info!("Direct MX delivery succeeded to {} via {}", email, mx);
-                                    return Json(serde_json::json!({ "status": "success", "message": "Magic link sent via direct delivery (may be in spam)" }));
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Direct MX delivery failed: {:?}. Login URL is in server console.", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Could not build direct SMTP transport: {:?}", e);
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!("Email build error for direct delivery: {:?}", e),
-            }
-        } else {
-            tracing::warn!("Could not resolve MX for domain '{}'. Login URL is in server console.", domain);
-        }
-
-        Json(serde_json::json!({ "status": "ok_debug", "message": "No SMTP relay configured — login URL printed to server console" }))
     }
 }
 
@@ -1976,6 +1992,7 @@ struct SettingsRequest {
     auto_reply: bool,
     dry_run: bool,
     email_format: String,
+    mail_send_method: Option<String>,
     training_data_consent: bool,
     timezone: Option<String>,
     preferred_language: Option<String>,
@@ -2048,13 +2065,21 @@ async fn post_settings(
         .filter(|v| !v.is_empty())
         .unwrap_or("en")
         .to_string();
+    let mail_send_method = payload
+        .mail_send_method
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| *v == "direct_mx" || *v == "relay")
+        .unwrap_or("direct_mx")
+        .to_string();
     
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, training_data_consent = ?, \
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, training_data_consent = ?, \
                               training_consent_updated_at = CASE WHEN training_data_consent != ? THEN CURRENT_TIMESTAMP ELSE training_consent_updated_at END, \
                               timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
+        .bind(&mail_send_method)
         .bind(payload.training_data_consent)
         .bind(payload.training_data_consent)
         .bind(&timezone)
@@ -2391,55 +2416,36 @@ async fn post_send_auto_reply(
         return Json(serde_json::json!({ "status": "error", "message": "Draft not found" }));
     };
 
-    // Send the email via SMTP
-    let smtp_ready = state.config.smtp_relay_host.as_deref()
-        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
-        .unwrap_or(false);
-
-    if !smtp_ready {
-        return Json(serde_json::json!({ "status": "error", "message": "SMTP not configured" }));
-    }
-
-    let from_addr = extract_pure_email(&state.config.assistant_email);
     let to_addr = recipient.clone();
     let subject = "Re: Auto-Reply";
+    let preferred_send_method = sqlx::query_scalar::<_, String>("SELECT mail_send_method FROM users WHERE id = ? LIMIT 1")
+        .bind(&user_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "direct_mx".to_string());
 
-    let message = MessageBuilder::new()
-        .from(from_addr.as_str())
-        .reply_to(from_addr.as_str())
-        .to(to_addr.as_str())
-        .subject(subject)
-        .text_body(reply_body.clone());
-
-    let host = state.config.smtp_relay_host.as_ref().unwrap().clone();
-    let port = state.config.smtp_relay_port;
-    let user = state.config.smtp_relay_user.clone().unwrap_or_default();
-    let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
-
-    let is_implicit = port == 465;
-    let mut builder = SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
-    if !user.is_empty() {
-        builder = builder.credentials((user.as_str(), pass.as_str()));
-    }
-
-    match builder.connect().await {
-        Ok(mut client) => match client.send(message).await {
-            Ok(_) => {
-                // Mark as sent
-                let _ = sqlx::query("UPDATE auto_replies SET reply_status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?")
-                    .bind(&payload.reply_id)
-                    .execute(&state.pool)
-                    .await;
-                Json(serde_json::json!({ "status": "success", "message": "Reply sent" }))
-            }
-            Err(e) => {
-                tracing::error!("SMTP send failed for auto-reply: {:?}", e);
-                Json(serde_json::json!({ "status": "error", "message": "Failed to send reply" }))
-            }
-        },
+    match deliver_email_with_fallback(
+        &state,
+        &to_addr,
+        subject,
+        &reply_body,
+        &reply_body,
+        &preferred_send_method,
+    )
+    .await {
+        Ok(_) => {
+            let _ = sqlx::query("UPDATE auto_replies SET reply_status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(&payload.reply_id)
+                .execute(&state.pool)
+                .await;
+            Json(serde_json::json!({ "status": "success", "message": "Reply sent" }))
+        }
         Err(e) => {
-            tracing::error!("SMTP connect failed: {:?}", e);
-            Json(serde_json::json!({ "status": "error", "message": "SMTP connection failed" }))
+            tracing::error!("Auto-reply delivery failed: {}", e);
+            log_mail_event(&state.pool, "ERROR", "smtp_send", &e, Some(&payload.reply_id), Some(&user_id)).await;
+            Json(serde_json::json!({ "status": "error", "message": "Failed to send reply" }))
         }
     }
 }
@@ -2485,19 +2491,6 @@ async fn send_data_deletion_confirmation_email(
     snapshot: &DataDeletionSnapshot,
     confirm_url: &str,
 ) -> Result<(), String> {
-    let smtp_ready = state.config.smtp_relay_host.as_deref()
-        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
-        .unwrap_or(false);
-
-    if !smtp_ready {
-        return Err("SMTP relay is not configured (SMTP_RELAY_HOST missing or placeholder).".to_string());
-    }
-
-    let host = state.config.smtp_relay_host.clone().unwrap_or_default();
-    let port = state.config.smtp_relay_port;
-    let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
-    let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
-
     let (subject, text_body, html_body) = if preferred_language == "zh-TW" {
         (
             "AI Mail Butler - 請確認刪除您的資料",
@@ -2560,47 +2553,25 @@ async fn send_data_deletion_confirmation_email(
         )
     };
 
-    // RFC 5321: From MUST be the actual SMTP relay account email (no display name allowed by Gmail).
-    // Use Reply-To for any display name or alternative reply address.
-    let from_addr = extract_pure_email(&state.config.assistant_email);
+    let preferred_send_method = sqlx::query_scalar::<_, String>(
+        "SELECT mail_send_method FROM users WHERE email = ? LIMIT 1"
+    )
+    .bind(user_email)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "direct_mx".to_string());
 
-    let message = MessageBuilder::new()
-        .from(from_addr.as_str())
-        .reply_to(from_addr.as_str())
-        .to(user_email.to_string())
-        .subject(subject)
-        .text_body(text_body)
-        .html_body(html_body);
-
-    let is_implicit = port == 465;
-    let mut builder = SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
-    if !smtp_user.is_empty() {
-        builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
-    }
-
-    match builder.connect().await {
-        Ok(mut client) => {
-            match client.send(message).await {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!(
-                    "SMTP send failed to {} via {}:{} ({})",
-                    user_email,
-                    host,
-                    port,
-                    e
-                )),
-            }
-        }
-        Err(e) => {
-            Err(format!(
-                "SMTP connect failed to {}:{} while sending GDPR confirmation to {} ({})",
-                host,
-                port,
-                user_email,
-                e
-            ))
-        }
-    }
+    deliver_email_with_fallback(
+        state,
+        user_email,
+        subject,
+        &text_body,
+        &html_body,
+        &preferred_send_method,
+    )
+    .await
 }
 
 async fn post_request_data_deletion(

@@ -4,6 +4,7 @@ import axios from 'axios';
 export interface User {
   id: string;
   email: string;
+  mail_send_method: string;
   is_onboarded: boolean;
   preferences: string | null;
   role: 'admin' | 'developer' | 'user';

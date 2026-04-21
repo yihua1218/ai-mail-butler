@@ -11,6 +11,8 @@ use crate::ai::AiClient;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 use chrono::Utc;
+use lettre::message::{Message, SinglePart};
+use lettre::{SmtpTransport, Transport};
 
 use crate::config::Config;
 
@@ -169,7 +171,43 @@ fn build_login_url(config: &Config, token: &str) -> String {
     format!("{}/login?token={}", base_url, token)
 }
 
-async fn send_basic_email(config: &Config, to_email: &str, subject: &str, text_body: &str) -> Result<(), String> {
+fn parse_mx_records(output: &str) -> Option<String> {
+    let mut records: Vec<(u32, String)> = output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                let priority: u32 = parts[0].parse().ok()?;
+                let host = parts[1].trim_end_matches('.').to_string();
+                if host.is_empty() { None } else { Some((priority, host)) }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    records.sort_by_key(|(p, _)| *p);
+    records.into_iter().next().map(|(_, host)| host)
+}
+
+async fn lookup_mx_host(domain: &str) -> Option<String> {
+    match tokio::process::Command::new("dig")
+        .args(["+short", "MX", domain])
+        .output()
+        .await {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                None
+            } else {
+                parse_mx_records(&stdout)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+async fn send_via_relay(config: &Config, to_email: &str, subject: &str, text_body: &str) -> Result<(), String> {
     let smtp_ready = config
         .smtp_relay_host
         .as_deref()
@@ -199,9 +237,70 @@ async fn send_basic_email(config: &Config, to_email: &str, subject: &str, text_b
     }
 
     match builder.connect().await {
-        Ok(mut client) => client.send(message).await.map_err(|e| format!("{:?}", e)),
-        Err(e) => Err(format!("{:?}", e)),
+        Ok(mut client) => client.send(message).await.map_err(|e| format!("relay send failed: {:?}", e)),
+        Err(e) => Err(format!("relay connect failed: {:?}", e)),
     }
+}
+
+async fn send_via_direct_mx(config: &Config, to_email: &str, subject: &str, text_body: &str) -> Result<(), String> {
+    let from_addr: lettre::message::Mailbox = extract_pure_email(&config.assistant_email)
+        .parse()
+        .unwrap_or_else(|_| "noreply@example.com".parse().expect("default mailbox"));
+    let to_addr: lettre::message::Mailbox = to_email
+        .parse()
+        .map_err(|e| format!("invalid recipient mailbox: {:?}", e))?;
+
+    let domain = to_email.split('@').nth(1).unwrap_or("").trim();
+    if domain.is_empty() {
+        return Err("recipient domain missing".to_string());
+    }
+
+    let Some(mx) = lookup_mx_host(domain).await else {
+        return Err(format!("mx lookup failed for domain {}", domain));
+    };
+
+    let email_msg = Message::builder()
+        .from(from_addr)
+        .to(to_addr)
+        .subject(subject)
+        .singlepart(SinglePart::plain(text_body.to_string()))
+        .map_err(|e| format!("direct message build failed: {:?}", e))?;
+
+    let mailer = SmtpTransport::relay(&mx)
+        .map_err(|e| format!("direct transport build failed: {:?}", e))?
+        .port(25)
+        .build();
+
+    mailer.send(&email_msg).map_err(|e| format!("direct mx send failed: {:?}", e))?;
+    Ok(())
+}
+
+async fn send_basic_email(
+    config: &Config,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+    preferred_method: &str,
+) -> Result<(), String> {
+    let methods = if preferred_method == "relay" {
+        vec!["relay", "direct_mx"]
+    } else {
+        vec!["direct_mx", "relay"]
+    };
+
+    let mut errors = Vec::new();
+    for method in methods {
+        let result = if method == "relay" {
+            send_via_relay(config, to_email, subject, text_body).await
+        } else {
+            send_via_direct_mx(config, to_email, subject, text_body).await
+        };
+        match result {
+            Ok(_) => return Ok(()),
+            Err(e) => errors.push(format!("{}: {}", method, e)),
+        }
+    }
+    Err(errors.join(" | "))
 }
 
 #[derive(serde::Deserialize)]
@@ -864,7 +963,7 @@ impl MailService {
                                             )
                                         };
 
-                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body).await {
+                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body, &u.mail_send_method).await {
                                             log_mail_event(
                                                 &pool,
                                                 "ERROR",
@@ -963,65 +1062,32 @@ impl MailService {
                                                         
                                                         // If auto_reply is enabled, send immediately
                                                         if u.auto_reply {
-                                                            let host = config
-                                                                .smtp_relay_host
-                                                                .clone()
-                                                                .unwrap_or_default();
-                                                            let port = config.smtp_relay_port;
-                                                            let smtp_user = config
-                                                                .smtp_relay_user
-                                                                .clone()
-                                                                .unwrap_or_default();
-                                                            let pass = config
-                                                                .smtp_relay_pass
-                                                                .clone()
-                                                                .unwrap_or_default();
-
-                                                            let from_addr_pure = if let Some(idx) = config.assistant_email.find('<') {
-                                                                config.assistant_email[idx + 1..].trim_end_matches('>').to_string()
-                                                            } else {
-                                                                config.assistant_email.clone()
-                                                            };
-                                                            
-                                                            let from_clean_clone = from_clean.clone();
-                                                            let subject_clone = subject.clone();
+                                                            let to_email = from_clean.clone();
+                                                            let subject_line = format!("Re: {}", subject);
                                                             let reply_body_clone = reply_body.clone();
                                                             let id_clone = id.clone();
-                                                            let is_implicit = port == 465;
                                                             let pool_clone = pool.clone();
                                                             let reply_id_clone = reply_id.clone();
-                                                            
+                                                            let config_clone = config.clone();
+                                                            let preferred_method = u.mail_send_method.clone();
+
                                                             tokio::spawn(async move {
-                                                                let message = mail_send::mail_builder::MessageBuilder::new()
-                                                                    .from(from_addr_pure.as_str())
-                                                                    .reply_to(from_addr_pure.as_str())
-                                                                    .to(from_clean_clone.as_str())
-                                                                    .subject(format!("Re: {}", subject_clone))
-                                                                    .text_body(reply_body_clone);
-                                                                
-                                                                let mut builder = mail_send::SmtpClientBuilder::new(host.as_str(), port);
-                                                                builder = builder.implicit_tls(is_implicit);
-                                                                if !smtp_user.is_empty() {
-                                                                    builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
-                                                                }
-                                                                
-                                                                match builder.connect().await {
-                                                                    Ok(mut client) => {
-                                                                        match client.send(message).await {
-                                                                            Ok(_) => {
-                                                                                info!("Auto-reply sent for {} via rule", id_clone);
-                                                                                let _ = sqlx::query("UPDATE auto_replies SET sent_at = CURRENT_TIMESTAMP WHERE id = ?")
-                                                                                    .bind(&reply_id_clone)
-                                                                                    .execute(&pool_clone)
-                                                                                    .await;
-                                                                            }
-                                                                            Err(e) => {
-                                                                                error!("Failed to send auto-reply: {:?}", e);
-                                                                            }
-                                                                        }
+                                                                match send_basic_email(
+                                                                    &config_clone,
+                                                                    &to_email,
+                                                                    &subject_line,
+                                                                    &reply_body_clone,
+                                                                    &preferred_method,
+                                                                ).await {
+                                                                    Ok(_) => {
+                                                                        info!("Auto-reply sent for {} via rule", id_clone);
+                                                                        let _ = sqlx::query("UPDATE auto_replies SET sent_at = CURRENT_TIMESTAMP WHERE id = ?")
+                                                                            .bind(&reply_id_clone)
+                                                                            .execute(&pool_clone)
+                                                                            .await;
                                                                     }
                                                                     Err(e) => {
-                                                                        error!("SMTP connect failed for auto-reply: {:?}", e);
+                                                                        error!("Auto-reply delivery failed: {}", e);
                                                                     }
                                                                 }
                                                             });
@@ -1259,7 +1325,7 @@ impl MailService {
                                             )
                                         };
 
-                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body).await {
+                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body, &u.mail_send_method).await {
                                             log_mail_event(
                                                 &pool,
                                                 "ERROR",

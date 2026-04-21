@@ -583,6 +583,7 @@ const Settings: React.FC = () => {
         auto_reply: user.auto_reply,
         dry_run: user.dry_run,
         email_format: user.email_format,
+        mail_send_method: user.mail_send_method || 'direct_mx',
         training_data_consent: !!user.training_data_consent,
         timezone: user.timezone || 'UTC',
         preferred_language: user.preferred_language || 'en',
@@ -695,6 +696,18 @@ const Settings: React.FC = () => {
                 <Radio value="both">{t('format_both')}</Radio>
                 <Radio value="html">{t('format_html')}</Radio>
                 <Radio value="plain">{t('format_plain')}</Radio>
+              </Radio.Group>
+            </Form.Item>
+
+            <Form.Item
+              name="mail_send_method"
+              label="Mail Send Method"
+              tooltip="Preferred delivery method for outgoing emails. The system will automatically fall back to the other method if delivery fails."
+              rules={[{ required: true, message: 'Please select a mail send method' }]}
+            >
+              <Radio.Group>
+                <Radio value="direct_mx">Direct MX (default)</Radio>
+                <Radio value="relay">SMTP Relay</Radio>
               </Radio.Group>
             </Form.Item>
 
