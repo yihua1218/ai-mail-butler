@@ -104,6 +104,97 @@ fn redact_training_text(input: &str) -> String {
     long_token_re.replace_all(&out, "[REDACTED_TOKEN]").to_string()
 }
 
+fn extract_query_terms(query: &str) -> Vec<String> {
+    let lower = query.trim().to_lowercase();
+    if lower.is_empty() {
+        return Vec::new();
+    }
+
+    let mut terms: Vec<String> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '@')
+        .filter(|t| t.len() >= 3)
+        .map(|t| t.to_string())
+        .collect();
+
+    terms.push(lower);
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn best_matching_snippet(content: &str, terms: &[String]) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_lower = line.to_lowercase();
+        if terms.iter().any(|t| line_lower.contains(t)) {
+            let start = i.saturating_sub(2);
+            let end = (i + 4).min(lines.len().saturating_sub(1));
+            return lines[start..=end].join("\n");
+        }
+    }
+
+    lines.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+}
+
+async fn build_docs_context(query: &str) -> Option<String> {
+    let terms = extract_query_terms(query);
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut entries = match fs::read_dir("docs").await {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    let mut scored: Vec<(usize, String, String)> = Vec::new();
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if ext != "md" {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        let lower = content.to_lowercase();
+        let score: usize = terms.iter().map(|t| lower.matches(t).count()).sum();
+        if score == 0 {
+            continue;
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown.md")
+            .to_string();
+        let snippet = best_matching_snippet(&content, &terms);
+        scored.push((score, file_name, snippet));
+    }
+
+    if scored.is_empty() {
+        return None;
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let context = scored
+        .into_iter()
+        .take(3)
+        .map(|(_, file, snippet)| format!("[Source: {}]\n{}", file, snippet))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    Some(context)
+}
+
 async fn log_mail_event(
     pool: &SqlitePool,
     level: &str,
@@ -442,6 +533,7 @@ async fn post_chat(
     let message = payload.message;
     let guest_name = payload.guest_name;
     let pool = &state.pool;
+    let docs_context = build_docs_context(&message).await;
 
     let chat_res = if !email.is_empty() {
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
@@ -470,7 +562,7 @@ async fn post_chat(
             user.preferences = Some(new_pref);
 
             let memory = OnboardingService::get_memory(pool, &user.id).await;
-            let mut res = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory, &state.config.assistant_email, None).await {
+            let mut res = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory, &state.config.assistant_email, None, docs_context.clone()).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Failed to generate reply: {}", e);
@@ -517,11 +609,11 @@ async fn post_chat(
 
             res
         } else {
-            OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email).await
+            OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email, docs_context.clone()).await
                 .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
         }
     } else {
-        OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email).await
+        OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email, docs_context.clone()).await
             .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
     };
 

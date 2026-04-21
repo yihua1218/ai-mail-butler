@@ -678,6 +678,7 @@ impl MailService {
                                             &memory,
                                             &config.assistant_email,
                                             pdf_context,
+                                            None,
                                         )
                                         .await
                                         {

@@ -13,7 +13,7 @@ impl OnboardingService {
         Ok(res.content)
     }
 
-    pub async fn generate_reply(client: &AiClient, user: &User, current_message: &str, memory: &str, assistant_email: &str, pdf_context: Option<String>) -> Result<crate::ai::ChatResult> {
+    pub async fn generate_reply(client: &AiClient, user: &User, current_message: &str, memory: &str, assistant_email: &str, pdf_context: Option<String>, docs_context: Option<String>) -> Result<crate::ai::ChatResult> {
         let name_context = if let Some(name) = &user.display_name {
             format!("The user's name is {}. Address them by their name when appropriate.\n", name)
         } else {
@@ -47,7 +47,13 @@ impl OnboardingService {
             "".to_string()
         };
 
-        let prompt_with_context = format!("{}\n{}\nUser preferences context: {}\nLong-term memory context: {}\n{}", system_prompt, memory_instruction, user.preferences.as_deref().unwrap_or("None"), memory, attachment_context);
+        let docs_reference_context = if let Some(docs) = docs_context {
+            format!("\n[DOCUMENTATION CONTEXT]\n{}\n", docs)
+        } else {
+            "".to_string()
+        };
+
+        let prompt_with_context = format!("{}\n{}\nUser preferences context: {}\nLong-term memory context: {}\n{}\n{}", system_prompt, memory_instruction, user.preferences.as_deref().unwrap_or("None"), memory, attachment_context, docs_reference_context);
         client.chat(&prompt_with_context, current_message).await
     }
 
@@ -133,9 +139,15 @@ impl OnboardingService {
         Ok(())
     }
 
-    pub async fn generate_anonymous_reply(client: &AiClient, current_message: &str, guest_name: Option<String>, assistant_email: &str) -> Result<crate::ai::ChatResult> {
+    pub async fn generate_anonymous_reply(client: &AiClient, current_message: &str, guest_name: Option<String>, assistant_email: &str, docs_context: Option<String>) -> Result<crate::ai::ChatResult> {
         let name_context = if let Some(name) = guest_name {
             format!("The person you are talking to is named {}. Address them by their name when appropriate.\n", name)
+        } else {
+            "".to_string()
+        };
+
+        let docs_reference_context = if let Some(docs) = docs_context {
+            format!("\n[DOCUMENTATION CONTEXT]\n{}\n", docs)
         } else {
             "".to_string()
         };
@@ -154,7 +166,8 @@ You are currently talking to an anonymous visitor. Explain these features if ask
     - You MAY do short casual chit-chat, but keep it brief and guide back to email-assistant tasks.
     - Refuse coding/programming requests and other unrelated requests.
     - When refusing, politely explain your scope and offer email-assistant help.
-IMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.", name_context, assistant_email, assistant_email);
+IMPORTANT: Detect the language of the user's message. Default to Traditional Chinese (繁體中文) unless the user explicitly writes in Simplified Chinese (簡體中文). If the user writes in English or other languages, respond in that language.
+{}", name_context, assistant_email, assistant_email, docs_reference_context);
         
         client.chat(&system_prompt, current_message).await
     }
