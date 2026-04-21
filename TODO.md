@@ -20,6 +20,14 @@
 - [x] Create AWS EC2 Docker Deployment Guides (EN/ZH).
 - [ ] Add unit and integration tests.
 - [x] Optimize Docker build process (Frontend dist bundling).
+- [ ] Implement consent audit trail table (policy version, consent source, timestamp, optional IP/UA) for legal proof.
+- [ ] Add DSAR APIs (access/export/correction/restriction/withdraw-consent) with immutable audit logs.
+- [ ] Implement configurable data-retention policy and scheduled purge for `chat_transcripts`, `chat_feedback`, and logs.
+- [ ] Add cross-border transfer disclosure fields and data-location reporting for training/export destinations.
+- [ ] Add explicit "Do Not Sell/Share" handling and disclosure endpoint for US state privacy expectations.
+- [ ] Publish and enforce NY SHIELD-aligned baseline controls (at-rest encryption, access controls, incident response runbook).
+- [ ] Add prohibited-use guardrail + policy notice for NYC AEDT-sensitive scenarios (e.g., employment decision support).
+- [ ] Add minor-data handling controls (age gate + guardian consent policy hooks) for COPPA-like risk reduction.
 
 ## Low Priority
 - [ ] Support switching between multiple AI models via UI.
