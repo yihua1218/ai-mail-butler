@@ -24,7 +24,7 @@ import time
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 2525
 DEFAULT_FROM = "tester@example.com"
-DEFAULT_TO   = "assistant@mail.yihua.app"   # adjust to a user in your DB
+DEFAULT_TO   = "assistant@mail.example.com"   # adjust to a user in your DB
 SPOOL_DIR    = "data/mail_spool"
 
 # ---------------------------------------------------------------------------
