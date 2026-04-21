@@ -71,6 +71,7 @@ Create a `.env` file with your settings:
 cat <<EOF > .env
 DATABASE_URL=sqlite:data/data.sqlite
 PORT=3000
+PUBLIC_URL=https://yourdomain.com
 ADMIN_EMAIL=your-admin@example.com
 ASSISTANT_EMAIL=assistant@yourdomain.com
 AI_API_BASE_URL=http://your-ai-server-ip:1234/v1
@@ -121,6 +122,7 @@ Ensure the following ports are open in your AWS EC2 Security Group:
 | Type | Port | Description |
 | :--- | :--- | :--- |
 | HTTP | 80 | Access the Dashboard web UI |
+| HTTPS | 443 | Secure access to Dashboard (SSL/TLS, required for OAuth and production use) |
 | SMTP | 25 | Receive forwarded emails |
 | SSH | 22 | Server management |
 

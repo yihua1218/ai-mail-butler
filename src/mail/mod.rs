@@ -16,6 +16,17 @@ use crate::config::Config;
 
 pub struct MailService;
 
+async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context: Option<&str>) {
+    let _ = sqlx::query(
+        "INSERT INTO mail_errors (error_type, message, context) VALUES (?, ?, ?)"
+    )
+    .bind(error_type)
+    .bind(msg)
+    .bind(context)
+    .execute(pool)
+    .await;
+}
+
 impl MailService {
     pub async fn start(pool: SqlitePool, ai_client: AiClient, config: Arc<Config>) -> Result<()> {
         let spool_dir = "data/mail_spool";
@@ -152,13 +163,19 @@ impl MailService {
                                                         match builder.connect().await {
                                                             Ok(mut client) => {
                                                                 if let Err(e) = client.send(message).await {
-                                                                    error!("Failed to send AI reply via mail-send: {:?}", e);
+                                                                    let err_msg = format!("{:?}", e);
+                                                                    error!("Failed to send AI reply via mail-send: {}", err_msg);
+                                                                    log_mail_error(&pool_clone, "smtp_send", &err_msg, Some(&email_id)).await;
                                                                 } else {
                                                                     sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
                                                                         .bind(&email_id).execute(&pool_clone).await.unwrap_or_default();
                                                                 }
                                                             }
-                                                            Err(e) => error!("Failed to connect to SMTP for AI reply: {:?}", e),
+                                                            Err(e) => {
+                                                                let err_msg = format!("{:?}", e);
+                                                                error!("Failed to connect to SMTP for AI reply: {}", err_msg);
+                                                                log_mail_error(&pool_clone, "smtp_connect", &err_msg, Some(&email_id)).await;
+                                                            }
                                                         }
                                                     });
                                                 } else {
@@ -167,7 +184,11 @@ impl MailService {
                                                         .bind(&id).execute(&pool).await.unwrap_or_default();
                                                 }
                                             },
-                                            Err(e) => error!("AI reply failed: {}", e)
+                                            Err(e) => {
+                                                let err_msg = format!("{}", e);
+                                                error!("AI reply failed: {}", err_msg);
+                                                log_mail_error(&pool, "ai_error", &err_msg, Some(&id)).await;
+                                            }
                                         }
                                     }
                                 } else {

@@ -16,6 +16,26 @@ use crate::models::{User, EmailRecord};
 use crate::ai::AiClient;
 use crate::services::OnboardingService;
 
+#[derive(sqlx::FromRow, Serialize)]
+struct MailError {
+    id: i64,
+    error_type: String,
+    message: String,
+    context: Option<String>,
+    occurred_at: String,
+}
+
+async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context: Option<&str>) {
+    let _ = sqlx::query(
+        "INSERT INTO mail_errors (error_type, message, context) VALUES (?, ?, ?)"
+    )
+    .bind(error_type)
+    .bind(msg)
+    .bind(context)
+    .execute(pool)
+    .await;
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
@@ -380,7 +400,9 @@ async fn post_magic_link(
                 Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }))
             }
             Err(e) => {
-                tracing::error!("mail-send delivery failed: {:?}. Login URL is in server console.", e);
+                let err_msg = format!("{:?}", e);
+                tracing::error!("mail-send delivery failed: {}. Login URL is in server console.", err_msg);
+                log_mail_error(&state.pool, "smtp_send", &err_msg, Some(&email)).await;
                 Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
             }
         }
@@ -569,6 +591,27 @@ async fn post_settings(
     }
 }
 
+async fn get_admin_errors(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let is_admin = query.email.as_deref()
+        .map(|e| Some(e) == state.admin_email.as_deref())
+        .unwrap_or(false);
+
+    if !is_admin {
+        return Json(serde_json::json!({ "error": "Unauthorized" }));
+    }
+
+    let errors = sqlx::query_as::<_, MailError>(
+        "SELECT id, error_type, message, context, CAST(occurred_at AS TEXT) as occurred_at \
+         FROM mail_errors ORDER BY occurred_at DESC LIMIT 200"
+    )
+    .fetch_all(&state.pool).await.unwrap_or_default();
+
+    Json(serde_json::json!({ "errors": errors }))
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -578,6 +621,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/me", get(get_me))
         .route("/settings", post(post_settings))
         .route("/dashboard", get(get_dashboard))
+        .route("/admin/errors", get(get_admin_errors))
         .route("/chat", post(post_chat));
 
     let app = Router::new()

@@ -24,6 +24,7 @@ The application requires environment variables for its configuration. These are 
     # Server Configuration
     PORT=3000
     HOST=0.0.0.0 # Use 0.0.0.0 to be accessible from outside the container
+    PUBLIC_URL=https://your-domain.com # Public base URL used in magic login links sent by email
     RUST_LOG=info,ai_mail_butler=debug
     ADMIN_EMAIL=your-admin-email@example.com
 
@@ -46,6 +47,7 @@ The application requires environment variables for its configuration. These are 
     ```
     **Important**:
     - Set `HOST` to `0.0.0.0` to allow the server to accept connections from outside the container.
+    - Set `PUBLIC_URL` to your public domain (e.g. `https://your-domain.com`) so magic login links in emails point to the correct address instead of `localhost`.
     - The `DATABASE_URL` should point to the path inside the container, which is `/app/data/data.sqlite` as defined by the volume mount.
 
 ## Step 2: Modify the Compose File

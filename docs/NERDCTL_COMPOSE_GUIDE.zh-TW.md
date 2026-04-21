@@ -24,6 +24,7 @@
     # 伺服器設定
     PORT=3000
     HOST=0.0.0.0 # 使用 0.0.0.0 以便從容器外部存取
+    PUBLIC_URL=https://your-domain.com # 對外公開的基礎網址，用於郵件中的魔術登入連結
     RUST_LOG=info,ai_mail_butler=debug
     ADMIN_EMAIL=your-admin-email@example.com
 
@@ -46,6 +47,7 @@
     ```
     **重要提示**:
     - 將 `HOST` 設定為 `0.0.0.0` 以允許伺服器接受來自容器外部的連線。
+    - 將 `PUBLIC_URL` 設定為您的公開網域（例如 `https://your-domain.com`），以確保郵件中的魔術登入連結指向正確的位址，而非 `localhost`。
     - `DATABASE_URL` 應指向容器內的路徑，根據 volume 掛載的定義，這裡是 `/app/data/data.sqlite`。
 
 ## 步驟 2：修改 Compose 檔案

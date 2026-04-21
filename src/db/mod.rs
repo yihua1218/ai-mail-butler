@@ -98,6 +98,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // Mail server error log (SMTP, AI, parsing failures)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS mail_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            error_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            context TEXT,
+            occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 

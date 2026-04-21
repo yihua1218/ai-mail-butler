@@ -71,6 +71,7 @@ mkdir ~/ai-mail-butler && cd ~/ai-mail-butler
 cat <<EOF > .env
 DATABASE_URL=sqlite:data/data.sqlite
 PORT=3000
+PUBLIC_URL=https://yourdomain.com
 ADMIN_EMAIL=your-admin@example.com
 ASSISTANT_EMAIL=assistant@yourdomain.com
 AI_API_BASE_URL=http://localhost:1234/v1
@@ -121,6 +122,7 @@ docker run -d \
 | 類型 | 通訊埠 | 說明 |
 | :--- | :--- | :--- |
 | HTTP | 80 | 存取 Dashboard 網頁 |
+| HTTPS | 443 | 安全加密存取 Dashboard（SSL/TLS，OAuth 及正式環境必要）|
 | SMTP | 25 | 接收轉寄郵件 |
 | SSH | 22 | 管理伺服器用 |
 

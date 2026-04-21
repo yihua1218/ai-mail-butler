@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Layout, Menu, Typography, Card, Table, Row, Col, Statistic, Button, 
-  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio
+  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge
 } from 'antd';
-import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined } from '@ant-design/icons';
+import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
@@ -37,6 +37,7 @@ const Dashboard: React.FC = () => {
   const [allEmails, setAllEmails] = useState<any[]>([]);
   const [globalStats, setGlobalStats] = useState<any>(null);
   const [personalStats, setPersonalStats] = useState<any>(null);
+  const [mailErrors, setMailErrors] = useState<any[]>([]);
 
   useEffect(() => {
     const url = user ? `/api/dashboard?email=${user.email}` : `/api/dashboard`;
@@ -51,6 +52,11 @@ const Dashboard: React.FC = () => {
         setPersonalStats(res.data.personal_stats);
       }
     });
+    if (user?.role === 'admin') {
+      axios.get(`/api/admin/errors?email=${user.email}`).then(res => {
+        setMailErrors(res.data.errors || []);
+      }).catch(() => {});
+    }
   }, [user]);
 
   const GlobalStatsDisplay = () => (
@@ -109,6 +115,25 @@ const Dashboard: React.FC = () => {
     { title: 'Received At', dataIndex: 'received_at', key: 'received_at' }
   ];
 
+  const errorTypeColor: Record<string, string> = {
+    smtp_connect: 'red',
+    smtp_send: 'orange',
+    ai_error: 'purple',
+  };
+
+  const errorColumns = [
+    {
+      title: 'Type',
+      dataIndex: 'error_type',
+      key: 'error_type',
+      width: 120,
+      render: (v: string) => <Tag color={errorTypeColor[v] || 'default'}>{v}</Tag>,
+    },
+    { title: 'Message', dataIndex: 'message', key: 'message', ellipsis: true },
+    { title: 'Context', dataIndex: 'context', key: 'context', width: 180, ellipsis: true },
+    { title: 'Time', dataIndex: 'occurred_at', key: 'occurred_at', width: 170 },
+  ];
+
   if (user?.role === 'admin') {
     return (
       <div>
@@ -126,6 +151,22 @@ const Dashboard: React.FC = () => {
           <Col xs={24} lg={12}>
             <Card bordered={false} title="All Processed Emails (System-wide)">
               <Table dataSource={allEmails} rowKey="id" columns={columns} pagination={{ pageSize: 5 }} />
+            </Card>
+          </Col>
+          <Col xs={24}>
+            <Card
+              bordered={false}
+              title={
+                <span>
+                  <WarningOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
+                  Mail Server Error Log
+                  {mailErrors.length > 0 && <Badge count={mailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
+                </span>
+              }
+            >
+              {mailErrors.length === 0
+                ? <Alert message="No errors recorded." type="success" showIcon />
+                : <Table dataSource={mailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 10 }} size="small" />}
             </Card>
           </Col>
         </Row>
