@@ -515,11 +515,6 @@ async fn post_magic_link(
     );
     tracing::info!("{}", log_box);
 
-    let plain_text = format!(
-        "Welcome to AI Mail Butler! / 歡迎使用 AI Mail Butler！\n\nClick the link below to securely login without a password. / 請點擊下方連結安全無密碼登入：\n{}",
-        login_url
-    );
-
     // Check if SMTP is configured with real values (not placeholder)
     let smtp_ready = state.config.smtp_relay_host.as_deref()
         .map(|h| !h.is_empty() && h != "smtp.your-server-address")
@@ -527,20 +522,35 @@ async fn post_magic_link(
 
     let from_addr: lettre::message::Mailbox = state.config.assistant_email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
     let to_addr: lettre::message::Mailbox = email.parse().unwrap_or_else(|_| "noreply@example.com".parse().unwrap());
-    let subject = "Your AI Mail Butler Login Link / 您的登入連結";
+    let mut subject = "Your AI Mail Butler Login Link".to_string();
+    let mut plain_text = format!(
+        "Welcome to AI Mail Butler!\n\nClick the link below to securely login without a password:\n{}",
+        login_url
+    );
     if smtp_ready {
         let host = state.config.smtp_relay_host.as_ref().unwrap();
         let port = state.config.smtp_relay_port;
         let user = state.config.smtp_relay_user.clone().unwrap_or_default();
         let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
 
-        let user_pref: String = sqlx::query_scalar("SELECT email_format FROM users WHERE email = ?")
+        let user_pref: (String, String) = sqlx::query_as("SELECT email_format, preferred_language FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(&state.pool).await
-            .unwrap_or(Some("both".to_string()))
-            .unwrap_or("both".to_string());
+            .unwrap_or(Some(("both".to_string(), "en".to_string())))
+            .unwrap_or(("both".to_string(), "en".to_string()));
+        let email_format = user_pref.0;
+        let preferred_language = user_pref.1;
 
-        let html_body = format!(
+        if preferred_language == "zh-TW" {
+            subject = "您的 AI 郵件助理登入連結".to_string();
+            plain_text = format!(
+                "歡迎使用 AI Mail Butler！\n\n請點擊下方連結安全無密碼登入：\n{}",
+                login_url
+            );
+        }
+
+        let html_body = if preferred_language == "zh-TW" {
+            format!(
             r#"<!DOCTYPE html>
 <html>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 40px; background-color: #f5f5f7; color: #1d1d1f;">
@@ -558,15 +568,36 @@ async fn post_magic_link(
 </body>
 </html>"#,
             login_url, login_url
-        );
+            )
+        } else {
+            format!(
+                r#"<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 40px; background-color: #f5f5f7; color: #1d1d1f;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 32px; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+        <h1 style="font-size: 24px; font-weight: 600; margin-bottom: 16px;">AI Mail Butler</h1>
+        <p style="font-size: 16px; line-height: 1.5; margin-bottom: 24px;">Hello! Click the button below to login to your AI Mail Butler dashboard.</p>
+        <div style="text-align: center; margin: 32px 0;">
+            <a href="{}" style="display: inline-block; padding: 14px 32px; background-color: #007aff; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: 500; font-size: 16px;">Login Dashboard</a>
+        </div>
+        <p style="font-size: 14px; color: #86868b; margin-top: 24px;">If the button does not work, copy this link in browser:<br>
+        <span style="word-break: break-all; color: #007aff;">{}</span></p>
+        <hr style="border: none; border-top: 1px solid #d2d2d7; margin: 32px 0;">
+        <p style="font-size: 12px; color: #86868b;">If you did not request this link, please ignore this email.</p>
+    </div>
+</body>
+</html>"#,
+                login_url, login_url
+            )
+        };
 
         // Build message using mail-send's builder
         let mut builder = MessageBuilder::new()
             .from(from_addr.to_string())
             .to(to_addr.to_string())
-            .subject(subject);
+            .subject(subject.as_str());
 
-        match user_pref.as_str() {
+        match email_format.as_str() {
             "html" => { builder = builder.html_body(html_body); },
             "plain" => { builder = builder.text_body(plain_text.clone()); },
             _ => { 
@@ -577,7 +608,7 @@ async fn post_magic_link(
         let message = builder;
 
         let is_implicit = port == 465;
-        tracing::debug!(">>> [SMTP] Connecting to {}:{} (Implicit TLS: {}, Format: {})", host, port, is_implicit, user_pref);
+        tracing::debug!(">>> [SMTP] Connecting to {}:{} (Implicit TLS: {}, Format: {}, Lang: {})", host, port, is_implicit, email_format, preferred_language);
 
         let send_task = async move {
             let mut builder = SmtpClientBuilder::new(host.as_str(), port);
@@ -612,7 +643,7 @@ async fn post_magic_link(
 
         if let Some(mx) = mx_host {
             tracing::info!("No SMTP relay configured. Attempting direct MX delivery to {} ({})", mx, domain);
-            match Message::builder().from(from_addr).to(to_addr).subject(subject).singlepart(SinglePart::plain(plain_text)) {
+            match Message::builder().from(from_addr).to(to_addr).subject(subject.as_str()).singlepart(SinglePart::plain(plain_text)) {
                 Ok(email_msg) => {
                     // Direct SMTP: connect to MX on port 25, STARTTLS if available
                     match SmtpTransport::relay(&mx) {
@@ -743,6 +774,7 @@ struct SettingsRequest {
     dry_run: bool,
     email_format: String,
     timezone: Option<String>,
+    preferred_language: Option<String>,
     display_name: Option<String>,
     assistant_name_zh: Option<String>,
     assistant_name_en: Option<String>,
@@ -799,13 +831,21 @@ async fn post_settings(
         .filter(|v| !v.is_empty())
         .unwrap_or("UTC")
         .to_string();
+    let preferred_language = payload
+        .preferred_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("en")
+        .to_string();
     
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, timezone = ?, display_name = ?, \
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, timezone = ?, preferred_language = ?, display_name = ?, \
                               assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
         .bind(&timezone)
+        .bind(&preferred_language)
         .bind(&payload.display_name)
         .bind(&payload.assistant_name_zh)
         .bind(&payload.assistant_name_en)
@@ -998,6 +1038,7 @@ async fn post_toggle_rule(
 async fn send_data_deletion_confirmation_email(
     state: &AppState,
     user_email: &str,
+    preferred_language: &str,
     snapshot: &DataDeletionSnapshot,
     confirm_url: &str,
 ) -> bool {
@@ -1015,38 +1056,72 @@ async fn send_data_deletion_confirmation_email(
     let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
     let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
 
-    let text_body = format!(
-        "You requested to delete all your data from AI Mail Butler.\n\nCurrent data snapshot:\n- Emails: {}\n- Rules: {}\n- Logs: {}\n- Memories: {}\n- Activity rows: {}\n- Activity event total: {}\n- Chat logs: {}\n- Files: {}\n- Total file size: {} bytes\n\nImportant: Cached or already-overwritten database pages may not be recoverable after deletion. The system can only assist with deletion and cannot restore deleted data.\n\nStep 1: Open this confirmation link to review your report again:\n{}\n\nAfter opening, you must still do a second final confirmation on the report page.",
-        snapshot.email_count,
-        snapshot.rule_count,
-        snapshot.log_count,
-        snapshot.memory_count,
-        snapshot.activity_row_count,
-        snapshot.activity_event_total,
-        snapshot.chat_log_count,
-        snapshot.file_count,
-        snapshot.total_file_bytes,
-        confirm_url,
-    );
-
-    let html_body = format!(
-        "<h2>Data Deletion Confirmation</h2><p>You requested deletion of all your data.</p><ul><li>Emails: {}</li><li>Rules: {}</li><li>Logs: {}</li><li>Memories: {}</li><li>Activity rows: {}</li><li>Activity event total: {}</li><li>Chat logs: {}</li><li>Files: {}</li><li>Total file size: {} bytes</li></ul><p><strong>Important:</strong> Cached or overwritten database pages may not be recoverable after deletion. The system can only assist with deletion and cannot restore deleted data.</p><p><a href=\"{}\">Open confirmation report</a></p><p>After opening the report, you still need a second final confirmation to delete.</p>",
-        snapshot.email_count,
-        snapshot.rule_count,
-        snapshot.log_count,
-        snapshot.memory_count,
-        snapshot.activity_row_count,
-        snapshot.activity_event_total,
-        snapshot.chat_log_count,
-        snapshot.file_count,
-        snapshot.total_file_bytes,
-        confirm_url,
-    );
+    let (subject, text_body, html_body) = if preferred_language == "zh-TW" {
+        (
+            "AI Mail Butler - 請確認刪除您的資料",
+            format!(
+                "您已提出刪除 AI Mail Butler 個人資料的請求。\n\n目前資料統計：\n- 信件數：{}\n- 規則數：{}\n- Log 數：{}\n- 記憶資料數：{}\n- 活動統計列數：{}\n- 活動總事件次數：{}\n- 聊天紀錄數：{}\n- 檔案數：{}\n- 檔案總大小：{} bytes\n\n重要提醒：資料庫快取頁或已覆寫頁面可能無法復原。系統目前僅能協助刪除，無法協助取回。\n\n步驟 1：請先開啟下列確認連結再次檢視報表：\n{}\n\n開啟後仍需在頁面進行第二次最終確認才會刪除。",
+                snapshot.email_count,
+                snapshot.rule_count,
+                snapshot.log_count,
+                snapshot.memory_count,
+                snapshot.activity_row_count,
+                snapshot.activity_event_total,
+                snapshot.chat_log_count,
+                snapshot.file_count,
+                snapshot.total_file_bytes,
+                confirm_url,
+            ),
+            format!(
+                "<h2>資料刪除確認</h2><p>您已提出刪除所有資料的請求。</p><ul><li>信件數：{}</li><li>規則數：{}</li><li>Log 數：{}</li><li>記憶資料數：{}</li><li>活動統計列數：{}</li><li>活動總事件次數：{}</li><li>聊天紀錄數：{}</li><li>檔案數：{}</li><li>檔案總大小：{} bytes</li></ul><p><strong>重要提醒：</strong>資料庫快取頁或已覆寫頁面可能無法復原。系統目前僅能協助刪除，無法協助取回。</p><p><a href=\"{}\">開啟確認報表</a></p><p>開啟後仍需進行第二次最終確認才會刪除。</p>",
+                snapshot.email_count,
+                snapshot.rule_count,
+                snapshot.log_count,
+                snapshot.memory_count,
+                snapshot.activity_row_count,
+                snapshot.activity_event_total,
+                snapshot.chat_log_count,
+                snapshot.file_count,
+                snapshot.total_file_bytes,
+                confirm_url,
+            ),
+        )
+    } else {
+        (
+            "AI Mail Butler - Confirm Your Data Deletion Request",
+            format!(
+                "You requested to delete all your data from AI Mail Butler.\n\nCurrent data snapshot:\n- Emails: {}\n- Rules: {}\n- Logs: {}\n- Memories: {}\n- Activity rows: {}\n- Activity event total: {}\n- Chat logs: {}\n- Files: {}\n- Total file size: {} bytes\n\nImportant: Cached or already-overwritten database pages may not be recoverable after deletion. The system can only assist with deletion and cannot restore deleted data.\n\nStep 1: Open this confirmation link to review your report again:\n{}\n\nAfter opening, you must still do a second final confirmation on the report page.",
+                snapshot.email_count,
+                snapshot.rule_count,
+                snapshot.log_count,
+                snapshot.memory_count,
+                snapshot.activity_row_count,
+                snapshot.activity_event_total,
+                snapshot.chat_log_count,
+                snapshot.file_count,
+                snapshot.total_file_bytes,
+                confirm_url,
+            ),
+            format!(
+                "<h2>Data Deletion Confirmation</h2><p>You requested deletion of all your data.</p><ul><li>Emails: {}</li><li>Rules: {}</li><li>Logs: {}</li><li>Memories: {}</li><li>Activity rows: {}</li><li>Activity event total: {}</li><li>Chat logs: {}</li><li>Files: {}</li><li>Total file size: {} bytes</li></ul><p><strong>Important:</strong> Cached or overwritten database pages may not be recoverable after deletion. The system can only assist with deletion and cannot restore deleted data.</p><p><a href=\"{}\">Open confirmation report</a></p><p>After opening the report, you still need a second final confirmation to delete.</p>",
+                snapshot.email_count,
+                snapshot.rule_count,
+                snapshot.log_count,
+                snapshot.memory_count,
+                snapshot.activity_row_count,
+                snapshot.activity_event_total,
+                snapshot.chat_log_count,
+                snapshot.file_count,
+                snapshot.total_file_bytes,
+                confirm_url,
+            ),
+        )
+    };
 
     let message = MessageBuilder::new()
         .from(state.config.assistant_email.clone())
         .to(user_email.to_string())
-        .subject("AI Mail Butler - Confirm Your Data Deletion Request")
+        .subject(subject)
         .text_body(text_body)
         .html_body(html_body);
 
@@ -1070,13 +1145,13 @@ async fn post_request_data_deletion(
     Json(payload): Json<DataDeletionRequestPayload>,
 ) -> Json<serde_json::Value> {
     let email = payload.email.trim().to_ascii_lowercase();
-    let user_row: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
+    let user_row: Option<(String, String)> = sqlx::query_as("SELECT id, preferred_language FROM users WHERE email = ?")
         .bind(&email)
         .fetch_optional(&state.pool)
         .await
         .unwrap_or(None);
 
-    let Some((user_id,)) = user_row else {
+    let Some((user_id, preferred_language)) = user_row else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
@@ -1099,7 +1174,7 @@ async fn post_request_data_deletion(
         .unwrap_or_else(|_| format!("http://localhost:{}", state.config.server_port));
     let confirm_url = format!("{}/gdpr-delete?token={}", base_url, token);
 
-    let delivered = send_data_deletion_confirmation_email(&state, &email, &snapshot, &confirm_url).await;
+    let delivered = send_data_deletion_confirmation_email(&state, &email, &preferred_language, &snapshot, &confirm_url).await;
     if !delivered {
         let msg = format!("Failed to deliver data deletion confirmation email to {}", email);
         log_mail_event(&state.pool, "ERROR", "gdpr_email_send", &msg, Some(&confirm_url), Some(&user_id)).await;

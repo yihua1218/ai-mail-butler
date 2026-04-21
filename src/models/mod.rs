@@ -26,6 +26,8 @@ pub struct User {
     pub pdf_passwords: Option<String>,
     #[serde(default = "default_utc")]
     pub timezone: String,
+    #[serde(default = "default_language")]
+    pub preferred_language: String,
 }
 
 fn default_both() -> String { "both".to_string() }
@@ -33,6 +35,8 @@ fn default_both() -> String { "both".to_string() }
 fn default_true() -> bool { true }
 
 fn default_utc() -> String { "UTC".to_string() }
+
+fn default_language() -> String { "en".to_string() }
 
 #[derive(Serialize, FromRow)]
 pub struct EmailRecord {

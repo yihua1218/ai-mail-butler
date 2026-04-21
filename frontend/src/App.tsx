@@ -36,6 +36,15 @@ const KEY_TO_PATH: Record<string, string> = {
 const Dashboard: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
+  const defaultRecentFrom = () => {
+    const d = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hour = String(d.getHours()).padStart(2, '0');
+    const minute = String(d.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day}T${hour}:${minute}`;
+  };
   const [personalEmails, setPersonalEmails] = useState<any[]>([]);
   const [globalStats, setGlobalStats] = useState<any>(null);
   const [personalStats, setPersonalStats] = useState<any>(null);
@@ -44,7 +53,7 @@ const Dashboard: React.FC = () => {
   const [logTypeFilter, setLogTypeFilter] = useState<string>('all');
   const [logUserFilter, setLogUserFilter] = useState<string>('all');
   const [logKeyword, setLogKeyword] = useState<string>('');
-  const [logTimeFrom, setLogTimeFrom] = useState<string>('');
+  const [logTimeFrom, setLogTimeFrom] = useState<string>(defaultRecentFrom());
   const [logTimeTo, setLogTimeTo] = useState<string>('');
 
   useEffect(() => {
@@ -284,7 +293,7 @@ const Dashboard: React.FC = () => {
             setLogTypeFilter('all');
             setLogUserFilter('all');
             setLogKeyword('');
-            setLogTimeFrom('');
+            setLogTimeFrom(defaultRecentFrom());
             setLogTimeTo('');
           }}
         >
@@ -394,6 +403,7 @@ const Settings: React.FC = () => {
         dry_run: user.dry_run,
         email_format: user.email_format,
         timezone: user.timezone || 'UTC',
+        preferred_language: user.preferred_language || 'en',
         assistant_name_zh: user.assistant_name_zh,
         assistant_name_en: user.assistant_name_en,
         assistant_tone_zh: user.assistant_tone_zh,
@@ -446,7 +456,7 @@ const Settings: React.FC = () => {
   };
 
   return (
-    <Card title="System Settings" bordered={false} style={{ maxWidth: 650, margin: '0 auto' }}>
+    <Card title={t('system_settings')} bordered={false} style={{ maxWidth: 650, margin: '0 auto' }}>
       {!user && (
         <Alert 
           message="Guest Mode" 
@@ -491,7 +501,7 @@ const Settings: React.FC = () => {
               </Col>
             </Row>
 
-            <Title level={5} style={{ margin: '24px 0 16px' }}>Processing Preferences</Title>
+            <Title level={5} style={{ margin: '24px 0 16px' }}>{t('processing_preferences')}</Title>
             <Form.Item name="dry_run" label="Dry Run Mode (試運行模式)" valuePropName="checked" tooltip="When enabled, AI replies are drafted and sent to your own email for review. When disabled, they are sent directly to the original sender.">
               <Switch />
             </Form.Item>
@@ -504,6 +514,20 @@ const Settings: React.FC = () => {
                 <Radio value="html">{t('format_html')}</Radio>
                 <Radio value="plain">{t('format_plain')}</Radio>
               </Radio.Group>
+            </Form.Item>
+
+            <Form.Item
+              name="preferred_language"
+              label={t('preferred_language')}
+              tooltip="Language used for system-generated emails sent to you."
+              rules={[{ required: true, message: 'Please select a language' }]}
+            >
+              <Select
+                options={[
+                  { value: 'en', label: 'English' },
+                  { value: 'zh-TW', label: '繁體中文' },
+                ]}
+              />
             </Form.Item>
 
             <Form.Item
@@ -694,6 +718,7 @@ type EmailRule = {
 };
 
 const RulesManager: React.FC = () => {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [rules, setRules] = useState<EmailRule[]>([]);
   const [newRule, setNewRule] = useState('');
@@ -707,7 +732,7 @@ const RulesManager: React.FC = () => {
       const res = await axios.get(`/api/rules?email=${encodeURIComponent(user.email)}`);
       setRules(res.data.rules || []);
     } catch {
-      message.error('Failed to load rules.');
+      message.error(t('rules_load_failed'));
     }
   };
 
@@ -721,10 +746,10 @@ const RulesManager: React.FC = () => {
     try {
       await axios.post('/api/rules/create', { email: user.email, rule_text: newRule.trim() });
       setNewRule('');
-      message.success('Rule added.');
+      message.success(t('rules_added'));
       loadRules();
     } catch {
-      message.error('Failed to add rule.');
+      message.error(t('rules_add_failed'));
     } finally {
       setSaving(false);
     }
@@ -736,7 +761,7 @@ const RulesManager: React.FC = () => {
       await axios.post('/api/rules/toggle', { email: user.email, id: rule.id, is_enabled: enabled });
       loadRules();
     } catch {
-      message.error('Failed to update rule status.');
+      message.error(t('rules_toggle_failed'));
     }
   };
 
@@ -751,10 +776,10 @@ const RulesManager: React.FC = () => {
       });
       setEditingRule(null);
       setEditText('');
-      message.success('Rule updated.');
+      message.success(t('rules_updated'));
       loadRules();
     } catch {
-      message.error('Failed to update rule.');
+      message.error(t('rules_update_failed'));
     } finally {
       setSaving(false);
     }
@@ -762,20 +787,20 @@ const RulesManager: React.FC = () => {
 
   const columns = [
     {
-      title: 'Rule',
+      title: t('rules_rule'),
       dataIndex: 'rule_text',
       key: 'rule_text',
       render: (v: string) => <span>{v}</span>,
     },
     {
-      title: 'Source',
+      title: t('rules_source'),
       dataIndex: 'source',
       key: 'source',
       width: 120,
       render: (v: string) => <Tag color={v === 'chat' ? 'cyan' : 'default'}>{v}</Tag>,
     },
     {
-      title: 'Enabled',
+      title: t('rules_enabled'),
       dataIndex: 'is_enabled',
       key: 'is_enabled',
       width: 120,
@@ -784,13 +809,13 @@ const RulesManager: React.FC = () => {
       ),
     },
     {
-      title: 'Updated',
+      title: t('rules_updated_at'),
       dataIndex: 'updated_at',
       key: 'updated_at',
       width: 200,
     },
     {
-      title: 'Action',
+      title: t('rules_action'),
       key: 'action',
       width: 120,
       render: (_: unknown, record: EmailRule) => (
@@ -801,7 +826,7 @@ const RulesManager: React.FC = () => {
             setEditText(record.rule_text);
           }}
         >
-          Edit
+          {t('rules_edit')}
         </Button>
       ),
     },
@@ -821,9 +846,9 @@ const RulesManager: React.FC = () => {
   }
 
   return (
-    <Card bordered={false} title="Email Processing Rules">
+    <Card bordered={false} title={t('rules_title')}>
       <Paragraph style={{ color: '#666' }}>
-        Rules below include conversational instructions you told the assistant in chat, plus manual rules you add here.
+        {t('rules_desc')}
       </Paragraph>
       <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
         <Input
@@ -833,14 +858,14 @@ const RulesManager: React.FC = () => {
           onPressEnter={addRule}
         />
         <Button type="primary" icon={<PlusOutlined />} onClick={addRule} loading={saving}>
-          Add Rule
+          {t('rules_add')}
         </Button>
       </Space.Compact>
 
       <Table rowKey="id" dataSource={rules} columns={columns} pagination={{ pageSize: 8 }} />
 
       <Modal
-        title="Edit Rule"
+        title={t('rules_edit')}
         open={!!editingRule}
         onCancel={() => {
           setEditingRule(null);
@@ -895,8 +920,8 @@ const App: React.FC = () => {
       '1': t('dashboard'),
       '2': t('ai_chat'),
       '3': t('settings'),
-      '4': 'About',
-      '5': 'Rules',
+      '4': t('about'),
+      '5': t('rules'),
     };
     document.title = `${titles[activeMenu] ?? 'AI Mail Butler'} | AI Mail Butler`;
   }, [activeMenu, t]);
@@ -979,8 +1004,8 @@ const App: React.FC = () => {
                 { key: '1', label: t('dashboard') },
                 { key: '2', label: t('ai_chat') },
                 { key: '3', label: t('settings') },
-                { key: '5', label: 'Rules' },
-                { key: '4', label: 'About' },
+                { key: '5', label: t('rules') },
+                { key: '4', label: t('about') },
               ]}
             />
           </div>

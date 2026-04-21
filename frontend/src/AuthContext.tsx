@@ -17,6 +17,7 @@ export interface User {
   assistant_tone_en: string | null;
   pdf_passwords: string | null;
   timezone: string | null;
+  preferred_language: string | null;
 }
 
 interface AuthContextType {
