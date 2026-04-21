@@ -1121,12 +1121,20 @@ struct VerifyRequest {
     token: String,
 }
 
+fn mask_token(token: &str) -> String {
+    if token.len() <= 8 {
+        "[redacted]".to_string()
+    } else {
+        format!("{}...{}", &token[..4], &token[token.len() - 4..])
+    }
+}
+
 async fn post_verify(
     State(state): State<AppState>,
     Json(payload): Json<VerifyRequest>,
 ) -> Json<Option<User>> {
     let token = payload.token.trim();
-    tracing::info!(">>> [AUTH] Attempting to verify token: '{}'", token);
+    tracing::info!(">>> [AUTH] Attempting to verify token: '{}'", mask_token(token));
     
     // Debug: check total tokens in DB
     let total_tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE magic_token IS NOT NULL")
@@ -1154,7 +1162,7 @@ async fn post_verify(
             Json(Some(u))
         },
         Ok(None) => {
-            tracing::warn!(">>> [AUTH] FAILED: No user found with token '{}'.", token);
+            tracing::warn!(">>> [AUTH] FAILED: No user found with token '{}'.", mask_token(token));
             Json(None)
         },
         Err(e) => {
