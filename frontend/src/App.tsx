@@ -97,7 +97,18 @@ const App: React.FC = () => {
 
   const changeLanguage = (lng: string) => {
     i18n.changeLanguage(lng);
+    // Only persist to localStorage for guests; logged-in users use DB preference
+    if (!user) {
+      localStorage.setItem('i18n_lang', lng);
+    }
   };
+
+  // When user logs in, switch UI language to the preference stored in the DB
+  useEffect(() => {
+    if (user?.preferred_language) {
+      i18n.changeLanguage(user.preferred_language);
+    }
+  }, [user?.preferred_language]);
 
   const languageMenu = {
     items: [

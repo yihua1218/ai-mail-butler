@@ -105,6 +105,20 @@ const zhTW = {
   }
 };
 
+const SUPPORTED = ['en', 'zh-TW'];
+
+const detectInitialLanguage = (): string => {
+  // 1. Guest preference saved in localStorage
+  const saved = localStorage.getItem('i18n_lang');
+  if (saved && SUPPORTED.includes(saved)) return saved;
+  // 2. Browser language
+  const browserLang = navigator.language || (navigator as Navigator & { userLanguage?: string }).userLanguage || '';
+  if (browserLang.startsWith('zh')) return 'zh-TW';
+  if (SUPPORTED.includes(browserLang)) return browserLang;
+  // 3. Default
+  return 'en';
+};
+
 i18n
   .use(initReactI18next)
   .init({
@@ -112,8 +126,8 @@ i18n
       en: en,
       'zh-TW': zhTW
     },
-    lng: "en", // default language
-    fallbackLng: "en",
+    lng: detectInitialLanguage(),
+    fallbackLng: 'en',
     interpolation: {
       escapeValue: false
     }

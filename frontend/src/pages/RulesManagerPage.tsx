@@ -25,6 +25,7 @@ const RulesManagerPage: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [editingRule, setEditingRule] = useState<EmailRule | null>(null);
   const [editText, setEditText] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   const loadRules = async () => {
     if (!user) return;
@@ -85,12 +86,11 @@ const RulesManagerPage: React.FC = () => {
     }
   };
 
-  const deleteRule = async (rule: EmailRule) => {
+  const deleteRule = async (id: number) => {
     if (!user) return;
-    const confirmed = window.confirm(`Delete rule #${rule.id}?\n${rule.rule_text}`);
-    if (!confirmed) return;
     try {
-      await axios.post('/api/rules/delete', { email: user.email, id: rule.id });
+      await axios.post('/api/rules/delete', { email: user.email, id });
+      setConfirmDeleteId(null);
       message.success('Rule deleted');
       loadRules();
     } catch {
@@ -173,9 +173,17 @@ const RulesManagerPage: React.FC = () => {
           >
             {t('rules_edit')}
           </Button>
-          <Button danger icon={<DeleteOutlined />} onClick={() => deleteRule(record)}>
-            Delete
-          </Button>
+          {confirmDeleteId === record.id ? (
+            <Space>
+              <span style={{ color: '#cf1322', fontSize: 13 }}>確定刪除?</span>
+              <Button size="small" danger onClick={() => deleteRule(record.id)}>確定</Button>
+              <Button size="small" onClick={() => setConfirmDeleteId(null)}>取消</Button>
+            </Space>
+          ) : (
+            <Button danger icon={<DeleteOutlined />} onClick={() => setConfirmDeleteId(record.id)}>
+              Delete
+            </Button>
+          )}
         </Space>
       ),
     },
