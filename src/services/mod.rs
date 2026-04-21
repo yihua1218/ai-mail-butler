@@ -183,18 +183,18 @@ impl EmailReplyService {
         user_id: &str,
         email_subject: &str,
         email_body: &str,
-        email_from: &str,
-    ) -> Result<Option<(i64, String)>> {
+        _email_from: &str,
+    ) -> Result<Option<(i64, String, String)>> {
         // Fetch all enabled rules for the user
-        let rules: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, rule_text FROM email_rules WHERE user_id = ? AND is_enabled = 1"
+        let rules: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, rule_text, rule_label FROM email_rules WHERE user_id = ? AND is_enabled = 1"
         )
         .bind(user_id)
         .fetch_all(pool)
         .await?;
 
         // Simple rule matching: check if rule keywords appear in subject or body
-        for (rule_id, rule_text) in rules {
+        for (rule_id, rule_text, rule_label) in rules {
             let rule_lower = rule_text.to_lowercase();
             let subject_lower = email_subject.to_lowercase();
             let body_lower = email_body.to_lowercase();
@@ -212,7 +212,7 @@ impl EmailReplyService {
             });
 
             if matched {
-                return Ok(Some((rule_id, rule_text)));
+                return Ok(Some((rule_id, rule_text, rule_label)));
             }
         }
 

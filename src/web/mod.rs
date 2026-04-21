@@ -14,6 +14,7 @@ use tokio::fs;
 use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -39,8 +40,10 @@ struct EmailRule {
     id: i64,
     user_id: String,
     rule_text: String,
+    rule_label: String,
     source: String,
     is_enabled: bool,
+    matched_count: i64,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -67,6 +70,29 @@ struct TrainingExportRow {
     user_message: String,
     ai_reply: String,
     created_at: String,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct FinanceRecordRow {
+    id: String,
+    email_id: String,
+    subject: Option<String>,
+    reason: String,
+    category: String,
+    direction: String,
+    amount: f64,
+    currency: String,
+    month_key: String,
+    month_total_after: f64,
+    created_at: String,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct MonthlyFinanceSummaryRow {
+    month_key: String,
+    category: String,
+    total_amount: f64,
+    updated_at: String,
 }
 
 fn parse_training_consent_answer(message: &str) -> Option<bool> {
@@ -104,6 +130,275 @@ fn redact_training_text(input: &str) -> String {
     let out = us_phone_re.replace_all(&out, "[REDACTED_PHONE]").to_string();
     let out = tw_phone_re.replace_all(&out, "[REDACTED_PHONE]").to_string();
     long_token_re.replace_all(&out, "[REDACTED_TOKEN]").to_string()
+}
+
+fn generate_rule_label(rule_text: &str) -> String {
+    let seed: String = rule_text
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(10)
+        .collect();
+
+    if seed.is_empty() {
+        "RULE".to_string()
+    } else {
+        format!("RULE-{}", seed.to_uppercase())
+    }
+}
+
+fn pending_rule_delete_map() -> &'static RwLock<HashMap<String, i64>> {
+    static MAP: OnceLock<RwLock<HashMap<String, i64>>> = OnceLock::new();
+    MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn extract_first_rule_id(message: &str) -> Option<i64> {
+    static RULE_ID_RE: OnceLock<Regex> = OnceLock::new();
+    let re = RULE_ID_RE.get_or_init(|| Regex::new(r"\b(\d{1,9})\b").expect("rule id regex"));
+    let cap = re.captures(message)?;
+    cap.get(1)?.as_str().parse::<i64>().ok()
+}
+
+fn extract_rule_label_token(message: &str) -> Option<String> {
+    static RULE_LABEL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = RULE_LABEL_RE.get_or_init(|| Regex::new(r"(?i)\b(rule-[a-z0-9]+)\b").expect("rule label regex"));
+    let cap = re.captures(message)?;
+    Some(cap.get(1)?.as_str().to_ascii_uppercase())
+}
+
+fn extract_text_after_delimiter(message: &str) -> Option<String> {
+    for sep in [':', '：'] {
+        if let Some((_, right)) = message.split_once(sep) {
+            let t = right.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_confirm_delete_phrase(lower: &str) -> bool {
+    [
+        "確認", "確認刪除", "是", "好", "同意", "刪除吧", "確定刪除",
+        "confirm", "yes", "y", "delete it", "proceed",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
+fn is_cancel_delete_phrase(lower: &str) -> bool {
+    ["取消", "不要", "否", "no", "cancel", "stop"].iter().any(|k| lower.contains(k))
+}
+
+fn is_rule_count_query(lower: &str) -> bool {
+    [
+        "幾條規則", "多少規則", "規則數量", "有幾個規則", "現在規則",
+        "how many rule", "rule count", "number of rules",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
+fn is_rule_list_query(lower: &str) -> bool {
+    ["列出規則", "顯示規則", "查看規則", "list rules", "show rules"].iter().any(|k| lower.contains(k))
+}
+
+fn is_rule_edit_intent(lower: &str) -> bool {
+    ["編輯規則", "修改規則", "update rule", "edit rule"].iter().any(|k| lower.contains(k))
+}
+
+fn is_rule_disable_intent(lower: &str) -> bool {
+    ["停用規則", "關閉規則", "disable rule", "turn off rule"].iter().any(|k| lower.contains(k))
+}
+
+fn is_rule_delete_intent(lower: &str) -> bool {
+    ["刪除規則", "delete rule", "remove rule"].iter().any(|k| lower.contains(k))
+}
+
+async fn handle_rule_chat_command(pool: &SqlitePool, user: &User, message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let zh = user.preferred_language == "zh-TW";
+
+    {
+        let map = pending_rule_delete_map();
+        let pending = map.read().await.get(&user.id).cloned();
+        if let Some(rule_id) = pending {
+            if is_confirm_delete_phrase(&lower) {
+                let result = sqlx::query("DELETE FROM email_rules WHERE id = ? AND user_id = ?")
+                    .bind(rule_id)
+                    .bind(&user.id)
+                    .execute(pool)
+                    .await;
+
+                map.write().await.remove(&user.id);
+
+                return Some(match result {
+                    Ok(r) if r.rows_affected() > 0 => {
+                        if zh { format!("已刪除規則 #{}。", rule_id) } else { format!("Deleted rule #{}.", rule_id) }
+                    }
+                    _ => {
+                        if zh { "刪除失敗，可能規則已不存在。".to_string() } else { "Delete failed, rule may no longer exist.".to_string() }
+                    }
+                });
+            }
+
+            if is_cancel_delete_phrase(&lower) {
+                map.write().await.remove(&user.id);
+                return Some(if zh {
+                    "已取消刪除。".to_string()
+                } else {
+                    "Deletion canceled.".to_string()
+                });
+            }
+        }
+    }
+
+    if is_rule_count_query(&lower) {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules WHERE user_id = ?")
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+        return Some(if zh {
+            format!("你目前有 {} 條規則。", count)
+        } else {
+            format!("You currently have {} rules.", count)
+        });
+    }
+
+    if is_rule_list_query(&lower) {
+        let rules: Vec<(i64, String, String, i64, bool)> = sqlx::query_as(
+            "SELECT id, rule_label, rule_text, matched_count, is_enabled FROM email_rules WHERE user_id = ? ORDER BY is_enabled DESC, updated_at DESC LIMIT 20"
+        )
+        .bind(&user.id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        if rules.is_empty() {
+            return Some(if zh { "你目前還沒有規則。".to_string() } else { "You don't have any rules yet.".to_string() });
+        }
+
+        let lines = rules.into_iter().map(|(id, label, text, matched, enabled)| {
+            let state = if enabled { "enabled" } else { "disabled" };
+            format!("#{} [{}] ({}, matched {}) {}", id, label, state, matched, text)
+        }).collect::<Vec<_>>().join("\n");
+
+        return Some(if zh {
+            format!("目前規則如下：\n{}", lines)
+        } else {
+            format!("Current rules:\n{}", lines)
+        });
+    }
+
+    if is_rule_edit_intent(&lower) {
+        let rule_id = extract_first_rule_id(trimmed);
+        let new_text = extract_text_after_delimiter(trimmed);
+        let (Some(rule_id), Some(new_text)) = (rule_id, new_text) else {
+            return Some(if zh {
+                "請用這種格式：編輯規則 12：新的規則內容".to_string()
+            } else {
+                "Use format: edit rule 12: new rule text".to_string()
+            });
+        };
+
+        let result = sqlx::query(
+            "UPDATE email_rules SET rule_text = ?, rule_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        )
+        .bind(&new_text)
+        .bind(generate_rule_label(&new_text))
+        .bind(rule_id)
+        .bind(&user.id)
+        .execute(pool)
+        .await;
+
+        return Some(match result {
+            Ok(r) if r.rows_affected() > 0 => {
+                if zh { format!("已更新規則 #{}。", rule_id) } else { format!("Updated rule #{}.", rule_id) }
+            }
+            _ => {
+                if zh { "找不到可更新的規則編號。".to_string() } else { "Could not find that rule id to update.".to_string() }
+            }
+        });
+    }
+
+    if is_rule_disable_intent(&lower) {
+        let rule_id = extract_first_rule_id(trimmed);
+        let Some(rule_id) = rule_id else {
+            return Some(if zh {
+                "請指定要停用的規則編號，例如：停用規則 12".to_string()
+            } else {
+                "Please provide the rule id, e.g. disable rule 12".to_string()
+            });
+        };
+
+        let result = sqlx::query(
+            "UPDATE email_rules SET is_enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        )
+        .bind(rule_id)
+        .bind(&user.id)
+        .execute(pool)
+        .await;
+
+        return Some(match result {
+            Ok(r) if r.rows_affected() > 0 => {
+                if zh { format!("已停用規則 #{}。", rule_id) } else { format!("Disabled rule #{}.", rule_id) }
+            }
+            _ => {
+                if zh { "找不到可停用的規則編號。".to_string() } else { "Could not find that rule id to disable.".to_string() }
+            }
+        });
+    }
+
+    if is_rule_delete_intent(&lower) {
+        let mut rule_id = extract_first_rule_id(trimmed);
+        if rule_id.is_none() {
+            if let Some(label) = extract_rule_label_token(trimmed) {
+                let found: Option<i64> = sqlx::query_scalar("SELECT id FROM email_rules WHERE user_id = ? AND upper(rule_label) = ? LIMIT 1")
+                    .bind(&user.id)
+                    .bind(label)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten();
+                rule_id = found;
+            }
+        }
+
+        let Some(rule_id) = rule_id else {
+            return Some(if zh {
+                "請指定要刪除的規則編號或標籤，例如：刪除規則 12，或刪除規則 RULE-INVOICE".to_string()
+            } else {
+                "Please specify rule id or label, e.g. delete rule 12 or delete rule RULE-INVOICE".to_string()
+            });
+        };
+
+        let exists: Option<(String,)> = sqlx::query_as("SELECT rule_text FROM email_rules WHERE id = ? AND user_id = ? LIMIT 1")
+            .bind(rule_id)
+            .bind(&user.id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+
+        let Some((rule_text,)) = exists else {
+            return Some(if zh { "找不到該規則。".to_string() } else { "Rule not found.".to_string() });
+        };
+
+        pending_rule_delete_map().write().await.insert(user.id.clone(), rule_id);
+        return Some(if zh {
+            format!("你即將刪除規則 #{}：{}。\n請回覆「確認刪除」以執行，或回覆「取消」放棄。", rule_id, rule_text)
+        } else {
+            format!("You are about to delete rule #{}: {}.\nReply 'confirm' to proceed or 'cancel' to abort.", rule_id, rule_text)
+        });
+    }
+
+    None
 }
 
 #[derive(Clone, Default)]
@@ -436,10 +731,11 @@ async fn capture_rule_from_chat(pool: &SqlitePool, user_id: &str, message: &str)
     }
 
     let insert_result = sqlx::query(
-        "INSERT INTO email_rules (user_id, rule_text, source, is_enabled) VALUES (?, ?, 'chat', 1)"
+        "INSERT INTO email_rules (user_id, rule_text, rule_label, source, is_enabled) VALUES (?, ?, ?, 'chat', 1)"
     )
     .bind(user_id)
     .bind(&cleaned)
+    .bind(generate_rule_label(&cleaned))
     .execute(pool)
     .await;
 
@@ -664,7 +960,7 @@ async fn get_dashboard(
                 .fetch_optional(pool).await.unwrap_or(None);
                 
             if let Some((uid,)) = user_id {
-                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
                     
@@ -741,6 +1037,32 @@ async fn post_chat(
                         .await;
                     user.training_data_consent = consent;
                 }
+            }
+
+            if let Some(command_reply) = handle_rule_chat_command(pool, &user, &message).await {
+                let _ = sqlx::query(
+                    "INSERT INTO chat_transcripts (user_id, user_email, user_message, ai_reply) VALUES (?, ?, ?, ?)"
+                )
+                .bind(&user.id)
+                .bind(&user.email)
+                .bind(&message)
+                .bind(&command_reply)
+                .execute(pool)
+                .await;
+
+                sqlx::query("INSERT INTO chat_logs (user_email) VALUES (?)")
+                    .bind(&user.email)
+                    .execute(pool)
+                    .await
+                    .ok();
+
+                return Json(serde_json::json!({
+                    "reply": command_reply,
+                    "total_tokens": 0,
+                    "duration_ms": 0,
+                    "finish_reason": "rule_command",
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                }));
             }
 
             // Update preferences
@@ -1536,6 +1858,7 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
                 rule_text TEXT NOT NULL,
+                rule_label TEXT NOT NULL DEFAULT 'RULE',
                 source TEXT NOT NULL,
                 is_enabled INTEGER NOT NULL
             )"
@@ -1571,6 +1894,7 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
                 rule_text TEXT NOT NULL,
+                rule_label TEXT NOT NULL DEFAULT 'RULE',
                 source TEXT NOT NULL,
                 is_enabled INTEGER NOT NULL
             )"
@@ -1681,6 +2005,12 @@ struct ToggleRuleRequest {
     email: String,
     id: i64,
     is_enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct DeleteRuleRequest {
+    email: String,
+    id: i64,
 }
 
 #[derive(Deserialize)]
@@ -1820,7 +2150,7 @@ async fn get_rules(
     };
 
     let rules = sqlx::query_as::<_, EmailRule>(
-        "SELECT id, user_id, rule_text, source, is_enabled, CAST(created_at AS TEXT) as created_at, CAST(updated_at AS TEXT) as updated_at \
+        "SELECT id, user_id, rule_text, rule_label, source, is_enabled, matched_count, CAST(created_at AS TEXT) as created_at, CAST(updated_at AS TEXT) as updated_at \
          FROM email_rules WHERE user_id = ? ORDER BY is_enabled DESC, updated_at DESC"
     )
     .bind(&user_id)
@@ -1829,6 +2159,54 @@ async fn get_rules(
     .unwrap_or_default();
 
     Json(serde_json::json!({ "status": "success", "rules": rules }))
+}
+
+async fn get_finance_records(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+
+    let Some(user_id) = get_user_id_by_email(&state.pool, &email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let rows = sqlx::query_as::<_, FinanceRecordRow>(
+        "SELECT id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after, CAST(created_at AS TEXT) as created_at \
+         FROM email_financial_records WHERE user_id = ? ORDER BY created_at DESC LIMIT 500"
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({ "status": "success", "records": rows }))
+}
+
+async fn get_finance_monthly(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+
+    let Some(user_id) = get_user_id_by_email(&state.pool, &email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let rows = sqlx::query_as::<_, MonthlyFinanceSummaryRow>(
+        "SELECT month_key, category, total_amount, CAST(updated_at AS TEXT) as updated_at \
+         FROM monthly_finance_summary WHERE user_id = ? ORDER BY month_key DESC, category ASC"
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({ "status": "success", "monthly": rows }))
 }
 
 async fn post_create_rule(
@@ -1845,10 +2223,11 @@ async fn post_create_rule(
     }
 
     let result = sqlx::query(
-        "INSERT INTO email_rules (user_id, rule_text, source, is_enabled) VALUES (?, ?, 'manual', 1)"
+        "INSERT INTO email_rules (user_id, rule_text, rule_label, source, is_enabled) VALUES (?, ?, ?, 'manual', 1)"
     )
     .bind(&user_id)
     .bind(rule_text)
+    .bind(generate_rule_label(rule_text))
     .execute(&state.pool)
     .await;
 
@@ -1875,9 +2254,10 @@ async fn post_update_rule(
     }
 
     let result = sqlx::query(
-        "UPDATE email_rules SET rule_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+        "UPDATE email_rules SET rule_text = ?, rule_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
     )
     .bind(rule_text)
+    .bind(generate_rule_label(rule_text))
     .bind(payload.id)
     .bind(&user_id)
     .execute(&state.pool)
@@ -1914,6 +2294,30 @@ async fn post_toggle_rule(
         Err(e) => {
             tracing::error!("Failed to toggle rule: {}", e);
             Json(serde_json::json!({ "status": "error", "message": "Toggle failed" }))
+        }
+    }
+}
+
+async fn post_delete_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<DeleteRuleRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let result = sqlx::query("DELETE FROM email_rules WHERE id = ? AND user_id = ?")
+        .bind(payload.id)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => Json(serde_json::json!({ "status": "success" })),
+        Ok(_) => Json(serde_json::json!({ "status": "error", "message": "Rule not found" })),
+        Err(e) => {
+            tracing::error!("Failed to delete rule: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Delete failed" }))
         }
     }
 }
@@ -2367,6 +2771,9 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/rules/create", post(post_create_rule))
         .route("/rules/update", post(post_update_rule))
         .route("/rules/toggle", post(post_toggle_rule))
+        .route("/rules/delete", post(post_delete_rule))
+        .route("/finance/records", get(get_finance_records))
+        .route("/finance/monthly", get(get_finance_monthly))
         .route("/auto-replies", get(get_auto_replies))
         .route("/auto-replies/send", post(post_send_auto_reply))
         .route("/auto-replies/delete", post(post_delete_auto_reply))

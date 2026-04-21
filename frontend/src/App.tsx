@@ -3,7 +3,7 @@ import {
   Layout, Menu, Typography, Card, Table, Row, Col, Statistic, Button, 
   Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge, Space, Modal, Select, Checkbox
 } from 'antd';
-import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined, PlusOutlined, EditOutlined } from '@ant-design/icons';
+import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined, PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
@@ -22,6 +22,7 @@ const PATH_TO_KEY: Record<string, string> = {
   '/settings': '3',
   '/about': '4',
   '/rules': '5',
+  '/finance': '6',
   '/gdpr-delete': '0',
   '/login': '1', // Login also maps to dashboard view
 };
@@ -31,20 +32,44 @@ const KEY_TO_PATH: Record<string, string> = {
   '3': '/settings',
   '4': '/about',
   '5': '/rules',
+  '6': '/finance',
 };
 
 const Dashboard: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
   const isPrivileged = user?.role === 'admin' || user?.role === 'developer';
-  const defaultRecentFrom = (days: number = 1) => {
-    const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    const hour = String(d.getHours()).padStart(2, '0');
-    const minute = String(d.getMinutes()).padStart(2, '0');
+  const formatDateTimeLocal = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hour = String(date.getHours()).padStart(2, '0');
+    const minute = String(date.getMinutes()).padStart(2, '0');
     return `${year}-${month}-${day}T${hour}:${minute}`;
+  };
+
+  const defaultNowLocal = () => formatDateTimeLocal(new Date());
+
+  const defaultRecentFrom = (days: number = 1) => {
+    return formatDateTimeLocal(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
+  };
+
+  const formatInUserTimezone = (value?: string) => {
+    if (!value) return '-';
+    const timezone = user?.timezone || 'UTC';
+    const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return value;
+    return new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(date);
   };
   const [personalEmails, setPersonalEmails] = useState<any[]>([]);
   const [globalStats, setGlobalStats] = useState<any>(null);
@@ -55,7 +80,7 @@ const Dashboard: React.FC = () => {
   const [logUserFilter, setLogUserFilter] = useState<string>('all');
   const [logKeyword, setLogKeyword] = useState<string>('');
   const [logTimeFrom, setLogTimeFrom] = useState<string>(defaultRecentFrom());
-  const [logTimeTo, setLogTimeTo] = useState<string>('');
+  const [logTimeTo, setLogTimeTo] = useState<string>(defaultNowLocal());
   const [feedbackRows, setFeedbackRows] = useState<any[]>([]);
   const [replyingFeedback, setReplyingFeedback] = useState<any | null>(null);
   const [replyText, setReplyText] = useState<string>('');
@@ -182,6 +207,13 @@ const Dashboard: React.FC = () => {
   const columns = [
     { title: 'Subject', dataIndex: 'subject', key: 'subject' },
     {
+      title: 'Rule Label',
+      dataIndex: 'matched_rule_label',
+      key: 'matched_rule_label',
+      width: 140,
+      render: (value?: string) => value ? <Tag color="blue">{value}</Tag> : '-',
+    },
+    {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
@@ -245,7 +277,13 @@ const Dashboard: React.FC = () => {
     { title: 'User', dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' },
     { title: 'Message', dataIndex: 'message', key: 'message', ellipsis: true },
     { title: 'Context', dataIndex: 'context', key: 'context', width: 180, ellipsis: true },
-    { title: 'Time', dataIndex: 'occurred_at', key: 'occurred_at', width: 170 },
+    {
+      title: 'Time',
+      dataIndex: 'occurred_at',
+      key: 'occurred_at',
+      width: 190,
+      render: (value: string) => formatInUserTimezone(value),
+    },
   ];
 
   const parseLogDate = (value?: string): Date | null => {
@@ -291,9 +329,9 @@ const Dashboard: React.FC = () => {
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
         <Space>
-          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(1)); setLogTimeTo(''); }}>1d</Button>
-          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(7)); setLogTimeTo(''); }}>7d</Button>
-          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(30)); setLogTimeTo(''); }}>30d</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(1)); setLogTimeTo(defaultNowLocal()); }}>1d</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(7)); setLogTimeTo(defaultNowLocal()); }}>7d</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(30)); setLogTimeTo(defaultNowLocal()); }}>30d</Button>
         </Space>
         <Select
           value={logLevelFilter}
@@ -349,7 +387,7 @@ const Dashboard: React.FC = () => {
             setLogUserFilter('all');
             setLogKeyword('');
             setLogTimeFrom(defaultRecentFrom());
-            setLogTimeTo('');
+            setLogTimeTo(defaultNowLocal());
           }}
         >
           Reset
@@ -391,6 +429,7 @@ const Dashboard: React.FC = () => {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 170,
+      render: (value: string) => formatInUserTimezone(value),
     },
     ...(isPrivileged ? [{
       title: 'Action',
@@ -867,13 +906,15 @@ const GdprDeletePage: React.FC = () => {
 type EmailRule = {
   id: number;
   rule_text: string;
+  rule_label: string;
   source: string;
   is_enabled: boolean;
+  matched_count: number;
   updated_at?: string;
 };
 
 const RulesManager: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { user } = useAuth();
   const [rules, setRules] = useState<EmailRule[]>([]);
   const [newRule, setNewRule] = useState('');
@@ -940,6 +981,19 @@ const RulesManager: React.FC = () => {
     }
   };
 
+  const deleteRule = async (rule: EmailRule) => {
+    if (!user) return;
+    const confirmed = window.confirm(`Delete rule #${rule.id}?\n${rule.rule_text}`);
+    if (!confirmed) return;
+    try {
+      await axios.post('/api/rules/delete', { email: user.email, id: rule.id });
+      message.success('Rule deleted');
+      loadRules();
+    } catch {
+      message.error('Failed to delete rule');
+    }
+  };
+
   const columns = [
     {
       title: t('rules_rule'),
@@ -948,11 +1002,25 @@ const RulesManager: React.FC = () => {
       render: (v: string) => <span>{v}</span>,
     },
     {
+      title: 'Label',
+      dataIndex: 'rule_label',
+      key: 'rule_label',
+      width: 150,
+      render: (v: string) => <Tag color="blue">{v || 'RULE'}</Tag>,
+    },
+    {
       title: t('rules_source'),
       dataIndex: 'source',
       key: 'source',
       width: 120,
       render: (v: string) => <Tag color={v === 'chat' ? 'cyan' : 'default'}>{v}</Tag>,
+    },
+    {
+      title: 'Matched',
+      dataIndex: 'matched_count',
+      key: 'matched_count',
+      width: 110,
+      render: (v: number) => v ?? 0,
     },
     {
       title: t('rules_enabled'),
@@ -968,21 +1036,43 @@ const RulesManager: React.FC = () => {
       dataIndex: 'updated_at',
       key: 'updated_at',
       width: 200,
+      render: (value: string) => {
+        if (!value) return '-';
+        const timezone = user?.timezone || 'UTC';
+        const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+        const date = new Date(iso);
+        if (Number.isNaN(date.getTime())) return value;
+        return new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+          timeZone: timezone,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }).format(date);
+      },
     },
     {
       title: t('rules_action'),
       key: 'action',
-      width: 120,
+      width: 220,
       render: (_: unknown, record: EmailRule) => (
-        <Button
-          icon={<EditOutlined />}
-          onClick={() => {
-            setEditingRule(record);
-            setEditText(record.rule_text);
-          }}
-        >
-          {t('rules_edit')}
-        </Button>
+        <Space>
+          <Button
+            icon={<EditOutlined />}
+            onClick={() => {
+              setEditingRule(record);
+              setEditText(record.rule_text);
+            }}
+          >
+            {t('rules_edit')}
+          </Button>
+          <Button danger icon={<DeleteOutlined />} onClick={() => deleteRule(record)}>
+            Delete
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -1035,6 +1125,100 @@ const RulesManager: React.FC = () => {
   );
 };
 
+type FinanceRecord = {
+  id: string;
+  subject?: string;
+  reason: string;
+  category: string;
+  direction: string;
+  amount: number;
+  currency: string;
+  month_key: string;
+  month_total_after: number;
+  created_at: string;
+};
+
+type MonthlyFinance = {
+  month_key: string;
+  category: string;
+  total_amount: number;
+  updated_at: string;
+};
+
+const FinanceAnalysisPage: React.FC = () => {
+  const { user } = useAuth();
+  const { i18n } = useTranslation();
+  const [records, setRecords] = useState<FinanceRecord[]>([]);
+  const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
+
+  const formatInUserTimezone = (value?: string) => {
+    if (!value) return '-';
+    const timezone = user?.timezone || 'UTC';
+    const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return value;
+    return new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(date);
+  };
+
+  useEffect(() => {
+    if (!user?.email) return;
+    axios.get(`/api/finance/records?email=${encodeURIComponent(user.email)}`).then((res) => {
+      setRecords(res.data.records || []);
+    }).catch(() => setRecords([]));
+
+    axios.get(`/api/finance/monthly?email=${encodeURIComponent(user.email)}`).then((res) => {
+      setMonthly(res.data.monthly || []);
+    }).catch(() => setMonthly([]));
+  }, [user?.email]);
+
+  if (!user) {
+    return (
+      <Card bordered={false}>
+        <Alert type="info" showIcon message="Please login first" description="Finance analysis is available for logged-in users only." />
+      </Card>
+    );
+  }
+
+  const monthlyColumns = [
+    { title: 'Month', dataIndex: 'month_key', key: 'month_key', width: 120 },
+    { title: 'Category', dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color="blue">{v}</Tag> },
+    { title: 'Total Amount', dataIndex: 'total_amount', key: 'total_amount', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
+    { title: 'Updated At', dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => formatInUserTimezone(v) },
+  ];
+
+  const recordColumns = [
+    { title: 'Time', dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => formatInUserTimezone(v) },
+    { title: 'Subject', dataIndex: 'subject', key: 'subject', ellipsis: true },
+    { title: 'Reason', dataIndex: 'reason', key: 'reason', ellipsis: true },
+    { title: 'Category', dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{v}</Tag> },
+    { title: 'Direction', dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{v}</Tag> },
+    { title: 'Amount', dataIndex: 'amount', key: 'amount', width: 130, render: (v: number) => v?.toLocaleString() ?? '0' },
+    { title: 'Currency', dataIndex: 'currency', key: 'currency', width: 100 },
+    { title: 'Month', dataIndex: 'month_key', key: 'month_key', width: 100 },
+    { title: 'Month Running Total', dataIndex: 'month_total_after', key: 'month_total_after', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
+  ];
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card bordered={false} title="Monthly Amount Summary">
+        <Table rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`} columns={monthlyColumns as any} dataSource={monthly} pagination={{ pageSize: 12 }} />
+      </Card>
+      <Card bordered={false} title="Email Financial Analysis Records">
+        <Table rowKey="id" columns={recordColumns as any} dataSource={records} pagination={{ pageSize: 10 }} />
+      </Card>
+    </Space>
+  );
+};
+
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user, requestMagicLink, verifyToken, logout, loading } = useAuth();
@@ -1077,6 +1261,7 @@ const App: React.FC = () => {
       '3': t('settings'),
       '4': t('about'),
       '5': t('rules'),
+      '6': 'Finance',
     };
     document.title = `${titles[activeMenu] ?? 'AI Mail Butler'} | AI Mail Butler`;
   }, [activeMenu, t]);
@@ -1160,6 +1345,7 @@ const App: React.FC = () => {
                 { key: '2', label: t('ai_chat') },
                 { key: '3', label: t('settings') },
                 { key: '5', label: t('rules') },
+                { key: '6', label: 'Finance' },
                 { key: '4', label: t('about') },
               ]}
             />
@@ -1199,6 +1385,7 @@ const App: React.FC = () => {
           {activeMenu === '2' && <Chat />}
           {activeMenu === '3' && <Settings />}
           {activeMenu === '5' && <RulesManager />}
+          {activeMenu === '6' && <FinanceAnalysisPage />}
           {activeMenu === '4' && <About />}
         </Content>
         <Footer style={{ textAlign: 'center', color: '#86868b' }}>

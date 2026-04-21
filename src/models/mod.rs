@@ -47,5 +47,6 @@ pub struct EmailRecord {
     pub subject: Option<String>,
     pub preview: Option<String>,
     pub status: String,
+    pub matched_rule_label: Option<String>,
     pub received_at: Option<String>,
 }

@@ -84,8 +84,10 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
             rule_text TEXT NOT NULL,
+            rule_label TEXT NOT NULL DEFAULT 'RULE',
             source TEXT NOT NULL DEFAULT 'manual',
             is_enabled BOOLEAN NOT NULL DEFAULT 1,
+            matched_count INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
@@ -93,6 +95,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+
+    let _ = sqlx::query("ALTER TABLE email_rules ADD COLUMN rule_label TEXT NOT NULL DEFAULT 'RULE'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_rules ADD COLUMN matched_count INTEGER NOT NULL DEFAULT 0").execute(&pool).await;
 
     // Track AI assistant chat replies (anonymous + logged-in)
     sqlx::query(
@@ -142,6 +147,8 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN admin_reply TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_at DATETIME").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_by TEXT").execute(&pool).await;
+
+    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN matched_rule_label TEXT").execute(&pool).await;
 
     // User long-term memory for AI personalization
     sqlx::query(
@@ -213,6 +220,46 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+
+    // AI-extracted financial entries from decoded emails.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS email_financial_records (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            email_id TEXT NOT NULL,
+            subject TEXT,
+            reason TEXT NOT NULL,
+            category TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            amount REAL NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'TWD',
+            month_key TEXT NOT NULL,
+            month_total_after REAL NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(email_id) REFERENCES emails(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Monthly aggregate totals by category.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS monthly_finance_summary (
+            user_id TEXT NOT NULL,
+            month_key TEXT NOT NULL,
+            category TEXT NOT NULL,
+            total_amount REAL NOT NULL DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(user_id, month_key, category),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN month_total_after REAL NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN currency TEXT NOT NULL DEFAULT 'TWD'").execute(&pool).await;
 
     Ok(pool)
 }

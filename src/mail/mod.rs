@@ -151,6 +151,208 @@ fn infer_attachment_filename(part: &mailparse::ParsedMail<'_>, index: usize) -> 
     format!("attachment_{index:02}.{ext}")
 }
 
+fn extract_pure_email(mailbox: &str) -> String {
+    let mailbox = mailbox.trim();
+    if let Some(start) = mailbox.find('<') {
+        if let Some(end) = mailbox.find('>') {
+            if start < end {
+                return mailbox[start + 1..end].trim().to_string();
+            }
+        }
+    }
+    mailbox.to_string()
+}
+
+fn build_login_url(config: &Config, token: &str) -> String {
+    let base_url = std::env::var("PUBLIC_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{}", config.server_port));
+    format!("{}/login?token={}", base_url, token)
+}
+
+async fn send_basic_email(config: &Config, to_email: &str, subject: &str, text_body: &str) -> Result<(), String> {
+    let smtp_ready = config
+        .smtp_relay_host
+        .as_deref()
+        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
+        .unwrap_or(false);
+    if !smtp_ready {
+        return Err("SMTP relay is not configured".to_string());
+    }
+
+    let host = config.smtp_relay_host.clone().unwrap_or_default();
+    let port = config.smtp_relay_port;
+    let smtp_user = config.smtp_relay_user.clone().unwrap_or_default();
+    let pass = config.smtp_relay_pass.clone().unwrap_or_default();
+    let from_addr = extract_pure_email(&config.assistant_email);
+
+    let message = mail_send::mail_builder::MessageBuilder::new()
+        .from(from_addr.as_str())
+        .reply_to(from_addr.as_str())
+        .to(to_email)
+        .subject(subject)
+        .text_body(text_body.to_string());
+
+    let is_implicit = port == 465;
+    let mut builder = mail_send::SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
+    if !smtp_user.is_empty() {
+        builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
+    }
+
+    match builder.connect().await {
+        Ok(mut client) => client.send(message).await.map_err(|e| format!("{:?}", e)),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AiFinancialItem {
+    reason: Option<String>,
+    amount: Option<f64>,
+    category: Option<String>,
+    direction: Option<String>,
+    currency: Option<String>,
+}
+
+fn normalize_finance_category(raw: Option<&str>) -> String {
+    let v = raw.unwrap_or("").to_lowercase();
+    if v.contains("bill") || v.contains("帳單") {
+        "bill".to_string()
+    } else if v.contains("deposit") || v.contains("存入") || v.contains("income") {
+        "deposit".to_string()
+    } else if v.contains("withdraw") || v.contains("提款") {
+        "withdraw".to_string()
+    } else if v.contains("transfer") || v.contains("轉帳") {
+        "transfer".to_string()
+    } else {
+        "expense".to_string()
+    }
+}
+
+fn normalize_finance_direction(raw: Option<&str>, category: &str) -> String {
+    let v = raw.unwrap_or("").to_lowercase();
+    if v.contains("income") || v.contains("in") || v.contains("存入") {
+        "income".to_string()
+    } else if v.contains("expense") || v.contains("out") || v.contains("支出") || v.contains("消費") {
+        "expense".to_string()
+    } else {
+        match category {
+            "deposit" => "income".to_string(),
+            _ => "expense".to_string(),
+        }
+    }
+}
+
+fn extract_json_segment(raw: &str) -> String {
+    if let (Some(start), Some(end)) = (raw.find("```json"), raw.rfind("```")) {
+        let body = &raw[start + 7..end];
+        return body.trim().to_string();
+    }
+    if let (Some(start), Some(end)) = (raw.find('['), raw.rfind(']')) {
+        return raw[start..=end].to_string();
+    }
+    raw.trim().to_string()
+}
+
+async fn analyze_and_store_financial_records(
+    pool: &SqlitePool,
+    ai_client: &AiClient,
+    user: &User,
+    email_id: &str,
+    subject: &str,
+    decoded_content: &str,
+) {
+    if decoded_content.trim().is_empty() {
+        return;
+    }
+
+    let snippet = if decoded_content.chars().count() > 6000 {
+        decoded_content.chars().take(6000).collect::<String>()
+    } else {
+        decoded_content.to_string()
+    };
+
+    let system_prompt = "You extract financial entries from decoded email content. Detect spending amount, transfer amount, deposit amount, withdrawal amount, bill amount, or similar transaction amounts. Return JSON array ONLY. Each item format: {\"reason\":\"...\",\"amount\":1234.56,\"category\":\"expense|transfer|deposit|withdraw|bill\",\"direction\":\"income|expense\",\"currency\":\"TWD\"}. If none found, return []";
+    let user_prompt = format!("Subject: {}\n\nContent:\n{}", subject, snippet);
+
+    let ai_res = match ai_client.chat(system_prompt, &user_prompt).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Financial extraction AI call failed for email {}: {}", email_id, e);
+            return;
+        }
+    };
+
+    let json_text = extract_json_segment(&ai_res.content);
+
+    let parsed: Vec<AiFinancialItem> = serde_json::from_str(&json_text)
+        .or_else(|_| {
+            let value: serde_json::Value = serde_json::from_str(&json_text)?;
+            if let Some(arr) = value.get("items") {
+                serde_json::from_value(arr.clone())
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .unwrap_or_default();
+
+    if parsed.is_empty() {
+        return;
+    }
+
+    let month_key = Utc::now().format("%Y-%m").to_string();
+
+    for item in parsed {
+        let amount = item.amount.unwrap_or(0.0);
+        if amount <= 0.0 {
+            continue;
+        }
+
+        let reason = item.reason.unwrap_or_else(|| "(no reason)".to_string());
+        let category = normalize_finance_category(item.category.as_deref());
+        let direction = normalize_finance_direction(item.direction.as_deref(), &category);
+        let currency = item.currency.unwrap_or_else(|| "TWD".to_string());
+
+        let _ = sqlx::query(
+            "INSERT INTO monthly_finance_summary (user_id, month_key, category, total_amount, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) \
+             ON CONFLICT(user_id, month_key, category) DO UPDATE SET total_amount = total_amount + excluded.total_amount, updated_at = CURRENT_TIMESTAMP"
+        )
+        .bind(&user.id)
+        .bind(&month_key)
+        .bind(&category)
+        .bind(amount)
+        .execute(pool)
+        .await;
+
+        let month_total_after: f64 = sqlx::query_scalar(
+            "SELECT total_amount FROM monthly_finance_summary WHERE user_id = ? AND month_key = ? AND category = ?"
+        )
+        .bind(&user.id)
+        .bind(&month_key)
+        .bind(&category)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(amount);
+
+        let _ = sqlx::query(
+            "INSERT INTO email_financial_records (id, user_id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&user.id)
+        .bind(email_id)
+        .bind(subject)
+        .bind(&reason)
+        .bind(&category)
+        .bind(&direction)
+        .bind(amount)
+        .bind(&currency)
+        .bind(&month_key)
+        .bind(month_total_after)
+        .execute(pool)
+        .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,27 +820,84 @@ impl MailService {
                                     .execute(&pool)
                                     .await
                                     .unwrap_or_default();
+
+                                    let financial_source_text = if pdf_texts.is_empty() {
+                                        body.clone()
+                                    } else {
+                                        format!("{}\n\n[PDF Extracted]\n{}", body, pdf_texts.join("\n---\n"))
+                                    };
+
+                                    analyze_and_store_financial_records(
+                                        &pool,
+                                        &ai_client,
+                                        &u,
+                                        &id,
+                                        &subject,
+                                        &financial_source_text,
+                                    )
+                                    .await;
+
+                                    if !u.is_onboarded {
+                                        let token = Uuid::new_v4().to_string();
+                                        let _ = sqlx::query("UPDATE users SET magic_token = ? WHERE id = ?")
+                                            .bind(&token)
+                                            .bind(&u.id)
+                                            .execute(&pool)
+                                            .await;
+
+                                        let login_url = build_login_url(&config, &token);
+                                        let (subject_line, text_body) = if u.preferred_language == "zh-TW" {
+                                            (
+                                                "AI Mail Butler 使用說明與登入連結",
+                                                format!(
+                                                    "您好！\n\n我們已收到你轉寄的信件。你尚未完成 Onboarding。\n\n請先點擊以下登入連結進入系統，完成設定與規則建立：\n{}\n\n完成後，AI 助理就能依照你的規則處理後續信件。",
+                                                    login_url
+                                                ),
+                                            )
+                                        } else {
+                                            (
+                                                "AI Mail Butler onboarding instructions and login link",
+                                                format!(
+                                                    "Hello,\n\nWe received your forwarded email, but your onboarding is not completed yet.\n\nPlease login first and complete setup/rule creation:\n{}\n\nAfter onboarding, AI Mail Butler can process future emails based on your rules.",
+                                                    login_url
+                                                ),
+                                            )
+                                        };
+
+                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body).await {
+                                            log_mail_event(
+                                                &pool,
+                                                "ERROR",
+                                                "smtp_send",
+                                                &format!("Failed to send onboarding email: {}", e),
+                                                Some(&id),
+                                                Some(&u.id),
+                                            ).await;
+                                        }
+
+                                        let _ = sqlx::query("UPDATE emails SET status = 'pending' WHERE id = ?")
+                                            .bind(&id)
+                                            .execute(&pool)
+                                            .await;
+
+                                        if let Some(fname) = path.file_name() {
+                                            let dest = format!("{}/{}", processed_dir, fname.to_string_lossy());
+                                            if let Err(e) = fs::rename(&path, &dest).await {
+                                                error!("Failed to move {:?} to processed/: {}", path, e);
+                                                let _ = fs::remove_file(&path).await;
+                                            }
+                                        }
+                                        continue;
+                                    }
+
                                     let pdf_context = if pdf_texts.is_empty() {
                                         None
                                     } else {
                                         Some(pdf_texts.join("\n---\n"))
                                     };
 
-                                    let has_preference_rules = u
-                                        .preferences
-                                        .as_ref()
-                                        .map(|p| !p.trim().is_empty())
-                                        .unwrap_or(false);
-
-                                    let enabled_rule_count: i64 = sqlx::query_scalar(
-                                        "SELECT COUNT(*) FROM email_rules WHERE user_id = ? AND is_enabled = 1"
-                                    )
-                                    .bind(&u.id)
-                                    .fetch_one(&pool)
-                                    .await
-                                    .unwrap_or(0);
-
-                                    let has_rules = has_preference_rules || enabled_rule_count > 0;
+                                    let has_rules = false;
+                                    let mut matched_rule = false;
 
                                     let enabled_rules: Vec<String> = sqlx::query_scalar(
                                         "SELECT rule_text FROM email_rules WHERE user_id = ? AND is_enabled = 1 ORDER BY updated_at DESC"
@@ -649,7 +908,7 @@ impl MailService {
                                     .unwrap_or_default();
 
                                     // Check if any rule matches this email
-                                    if let Ok(Some((matched_rule_id, matched_rule_text))) = 
+                                    if let Ok(Some((matched_rule_id, matched_rule_text, matched_rule_label))) = 
                                         crate::services::EmailReplyService::find_matching_rule(
                                             &pool,
                                             &u.id,
@@ -658,7 +917,24 @@ impl MailService {
                                             &from_clean,
                                         ).await
                                     {
+                                        matched_rule = true;
                                         info!("Email {} matched rule ID {}: {}", id, matched_rule_id, matched_rule_text);
+
+                                        let _ = sqlx::query(
+                                            "UPDATE email_rules SET matched_count = matched_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+                                        )
+                                        .bind(matched_rule_id)
+                                        .bind(&u.id)
+                                        .execute(&pool)
+                                        .await;
+
+                                        let _ = sqlx::query(
+                                            "UPDATE emails SET matched_rule_label = ? WHERE id = ?"
+                                        )
+                                        .bind(&matched_rule_label)
+                                        .bind(&id)
+                                        .execute(&pool)
+                                        .await;
                                         
                                         // Generate auto-reply based on the matched rule
                                         match crate::services::EmailReplyService::generate_auto_reply(
@@ -761,7 +1037,6 @@ impl MailService {
                                             }
                                         }
                                     }
-
 
                                     if has_rules {
                                         info!("Triggering AI for email {}", id);
@@ -955,11 +1230,47 @@ impl MailService {
                                                 .await;
                                             }
                                         }
-                                    } else {
-                                        info!(
-                                            "No processing rules for user {}; leaving email {} as pending",
-                                            u.email, id
-                                        );
+                                    } else if !matched_rule {
+                                        let token = Uuid::new_v4().to_string();
+                                        let _ = sqlx::query("UPDATE users SET magic_token = ? WHERE id = ?")
+                                            .bind(&token)
+                                            .bind(&u.id)
+                                            .execute(&pool)
+                                            .await;
+
+                                        let login_url = build_login_url(&config, &token);
+                                        let (subject_line, text_body) = if u.preferred_language == "zh-TW" {
+                                            (
+                                                "你的轉寄信件尚未符合任何規則",
+                                                format!(
+                                                    "您好！\n\n我們收到你剛轉寄的信件，主旨為：{}\n但目前沒有任何已建立規則符合這封信件。\n\n請使用以下登入連結登入，進入 Rules 頁面建立新規則（可針對這類主旨或內容特徵）：\n{}",
+                                                    subject,
+                                                    login_url
+                                                ),
+                                            )
+                                        } else {
+                                            (
+                                                "Your forwarded email did not match any existing rule",
+                                                format!(
+                                                    "Hello,\n\nWe received your forwarded email with subject: {}\nIt does not match any of your existing rules.\n\nPlease use this login link, then go to the Rules page and create a new rule for this email type or feature:\n{}",
+                                                    subject,
+                                                    login_url
+                                                ),
+                                            )
+                                        };
+
+                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body).await {
+                                            log_mail_event(
+                                                &pool,
+                                                "ERROR",
+                                                "smtp_send",
+                                                &format!("Failed to send unmatched-rule guidance email: {}", e),
+                                                Some(&id),
+                                                Some(&u.id),
+                                            ).await;
+                                        }
+
+                                        info!("No rule matched for user {}; guidance email sent for message {}", u.email, id);
                                     }
                                 } else {
                                     let warn_msg = format!(
