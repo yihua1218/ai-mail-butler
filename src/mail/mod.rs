@@ -648,6 +648,121 @@ impl MailService {
                                     .await
                                     .unwrap_or_default();
 
+                                    // Check if any rule matches this email
+                                    if let Ok(Some((matched_rule_id, matched_rule_text))) = 
+                                        crate::services::EmailReplyService::find_matching_rule(
+                                            &pool,
+                                            &u.id,
+                                            &subject,
+                                            &body,
+                                            &from_clean,
+                                        ).await
+                                    {
+                                        info!("Email {} matched rule ID {}: {}", id, matched_rule_id, matched_rule_text);
+                                        
+                                        // Generate auto-reply based on the matched rule
+                                        match crate::services::EmailReplyService::generate_auto_reply(
+                                            &ai_client,
+                                            &u,
+                                            &matched_rule_text,
+                                            &from_clean,
+                                            &subject,
+                                            &body,
+                                        ).await {
+                                            Ok(reply_body) => {
+                                                // Store as draft or send based on auto_reply flag
+                                                let reply_status = if u.auto_reply { "sent" } else { "draft" };
+                                                
+                                                match crate::services::EmailReplyService::store_auto_reply(
+                                                    &pool,
+                                                    &u.id,
+                                                    matched_rule_id,
+                                                    &from_clean,
+                                                    &subject,
+                                                    &reply_body,
+                                                    reply_status,
+                                                ).await {
+                                                    Ok(reply_id) => {
+                                                        info!("Auto-reply stored with ID: {}", reply_id);
+                                                        
+                                                        // If auto_reply is enabled, send immediately
+                                                        if u.auto_reply {
+                                                            let host = config
+                                                                .smtp_relay_host
+                                                                .clone()
+                                                                .unwrap_or_default();
+                                                            let port = config.smtp_relay_port;
+                                                            let smtp_user = config
+                                                                .smtp_relay_user
+                                                                .clone()
+                                                                .unwrap_or_default();
+                                                            let pass = config
+                                                                .smtp_relay_pass
+                                                                .clone()
+                                                                .unwrap_or_default();
+
+                                                            let from_addr_pure = if let Some(idx) = config.assistant_email.find('<') {
+                                                                config.assistant_email[idx + 1..].trim_end_matches('>').to_string()
+                                                            } else {
+                                                                config.assistant_email.clone()
+                                                            };
+                                                            
+                                                            let from_clean_clone = from_clean.clone();
+                                                            let subject_clone = subject.clone();
+                                                            let reply_body_clone = reply_body.clone();
+                                                            let id_clone = id.clone();
+                                                            let is_implicit = port == 465;
+                                                            let pool_clone = pool.clone();
+                                                            let reply_id_clone = reply_id.clone();
+                                                            
+                                                            tokio::spawn(async move {
+                                                                let message = mail_send::mail_builder::MessageBuilder::new()
+                                                                    .from(from_addr_pure.as_str())
+                                                                    .reply_to(from_addr_pure.as_str())
+                                                                    .to(from_clean_clone.as_str())
+                                                                    .subject(format!("Re: {}", subject_clone))
+                                                                    .text_body(reply_body_clone);
+                                                                
+                                                                let mut builder = mail_send::SmtpClientBuilder::new(host.as_str(), port);
+                                                                builder = builder.implicit_tls(is_implicit);
+                                                                if !smtp_user.is_empty() {
+                                                                    builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
+                                                                }
+                                                                
+                                                                match builder.connect().await {
+                                                                    Ok(mut client) => {
+                                                                        match client.send(message).await {
+                                                                            Ok(_) => {
+                                                                                info!("Auto-reply sent for {} via rule", id_clone);
+                                                                                let _ = sqlx::query("UPDATE auto_replies SET sent_at = CURRENT_TIMESTAMP WHERE id = ?")
+                                                                                    .bind(&reply_id_clone)
+                                                                                    .execute(&pool_clone)
+                                                                                    .await;
+                                                                            }
+                                                                            Err(e) => {
+                                                                                error!("Failed to send auto-reply: {:?}", e);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error!("SMTP connect failed for auto-reply: {:?}", e);
+                                                                    }
+                                                                }
+                                                            });
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Failed to store auto-reply: {:?}", e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to generate auto-reply: {:?}", e);
+                                            }
+                                        }
+                                    }
+
+
                                     if has_rules {
                                         info!("Triggering AI for email {}", id);
                                         let memory = crate::services::OnboardingService::get_memory(
