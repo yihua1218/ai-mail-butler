@@ -46,6 +46,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_en TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN onboarding_step INTEGER NOT NULL DEFAULT 0").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN pdf_passwords TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'").execute(&pool).await;
 
     // Table for tracking repetitive behaviors/questions for analytics
     sqlx::query(

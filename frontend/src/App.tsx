@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Layout, Menu, Typography, Card, Table, Row, Col, Statistic, Button, 
-  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge, Space, Modal
+  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge, Space, Modal, Select
 } from 'antd';
 import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined, PlusOutlined, EditOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -33,7 +33,7 @@ const KEY_TO_PATH: Record<string, string> = {
 };
 
 const Dashboard: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { user } = useAuth();
   const [personalEmails, setPersonalEmails] = useState<any[]>([]);
   const [allEmails, setAllEmails] = useState<any[]>([]);
@@ -127,7 +127,28 @@ const Dashboard: React.FC = () => {
         return <Tag color={statusColor[value] || 'default'}>{label}</Tag>;
       }
     },
-    { title: 'Received At', dataIndex: 'received_at', key: 'received_at' }
+    {
+      title: 'Received At',
+      dataIndex: 'received_at',
+      key: 'received_at',
+      render: (value: string) => {
+        if (!value) return '-';
+        const timezone = user?.timezone || 'UTC';
+        const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+        const date = new Date(iso);
+        if (Number.isNaN(date.getTime())) return value;
+        return new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+          timeZone: timezone,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }).format(date);
+      }
+    }
   ];
 
   const errorTypeColor: Record<string, string> = {
@@ -245,6 +266,7 @@ const Settings: React.FC = () => {
         auto_reply: user.auto_reply,
         dry_run: user.dry_run,
         email_format: user.email_format,
+        timezone: user.timezone || 'UTC',
         assistant_name_zh: user.assistant_name_zh,
         assistant_name_en: user.assistant_name_en,
         assistant_tone_zh: user.assistant_tone_zh,
@@ -338,6 +360,28 @@ const Settings: React.FC = () => {
                 <Radio value="html">{t('format_html')}</Radio>
                 <Radio value="plain">{t('format_plain')}</Radio>
               </Radio.Group>
+            </Form.Item>
+
+            <Form.Item
+              name="timezone"
+              label="Timezone"
+              tooltip="Used to display local times in Dashboard."
+              rules={[{ required: true, message: 'Please select a timezone' }]}
+            >
+              <Select
+                showSearch
+                options={[
+                  { value: 'UTC', label: 'UTC' },
+                  { value: 'Asia/Taipei', label: 'Asia/Taipei (UTC+8)' },
+                  { value: 'Asia/Tokyo', label: 'Asia/Tokyo (UTC+9)' },
+                  { value: 'Asia/Shanghai', label: 'Asia/Shanghai (UTC+8)' },
+                  { value: 'Asia/Singapore', label: 'Asia/Singapore (UTC+8)' },
+                  { value: 'America/Los_Angeles', label: 'America/Los_Angeles' },
+                  { value: 'America/New_York', label: 'America/New_York' },
+                  { value: 'Europe/London', label: 'Europe/London' },
+                  { value: 'Europe/Berlin', label: 'Europe/Berlin' },
+                ]}
+              />
             </Form.Item>
 
             <Title level={5} style={{ margin: '24px 0 16px' }}>PDF Passwords</Title>

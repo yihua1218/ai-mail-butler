@@ -609,6 +609,7 @@ struct SettingsRequest {
     auto_reply: bool,
     dry_run: bool,
     email_format: String,
+    timezone: Option<String>,
     display_name: Option<String>,
     assistant_name_zh: Option<String>,
     assistant_name_en: Option<String>,
@@ -642,12 +643,20 @@ async fn post_settings(
     Json(payload): Json<SettingsRequest>,
 ) -> Json<serde_json::Value> {
     let pdf_passwords_json = payload.pdf_passwords.as_ref().and_then(|v| serde_json::to_string(v).ok());
+    let timezone = payload
+        .timezone
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("UTC")
+        .to_string();
     
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, display_name = ?, \
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, timezone = ?, display_name = ?, \
                               assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
+        .bind(&timezone)
         .bind(&payload.display_name)
         .bind(&payload.assistant_name_zh)
         .bind(&payload.assistant_name_en)
