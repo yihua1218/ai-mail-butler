@@ -1055,7 +1055,7 @@ const App: React.FC = () => {
     
     if (location.pathname === '/login' && token && !verificationStarted.current && !user) {
       verificationStarted.current = true;
-      console.log('Token found in URL, verifying...', token);
+      console.log('Token found in URL, verifying...');
       verifyToken(token).then(() => {
         console.log('Token verified, navigating to dashboard');
         navigate('/dashboard', { replace: true });
