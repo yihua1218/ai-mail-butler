@@ -15,6 +15,8 @@ use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
 use regex::Regex;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 use crate::models::{User, EmailRecord};
 use crate::ai::AiClient;
@@ -104,6 +106,86 @@ fn redact_training_text(input: &str) -> String {
     long_token_re.replace_all(&out, "[REDACTED_TOKEN]").to_string()
 }
 
+#[derive(Clone, Default)]
+struct DocsIndexEntry {
+    file_name: String,
+    content: String,
+    lower_content: String,
+}
+
+#[derive(Default)]
+struct DocsIndexCache {
+    entries: Vec<DocsIndexEntry>,
+    last_built_at: Option<Instant>,
+}
+
+static DOCS_INDEX_CACHE: OnceLock<RwLock<DocsIndexCache>> = OnceLock::new();
+const DOCS_INDEX_TTL: Duration = Duration::from_secs(300);
+
+fn docs_index_cache() -> &'static RwLock<DocsIndexCache> {
+    DOCS_INDEX_CACHE.get_or_init(|| RwLock::new(DocsIndexCache::default()))
+}
+
+async fn rebuild_docs_index() -> DocsIndexCache {
+    let mut entries = match fs::read_dir("docs").await {
+        Ok(v) => v,
+        Err(_) => {
+            return DocsIndexCache {
+                entries: Vec::new(),
+                last_built_at: Some(Instant::now()),
+            }
+        }
+    };
+
+    let mut indexed: Vec<DocsIndexEntry> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if ext != "md" {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        let file_name = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown.md")
+            .to_string();
+        indexed.push(DocsIndexEntry {
+            file_name,
+            lower_content: content.to_lowercase(),
+            content,
+        });
+    }
+
+    DocsIndexCache {
+        entries: indexed,
+        last_built_at: Some(Instant::now()),
+    }
+}
+
+async fn ensure_docs_index_fresh() {
+    let needs_rebuild = {
+        let cache = docs_index_cache().read().await;
+        cache.entries.is_empty()
+            || cache
+                .last_built_at
+                .map(|t| t.elapsed() >= DOCS_INDEX_TTL)
+                .unwrap_or(true)
+    };
+    if !needs_rebuild {
+        return;
+    }
+
+    let new_cache = rebuild_docs_index().await;
+    let mut cache = docs_index_cache().write().await;
+    *cache = new_cache;
+}
+
 fn extract_query_terms(query: &str) -> Vec<String> {
     let lower = query.trim().to_lowercase();
     if lower.is_empty() {
@@ -146,38 +228,25 @@ async fn build_docs_context(query: &str) -> Option<String> {
         return None;
     }
 
-    let mut entries = match fs::read_dir("docs").await {
-        Ok(v) => v,
-        Err(_) => return None,
+    ensure_docs_index_fresh().await;
+    let docs_entries = {
+        let cache = docs_index_cache().read().await;
+        cache.entries.clone()
     };
+    if docs_entries.is_empty() {
+        return None;
+    }
 
     let mut scored: Vec<(usize, String, String)> = Vec::new();
 
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if ext != "md" {
-            continue;
-        }
-
-        let Ok(content) = fs::read_to_string(&path).await else {
-            continue;
-        };
-        let lower = content.to_lowercase();
-        let score: usize = terms.iter().map(|t| lower.matches(t).count()).sum();
+    for entry in docs_entries.iter() {
+        let score: usize = terms.iter().map(|t| entry.lower_content.matches(t).count()).sum();
         if score == 0 {
             continue;
         }
 
-        let file_name = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("unknown.md")
-            .to_string();
-        let snippet = best_matching_snippet(&content, &terms);
-        scored.push((score, file_name, snippet));
+        let snippet = best_matching_snippet(&entry.content, &terms);
+        scored.push((score, entry.file_name.clone(), snippet));
     }
 
     if scored.is_empty() {

@@ -15,6 +15,8 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 - **Email forwarding detection & parsing**: Identifies the original user who forwarded the email.
 - **AI processing module**: English to Traditional Chinese translation, rule-based auto-reply.
 - **AI Chat Interface**: Converse directly with your email assistant via the Web UI. Anonymous visitors can also chat with the AI to learn about the system. Features detailed chat stats (token count and generation speed).
+- **Document-Grounded Answers**: The chat assistant can retrieve relevant content from project documentation and answer with context from matched docs.
+- **Documentation Cache Index**: Documentation lookup uses an in-memory cache index with periodic refresh, reducing repeated disk scans while keeping answers current.
 - **Long-term Memory**: The AI assistant maintains memory of past interactions to provide more personalized and context-aware responses.
 - **Interactive Onboarding**: New users are guided through a series of onboarding questions to set up their preferences and assistant identity.
 - **Custom AI Persona**: Users can define their assistant's Chinese and English names, as well as its reply tone (e.g., professional, friendly).
@@ -83,7 +85,9 @@ To send emails (for Magic Links and AI replies), you need to configure an SMTP r
 ### Gmail
 - [Gmail SMTP Setup Guide](docs/GMAIL-SMTP-SETUP.md)
 - [Gmail Filter + Forwarding Setup Guide](docs/GMAIL-FILTER-FORWARDING.md)
+- [Gmail Filter + Forwarding Setup Guide (Traditional Chinese)](docs/GMAIL-FILTER-FORWARDING.zh-TW.md)
 - [Google Workspace Admin Forwarding Allowlist + Policy Guide](docs/GOOGLE-WORKSPACE-FORWARDING-POLICY.md)
+- [Google Workspace Admin Forwarding Allowlist + Policy Guide (Traditional Chinese)](docs/GOOGLE-WORKSPACE-FORWARDING-POLICY.zh-TW.md)
 
 ### Microsoft 365 (M365)
 If you use a Microsoft 365 (M365) account to send emails, you have two options:
