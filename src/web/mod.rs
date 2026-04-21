@@ -1147,8 +1147,9 @@ async fn send_system_email_as_assistant(
     let port = state.config.smtp_relay_port;
     let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
     let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
-    let assistant_name = "AI 助理";
-    let assistant_mailbox = format!("{} <{}>", assistant_name, state.config.assistant_email);
+    // Use ASCII display name only: raw non-ASCII (e.g. Chinese) in the From field
+    // violates RFC 5321 and causes Gmail 555 Syntax Error.
+    let assistant_mailbox = format!("AI Mail Butler <{}>", state.config.assistant_email);
 
     let message = MessageBuilder::new()
         .from(assistant_mailbox.clone())
@@ -1249,12 +1250,8 @@ async fn post_magic_link(
             );
         }
 
-        let assistant_name = if preferred_language == "zh-TW" {
-            "AI 郵件助理"
-        } else {
-            "AI Mail Butler"
-        };
-        let assistant_mailbox = format!("{} <{}>", assistant_name, state.config.assistant_email);
+        // Use ASCII display name only — non-ASCII in From violates RFC 5321 (Gmail 555).
+        let assistant_mailbox = format!("AI Mail Butler <{}>", state.config.assistant_email);
 
         let html_body = if preferred_language == "zh-TW" {
             format!(
@@ -1985,12 +1982,8 @@ async fn send_data_deletion_confirmation_email(
         )
     };
 
-    let assistant_name = if preferred_language == "zh-TW" {
-        "AI 郵件助理"
-    } else {
-        "AI Mail Butler"
-    };
-    let assistant_mailbox = format!("{} <{}>", assistant_name, state.config.assistant_email);
+    // Use ASCII display name only — non-ASCII in From violates RFC 5321 (Gmail 555).
+    let assistant_mailbox = format!("AI Mail Butler <{}>", state.config.assistant_email);
 
     let message = MessageBuilder::new()
         .from(assistant_mailbox.clone())

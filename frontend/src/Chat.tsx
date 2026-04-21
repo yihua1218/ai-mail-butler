@@ -421,9 +421,7 @@ export const Chat: React.FC = () => {
                                 icon={<LikeOutlined />}
                                 disabled={!!msg.feedback_submitted}
                                 onClick={() => onFeedbackClick(msg, 'up')}
-                              >
-                                👍
-                              </Button>
+                              />
                               <Button
                                 type={msg.feedback === 'down' ? 'primary' : 'text'}
                                 danger={msg.feedback === 'down'}
@@ -431,9 +429,7 @@ export const Chat: React.FC = () => {
                                 icon={<DislikeOutlined />}
                                 disabled={!!msg.feedback_submitted}
                                 onClick={() => onFeedbackClick(msg, 'down')}
-                              >
-                                👎
-                              </Button>
+                              />
                             </Space>
                           </>
                         )}
