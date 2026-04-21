@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Layout, Menu, Typography, Card, Table, Row, Col, Statistic, Button, 
-  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge, Space, Modal, Select
+  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge, Space, Modal, Select, Checkbox
 } from 'antd';
 import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined, PlusOutlined, EditOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
@@ -22,6 +22,7 @@ const PATH_TO_KEY: Record<string, string> = {
   '/settings': '3',
   '/about': '4',
   '/rules': '5',
+  '/gdpr-delete': '0',
   '/login': '1', // Login also maps to dashboard view
 };
 const KEY_TO_PATH: Record<string, string> = {
@@ -370,6 +371,7 @@ const Settings: React.FC = () => {
   const { t } = useTranslation();
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -423,6 +425,23 @@ const Settings: React.FC = () => {
       message.error('Failed to save settings.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const requestDataDeletion = async () => {
+    if (!user) return;
+    setDeleting(true);
+    try {
+      const res = await axios.post('/api/data-deletion/request', { email: user.email });
+      if (res.data?.status === 'success') {
+        message.success('Deletion request submitted. Please check your email for the confirmation link.');
+      } else {
+        message.error(res.data?.message || 'Failed to request data deletion.');
+      }
+    } catch {
+      message.error('Failed to request data deletion.');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -545,7 +564,123 @@ const Settings: React.FC = () => {
             Save Settings
           </Button>
         </Form.Item>
+
+        {user && (
+          <Card
+            size="small"
+            title="GDPR / Data Deletion"
+            style={{ marginTop: 12, borderColor: '#ffd8bf' }}
+          >
+            <Paragraph style={{ marginBottom: 12, color: '#8c8c8c' }}>
+              You can request deletion of all your data. The system will email you a confirmation link with a data summary report. After opening the link, you must confirm again before final deletion.
+            </Paragraph>
+            <Button danger loading={deleting} onClick={requestDataDeletion}>
+              Request Deletion of All My Data
+            </Button>
+          </Card>
+        )}
       </Form>
+    </Card>
+  );
+};
+
+const GdprDeletePage: React.FC = () => {
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<any>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const location = useLocation();
+  const token = new URLSearchParams(location.search).get('token') || '';
+
+  useEffect(() => {
+    if (!token) {
+      setError('Missing token');
+      setLoading(false);
+      return;
+    }
+
+    axios.get(`/api/data-deletion/summary?token=${encodeURIComponent(token)}`)
+      .then((res) => {
+        if (res.data?.status === 'ready') {
+          setSummary(res.data);
+        } else {
+          setError(res.data?.message || 'Invalid token');
+        }
+      })
+      .catch(() => setError('Failed to load deletion summary.'))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  const finalizeDeletion = async () => {
+    if (!confirmed || !token) return;
+    setSubmitting(true);
+    try {
+      const res = await axios.post('/api/data-deletion/confirm', { token, confirm: true });
+      if (res.data?.status === 'success') {
+        message.success('Your data has been deleted.');
+        setSummary(null);
+      } else {
+        message.error(res.data?.message || 'Failed to delete data.');
+      }
+    } catch {
+      message.error('Failed to delete data.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) {
+    return <Card bordered={false}><Paragraph>Loading deletion summary...</Paragraph></Card>;
+  }
+  if (error) {
+    return <Alert type="error" showIcon message="Data Deletion" description={error} />;
+  }
+  if (!summary) {
+    return <Alert type="success" showIcon message="Data Deletion Completed" description="No further action is required." />;
+  }
+
+  const s = summary.snapshot || {};
+
+  return (
+    <Card bordered={false} title="Confirm Data Deletion (Final Step)">
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="Please review your data summary before final deletion"
+        description={summary.warning}
+      />
+      <Table
+        pagination={false}
+        rowKey="key"
+        dataSource={[
+          { key: 'emails', item: 'Emails', value: s.email_count ?? 0 },
+          { key: 'rules', item: 'Rules', value: s.rule_count ?? 0 },
+          { key: 'logs', item: 'Logs', value: s.log_count ?? 0 },
+          { key: 'memories', item: 'Memories', value: s.memory_count ?? 0 },
+          { key: 'activities', item: 'Activity Rows', value: s.activity_row_count ?? 0 },
+          { key: 'events', item: 'Activity Total Count', value: s.activity_event_total ?? 0 },
+          { key: 'chat', item: 'Chat Logs', value: s.chat_log_count ?? 0 },
+          { key: 'files', item: 'Files', value: s.file_count ?? 0 },
+          { key: 'bytes', item: 'Total File Size (bytes)', value: s.total_file_bytes ?? 0 },
+        ]}
+        columns={[
+          { title: 'Item', dataIndex: 'item', key: 'item' },
+          { title: 'Value', dataIndex: 'value', key: 'value' },
+        ]}
+        style={{ marginBottom: 16 }}
+      />
+
+      <Checkbox checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)}>
+        I understand the deletion is irreversible and cached/overwritten database pages are not recoverable.
+      </Checkbox>
+
+      <div style={{ marginTop: 16 }}>
+        <Button danger type="primary" disabled={!confirmed} loading={submitting} onClick={finalizeDeletion}>
+          Confirm and Delete My Data
+        </Button>
+      </div>
     </Card>
   );
 };
@@ -738,7 +873,7 @@ const App: React.FC = () => {
     const params = new URLSearchParams(location.search);
     const token = params.get('token');
     
-    if (token && !verificationStarted.current && !user) {
+    if (location.pathname === '/login' && token && !verificationStarted.current && !user) {
       verificationStarted.current = true;
       console.log('Token found in URL, verifying...', token);
       verifyToken(token).then(() => {
@@ -789,6 +924,26 @@ const App: React.FC = () => {
   };
 
   if (loading) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Authenticating...</div>;
+
+  if (location.pathname === '/gdpr-delete') {
+    return (
+      <ConfigProvider
+        theme={{
+          token: {
+            fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif",
+            colorPrimary: '#0071e3',
+            borderRadius: 12,
+          },
+        }}
+      >
+        <Layout style={{ minHeight: '100vh' }}>
+          <Content style={{ padding: '40px 50px', maxWidth: '1000px', margin: '0 auto', width: '100%' }}>
+            <GdprDeletePage />
+          </Content>
+        </Layout>
+      </ConfigProvider>
+    );
+  }
 
   return (
     <ConfigProvider

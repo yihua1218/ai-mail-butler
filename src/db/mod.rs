@@ -133,6 +133,25 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN level TEXT NOT NULL DEFAULT 'ERROR'").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN user_id TEXT").execute(&pool).await;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS data_deletion_requests (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            status TEXT NOT NULL DEFAULT 'requested',
+            snapshot_json TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            email_confirmed_at DATETIME,
+            finalized_at DATETIME,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN email_confirmed_at DATETIME").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN finalized_at DATETIME").execute(&pool).await;
+
     Ok(pool)
 }
 

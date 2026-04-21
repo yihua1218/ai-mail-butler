@@ -6,8 +6,10 @@ use axum::{
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::cors::CorsLayer;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tracing::info;
 use anyhow::Result;
+use tokio::fs;
 
 use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,126 @@ async fn get_user_id_by_email(pool: &SqlitePool, email: &str) -> Option<String> 
         .await
         .ok()
         .flatten()
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct DataDeletionSnapshot {
+    email_count: i64,
+    rule_count: i64,
+    log_count: i64,
+    memory_count: i64,
+    activity_row_count: i64,
+    activity_event_total: i64,
+    chat_log_count: i64,
+    file_count: i64,
+    total_file_bytes: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct DataDeletionRequestRow {
+    id: String,
+    user_id: String,
+    user_email: String,
+    status: String,
+    snapshot_json: String,
+}
+
+fn sanitize_path_component(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+async fn collect_dir_stats(base_dir: &str) -> (i64, i64) {
+    let mut total_files = 0_i64;
+    let mut total_bytes = 0_i64;
+    let mut stack = vec![PathBuf::from(base_dir)];
+
+    while let Some(dir) = stack.pop() {
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(meta) = entry.metadata().await {
+                if meta.is_dir() {
+                    stack.push(entry.path());
+                } else if meta.is_file() {
+                    total_files += 1;
+                    total_bytes += meta.len() as i64;
+                }
+            }
+        }
+    }
+
+    (total_files, total_bytes)
+}
+
+async fn build_user_data_snapshot(pool: &SqlitePool, user_id: &str, user_email: &str) -> DataDeletionSnapshot {
+    let sender_dir = format!("data/mail_spool/{}", sanitize_path_component(&user_email.to_ascii_lowercase()));
+    let (file_count, total_file_bytes) = collect_dir_stats(&sender_dir).await;
+
+    let email_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let rule_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let log_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_errors WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let memory_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_memories WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let activity_row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_activity_stats WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let activity_event_total: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(count), 0) FROM user_activity_stats WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let chat_log_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_logs WHERE user_email = ?")
+        .bind(user_email)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    DataDeletionSnapshot {
+        email_count,
+        rule_count,
+        log_count,
+        memory_count,
+        activity_row_count,
+        activity_event_total,
+        chat_log_count,
+        file_count,
+        total_file_bytes,
+    }
 }
 
 #[derive(Clone)]
@@ -649,6 +771,22 @@ struct ToggleRuleRequest {
     is_enabled: bool,
 }
 
+#[derive(Deserialize)]
+struct DataDeletionRequestPayload {
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct DataDeletionSummaryQuery {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct DataDeletionConfirmPayload {
+    token: String,
+    confirm: bool,
+}
+
 async fn post_settings(
     State(state): State<AppState>,
     Json(payload): Json<SettingsRequest>,
@@ -857,6 +995,224 @@ async fn post_toggle_rule(
     }
 }
 
+async fn send_data_deletion_confirmation_email(
+    state: &AppState,
+    user_email: &str,
+    snapshot: &DataDeletionSnapshot,
+    confirm_url: &str,
+) -> bool {
+    let smtp_ready = state.config.smtp_relay_host.as_deref()
+        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
+        .unwrap_or(false);
+
+    if !smtp_ready {
+        tracing::warn!("SMTP relay is not configured. Data deletion confirmation URL: {}", confirm_url);
+        return false;
+    }
+
+    let host = state.config.smtp_relay_host.clone().unwrap_or_default();
+    let port = state.config.smtp_relay_port;
+    let smtp_user = state.config.smtp_relay_user.clone().unwrap_or_default();
+    let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
+
+    let text_body = format!(
+        "You requested to delete all your data from AI Mail Butler.\n\nCurrent data snapshot:\n- Emails: {}\n- Rules: {}\n- Logs: {}\n- Memories: {}\n- Activity rows: {}\n- Activity event total: {}\n- Chat logs: {}\n- Files: {}\n- Total file size: {} bytes\n\nImportant: Cached or already-overwritten database pages may not be recoverable after deletion. The system can only assist with deletion and cannot restore deleted data.\n\nStep 1: Open this confirmation link to review your report again:\n{}\n\nAfter opening, you must still do a second final confirmation on the report page.",
+        snapshot.email_count,
+        snapshot.rule_count,
+        snapshot.log_count,
+        snapshot.memory_count,
+        snapshot.activity_row_count,
+        snapshot.activity_event_total,
+        snapshot.chat_log_count,
+        snapshot.file_count,
+        snapshot.total_file_bytes,
+        confirm_url,
+    );
+
+    let html_body = format!(
+        "<h2>Data Deletion Confirmation</h2><p>You requested deletion of all your data.</p><ul><li>Emails: {}</li><li>Rules: {}</li><li>Logs: {}</li><li>Memories: {}</li><li>Activity rows: {}</li><li>Activity event total: {}</li><li>Chat logs: {}</li><li>Files: {}</li><li>Total file size: {} bytes</li></ul><p><strong>Important:</strong> Cached or overwritten database pages may not be recoverable after deletion. The system can only assist with deletion and cannot restore deleted data.</p><p><a href=\"{}\">Open confirmation report</a></p><p>After opening the report, you still need a second final confirmation to delete.</p>",
+        snapshot.email_count,
+        snapshot.rule_count,
+        snapshot.log_count,
+        snapshot.memory_count,
+        snapshot.activity_row_count,
+        snapshot.activity_event_total,
+        snapshot.chat_log_count,
+        snapshot.file_count,
+        snapshot.total_file_bytes,
+        confirm_url,
+    );
+
+    let message = MessageBuilder::new()
+        .from(state.config.assistant_email.clone())
+        .to(user_email.to_string())
+        .subject("AI Mail Butler - Confirm Your Data Deletion Request")
+        .text_body(text_body)
+        .html_body(html_body);
+
+    let is_implicit = port == 465;
+    let mut builder = SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
+    if !smtp_user.is_empty() {
+        builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
+    }
+
+    match builder.connect().await {
+        Ok(mut client) => client.send(message).await.is_ok(),
+        Err(e) => {
+            tracing::error!("Failed to connect SMTP for data deletion confirmation: {:?}", e);
+            false
+        }
+    }
+}
+
+async fn post_request_data_deletion(
+    State(state): State<AppState>,
+    Json(payload): Json<DataDeletionRequestPayload>,
+) -> Json<serde_json::Value> {
+    let email = payload.email.trim().to_ascii_lowercase();
+    let user_row: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
+        .bind(&email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+
+    let Some((user_id,)) = user_row else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let snapshot = build_user_data_snapshot(&state.pool, &user_id, &email).await;
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+    let token = uuid::Uuid::new_v4().to_string();
+    let req_id = uuid::Uuid::new_v4().to_string();
+
+    let _ = sqlx::query(
+        "INSERT INTO data_deletion_requests (id, user_id, token, status, snapshot_json) VALUES (?, ?, ?, 'requested', ?)"
+    )
+    .bind(&req_id)
+    .bind(&user_id)
+    .bind(&token)
+    .bind(&snapshot_json)
+    .execute(&state.pool)
+    .await;
+
+    let base_url = std::env::var("PUBLIC_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{}", state.config.server_port));
+    let confirm_url = format!("{}/gdpr-delete?token={}", base_url, token);
+
+    let delivered = send_data_deletion_confirmation_email(&state, &email, &snapshot, &confirm_url).await;
+    if !delivered {
+        let msg = format!("Failed to deliver data deletion confirmation email to {}", email);
+        log_mail_event(&state.pool, "ERROR", "gdpr_email_send", &msg, Some(&confirm_url), Some(&user_id)).await;
+    }
+
+    Json(serde_json::json!({
+        "status": "success",
+        "delivered": delivered,
+        "message": "Deletion request recorded. Please check your email for the confirmation link.",
+    }))
+}
+
+async fn get_data_deletion_summary(
+    State(state): State<AppState>,
+    Query(query): Query<DataDeletionSummaryQuery>,
+) -> Json<serde_json::Value> {
+    let row = sqlx::query_as::<_, DataDeletionRequestRow>(
+        "SELECT r.id, r.user_id, u.email as user_email, r.status, r.snapshot_json \
+         FROM data_deletion_requests r \
+         JOIN users u ON u.id = r.user_id \
+         WHERE r.token = ?"
+    )
+    .bind(query.token.trim())
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some(row) = row else {
+        return Json(serde_json::json!({ "status": "error", "message": "Invalid or expired token" }));
+    };
+
+    if row.status == "finalized" {
+        return Json(serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }));
+    }
+
+    if row.status == "requested" {
+        let _ = sqlx::query("UPDATE data_deletion_requests SET status = 'email_confirmed', email_confirmed_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(&row.id)
+            .execute(&state.pool)
+            .await;
+    }
+
+    let snapshot: DataDeletionSnapshot = serde_json::from_str(&row.snapshot_json).unwrap_or_default();
+
+    Json(serde_json::json!({
+        "status": "ready",
+        "email": row.user_email,
+        "snapshot": snapshot,
+        "warning": "Cached/overwritten database pages may not be recoverable. The system can only assist deletion and cannot restore deleted data.",
+        "require_second_confirmation": true
+    }))
+}
+
+async fn post_confirm_data_deletion(
+    State(state): State<AppState>,
+    Json(payload): Json<DataDeletionConfirmPayload>,
+) -> Json<serde_json::Value> {
+    if !payload.confirm {
+        return Json(serde_json::json!({ "status": "error", "message": "Final confirmation is required" }));
+    }
+
+    let row = sqlx::query_as::<_, DataDeletionRequestRow>(
+        "SELECT r.id, r.user_id, u.email as user_email, r.status, r.snapshot_json \
+         FROM data_deletion_requests r \
+         JOIN users u ON u.id = r.user_id \
+         WHERE r.token = ?"
+    )
+    .bind(payload.token.trim())
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some(row) = row else {
+        return Json(serde_json::json!({ "status": "error", "message": "Invalid or expired token" }));
+    };
+
+    if row.status == "finalized" {
+        return Json(serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }));
+    }
+
+    let sender_dir = format!("data/mail_spool/{}", sanitize_path_component(&row.user_email.to_ascii_lowercase()));
+
+    let mut tx = match state.pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            return Json(serde_json::json!({ "status": "error", "message": format!("Cannot start deletion transaction: {}", e) }));
+        }
+    };
+
+    let _ = sqlx::query("DELETE FROM emails WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM email_rules WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM user_memories WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM user_activity_stats WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM mail_errors WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM chat_logs WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
+    let _ = sqlx::query("UPDATE data_deletion_requests SET status = 'finalized', finalized_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(&row.id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = ?").bind(&row.user_id).execute(&mut *tx).await;
+
+    if let Err(e) = tx.commit().await {
+        return Json(serde_json::json!({ "status": "error", "message": format!("Deletion failed: {}", e) }));
+    }
+
+    let _ = fs::remove_dir_all(&sender_dir).await;
+
+    Json(serde_json::json!({
+        "status": "success",
+        "message": "All removable user data has been deleted. Cached/overwritten database pages are not recoverable.",
+    }))
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -865,6 +1221,9 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/auth/verify", post(post_verify))
         .route("/me", get(get_me))
         .route("/settings", post(post_settings))
+        .route("/data-deletion/request", post(post_request_data_deletion))
+        .route("/data-deletion/summary", get(get_data_deletion_summary))
+        .route("/data-deletion/confirm", post(post_confirm_data_deletion))
         .route("/rules", get(get_rules))
         .route("/rules/create", post(post_create_rule))
         .route("/rules/update", post(post_update_rule))
