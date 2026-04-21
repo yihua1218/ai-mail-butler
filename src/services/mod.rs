@@ -173,6 +173,129 @@ IMPORTANT: Detect the language of the user's message. Default to Traditional Chi
     }
 }
 
+/// Service for handling email rules, rule matching, and auto-reply generation
+pub struct EmailReplyService;
+
+impl EmailReplyService {
+    /// Check if an email matches any of the user's enabled rules
+    pub async fn find_matching_rule(
+        pool: &sqlx::SqlitePool,
+        user_id: &str,
+        email_subject: &str,
+        email_body: &str,
+        email_from: &str,
+    ) -> Result<Option<(i64, String)>> {
+        // Fetch all enabled rules for the user
+        let rules: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, rule_text FROM email_rules WHERE user_id = ? AND is_enabled = 1"
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+
+        // Simple rule matching: check if rule keywords appear in subject or body
+        for (rule_id, rule_text) in rules {
+            let rule_lower = rule_text.to_lowercase();
+            let subject_lower = email_subject.to_lowercase();
+            let body_lower = email_body.to_lowercase();
+
+            // Extract keywords from rule (simple split by common delimiters)
+            let keywords: Vec<&str> = rule_lower
+                .split(|c: char| c == ',' || c == ';' || c == '|' || c == '和')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && s.len() > 2)
+                .collect();
+
+            // Check if any keyword matches in subject or body
+            let matched = keywords.iter().any(|keyword| {
+                subject_lower.contains(keyword) || body_lower.contains(keyword)
+            });
+
+            if matched {
+                return Ok(Some((rule_id, rule_text)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Generate an auto-reply based on a rule
+    pub async fn generate_auto_reply(
+        client: &AiClient,
+        user: &User,
+        rule_text: &str,
+        original_from: &str,
+        original_subject: &str,
+        original_body: &str,
+    ) -> Result<String> {
+        let ai_name_zh = user.assistant_name_zh.as_deref().unwrap_or("AI 郵件管家");
+        let ai_name_en = user.assistant_name_en.as_deref().unwrap_or("AI Mail Butler");
+        let ai_tone_zh = user.assistant_tone_zh.as_deref().unwrap_or("專業且親切");
+        let ai_tone_en = user.assistant_tone_en.as_deref().unwrap_or("professional and friendly");
+
+        let identity_context = format!(
+            "Your identity: In Chinese, your name is '{}' and your tone should be '{}'. In English, your name is '{}' and your tone should be '{}'.",
+            ai_name_zh, ai_tone_zh, ai_name_en, ai_tone_en
+        );
+
+        let system_prompt = format!(
+            "You are an AI email assistant. {}. Generate a professional email reply based on the given rule/instruction and the original email content. \
+             The reply should be concise and appropriate for business communication. \
+             Detect the language of the original email and respond in the same language.",
+            identity_context
+        );
+
+        let user_prompt = format!(
+            "Original Email:\nFrom: {}\nSubject: {}\nBody: {}\n\nUser's Rule/Instruction: {}\n\nGenerate a reply following this instruction.",
+            original_from, original_subject, original_body, rule_text
+        );
+
+        let res = client.chat(&system_prompt, &user_prompt).await?;
+        Ok(res.content)
+    }
+
+    /// Store an auto-reply in the database
+    pub async fn store_auto_reply(
+        pool: &sqlx::SqlitePool,
+        user_id: &str,
+        rule_id: i64,
+        original_from: &str,
+        original_subject: &str,
+        reply_body: &str,
+        status: &str,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO auto_replies (id, user_id, email_rule_id, original_from, original_subject, reply_body, reply_status, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(rule_id)
+        .bind(original_from)
+        .bind(original_subject)
+        .bind(reply_body)
+        .bind(status)
+        .execute(pool)
+        .await?;
+
+        Ok(id)
+    }
+
+    /// Get all draft replies for a user (not yet sent)
+    pub async fn get_draft_replies(pool: &sqlx::SqlitePool, user_id: &str) -> Result<Vec<(String, String, String, String)>> {
+        let drafts: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT id, original_from, original_subject, reply_body FROM auto_replies WHERE user_id = ? AND reply_status = 'draft' ORDER BY created_at DESC"
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(drafts)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

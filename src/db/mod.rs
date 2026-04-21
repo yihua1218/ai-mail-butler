@@ -193,6 +193,27 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN email_confirmed_at DATETIME").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN finalized_at DATETIME").execute(&pool).await;
 
+    // Auto-generated email replies based on rules (drafts or sent)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS auto_replies (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            email_rule_id INTEGER NOT NULL,
+            original_from TEXT NOT NULL,
+            original_subject TEXT NOT NULL,
+            original_received_at DATETIME,
+            reply_generation_prompt TEXT,
+            reply_body TEXT NOT NULL,
+            reply_status TEXT NOT NULL DEFAULT 'draft',
+            sent_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(email_rule_id) REFERENCES email_rules(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 

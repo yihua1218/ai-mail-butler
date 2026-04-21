@@ -1918,6 +1918,162 @@ async fn post_toggle_rule(
     }
 }
 
+#[derive(Deserialize)]
+struct GetAutoRepliesRequest {
+    email: String,
+}
+
+#[derive(Serialize)]
+struct AutoReplyResponse {
+    id: String,
+    from: String,
+    subject: String,
+    body: String,
+}
+
+async fn get_auto_replies(
+    State(state): State<AppState>,
+    Json(payload): Json<GetAutoRepliesRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    match crate::services::EmailReplyService::get_draft_replies(&state.pool, &user_id).await {
+        Ok(drafts) => {
+            let replies: Vec<AutoReplyResponse> = drafts
+                .into_iter()
+                .map(|(id, from, subject, body)| AutoReplyResponse {
+                    id,
+                    from,
+                    subject,
+                    body,
+                })
+                .collect();
+            Json(serde_json::json!({ "status": "success", "replies": replies }))
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch auto-replies: {:?}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Failed to fetch replies" }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SendAutoReplyRequest {
+    email: String,
+    reply_id: String,
+}
+
+async fn post_send_auto_reply(
+    State(state): State<AppState>,
+    Json(payload): Json<SendAutoReplyRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    // Fetch draft reply
+    let draft: Option<(String, String)> = sqlx::query_as(
+        "SELECT reply_body, original_from FROM auto_replies WHERE id = ? AND user_id = ? AND reply_status = 'draft'"
+    )
+    .bind(&payload.reply_id)
+    .bind(&user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some((reply_body, recipient)) = draft else {
+        return Json(serde_json::json!({ "status": "error", "message": "Draft not found" }));
+    };
+
+    // Send the email via SMTP
+    let smtp_ready = state.config.smtp_relay_host.as_deref()
+        .map(|h| !h.is_empty() && h != "smtp.your-server-address")
+        .unwrap_or(false);
+
+    if !smtp_ready {
+        return Json(serde_json::json!({ "status": "error", "message": "SMTP not configured" }));
+    }
+
+    let from_addr = extract_pure_email(&state.config.assistant_email);
+    let to_addr = recipient.clone();
+    let subject = "Re: Auto-Reply";
+
+    let message = MessageBuilder::new()
+        .from(from_addr.as_str())
+        .reply_to(from_addr.as_str())
+        .to(to_addr.as_str())
+        .subject(subject)
+        .text_body(reply_body.clone());
+
+    let host = state.config.smtp_relay_host.as_ref().unwrap().clone();
+    let port = state.config.smtp_relay_port;
+    let user = state.config.smtp_relay_user.clone().unwrap_or_default();
+    let pass = state.config.smtp_relay_pass.clone().unwrap_or_default();
+
+    let is_implicit = port == 465;
+    let mut builder = SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
+    if !user.is_empty() {
+        builder = builder.credentials((user.as_str(), pass.as_str()));
+    }
+
+    match builder.connect().await {
+        Ok(mut client) => match client.send(message).await {
+            Ok(_) => {
+                // Mark as sent
+                let _ = sqlx::query("UPDATE auto_replies SET reply_status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?")
+                    .bind(&payload.reply_id)
+                    .execute(&state.pool)
+                    .await;
+                Json(serde_json::json!({ "status": "success", "message": "Reply sent" }))
+            }
+            Err(e) => {
+                tracing::error!("SMTP send failed for auto-reply: {:?}", e);
+                Json(serde_json::json!({ "status": "error", "message": "Failed to send reply" }))
+            }
+        },
+        Err(e) => {
+            tracing::error!("SMTP connect failed: {:?}", e);
+            Json(serde_json::json!({ "status": "error", "message": "SMTP connection failed" }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteAutoReplyRequest {
+    email: String,
+    reply_id: String,
+}
+
+async fn post_delete_auto_reply(
+    State(state): State<AppState>,
+    Json(payload): Json<DeleteAutoReplyRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    match sqlx::query("DELETE FROM auto_replies WHERE id = ? AND user_id = ?")
+        .bind(&payload.reply_id)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await
+    {
+        Ok(result) => {
+            if result.rows_affected() > 0 {
+                Json(serde_json::json!({ "status": "success", "message": "Reply deleted" }))
+            } else {
+                Json(serde_json::json!({ "status": "error", "message": "Reply not found" }))
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete auto-reply: {:?}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Delete failed" }))
+        }
+    }
+}
+
 async fn send_data_deletion_confirmation_email(
     state: &AppState,
     user_email: &str,
@@ -2211,6 +2367,9 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/rules/create", post(post_create_rule))
         .route("/rules/update", post(post_update_rule))
         .route("/rules/toggle", post(post_toggle_rule))
+        .route("/auto-replies", get(get_auto_replies))
+        .route("/auto-replies/send", post(post_send_auto_reply))
+        .route("/auto-replies/delete", post(post_delete_auto_reply))
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
