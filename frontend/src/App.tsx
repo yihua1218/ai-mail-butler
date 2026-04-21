@@ -36,7 +36,6 @@ const Dashboard: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
   const [personalEmails, setPersonalEmails] = useState<any[]>([]);
-  const [allEmails, setAllEmails] = useState<any[]>([]);
   const [globalStats, setGlobalStats] = useState<any>(null);
   const [personalStats, setPersonalStats] = useState<any>(null);
   const [mailErrors, setMailErrors] = useState<any[]>([]);
@@ -54,7 +53,6 @@ const Dashboard: React.FC = () => {
       if (res.data.type === 'admin') {
         setPersonalEmails(res.data.personal_emails);
         setPersonalStats(res.data.personal_stats);
-        setAllEmails(res.data.all_emails);
       } else if (res.data.type === 'personal') {
         setPersonalEmails(res.data.personal_emails);
         setPersonalStats(res.data.personal_stats);
@@ -304,14 +302,9 @@ const Dashboard: React.FC = () => {
         <GlobalStatsDisplay />
         <PersonalStatsDisplay />
         <Row gutter={[24, 24]}>
-          <Col xs={24} lg={12}>
+          <Col xs={24}>
             <Card bordered={false} title="Your Emails">
               <Table dataSource={personalEmails} rowKey="id" columns={columns} pagination={{ pageSize: 5 }} />
-            </Card>
-          </Col>
-          <Col xs={24} lg={12}>
-            <Card bordered={false} title="All Processed Emails (System-wide)">
-              <Table dataSource={allEmails} rowKey="id" columns={columns} pagination={{ pageSize: 5 }} />
             </Card>
           </Col>
           <Col xs={24}>

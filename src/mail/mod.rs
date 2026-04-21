@@ -407,17 +407,17 @@ impl MailService {
 
                                 let mut pdf_texts = Vec::new();
 
-                                // Archive by SMTP recipient for future assistant workflows.
-                                let recipient_key = if to_clean.is_empty() {
-                                    "unknown_recipient".to_string()
+                                // Archive by sender because this assistant processes forwarded emails per sender.
+                                let sender_key = if from_clean.is_empty() {
+                                    "unknown_sender".to_string()
                                 } else {
-                                    sanitize_path_component(&to_clean)
+                                    sanitize_path_component(&from_clean)
                                 };
                                 let message_key = path
                                     .file_stem()
                                     .map(|s| s.to_string_lossy().to_string())
                                     .unwrap_or_else(|| format!("mail_{}", Utc::now().timestamp_millis()));
-                                let message_dir = format!("{}/{}/{}", spool_dir, recipient_key, message_key);
+                                let message_dir = format!("{}/{}/{}", spool_dir, sender_key, message_key);
                                 let attachments_dir = format!("{}/attachments", message_dir);
                                 let decoded_parts_dir = format!("{}/decoded_parts", message_dir);
 

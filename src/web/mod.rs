@@ -194,15 +194,11 @@ async fn get_dashboard(
                 });
 
                 if is_admin {
-                    let all_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, CAST(received_at AS TEXT) as received_at FROM emails ORDER BY received_at DESC")
-                        .fetch_all(pool).await.unwrap_or(vec![]);
-                        
                     return Json(serde_json::json!({ 
                         "type": "admin", 
                         "global_stats": global_stats,
                         "personal_stats": personal_stats,
-                        "personal_emails": personal_emails,
-                        "all_emails": all_emails
+                        "personal_emails": personal_emails
                     }));
                 } else {
                     return Json(serde_json::json!({ 
