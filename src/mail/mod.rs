@@ -114,6 +114,30 @@ fn collect_attachment_parts<'a>(
     }
 }
 
+fn collect_inline_text_parts<'a>(
+    part: &'a mailparse::ParsedMail<'a>,
+    out: &mut Vec<&'a mailparse::ParsedMail<'a>>,
+) {
+    if !part.subparts.is_empty() {
+        for sub in part.subparts.iter() {
+            collect_inline_text_parts(sub, out);
+        }
+        return;
+    }
+
+    let mime = part.ctype.mimetype.to_ascii_lowercase();
+    if mime != "text/plain" && mime != "text/html" {
+        return;
+    }
+
+    let disposition = part.get_content_disposition();
+    if matches!(disposition.disposition, mailparse::DispositionType::Attachment) {
+        return;
+    }
+
+    out.push(part);
+}
+
 fn infer_attachment_filename(part: &mailparse::ParsedMail<'_>, index: usize) -> String {
     let disposition = part.get_content_disposition();
     if let Some(name) = disposition.params.get("filename") {
@@ -386,10 +410,12 @@ impl MailService {
                                     .unwrap_or_else(|| format!("mail_{}", Utc::now().timestamp_millis()));
                                 let message_dir = format!("{}/{}/{}", spool_dir, recipient_key, message_key);
                                 let attachments_dir = format!("{}/attachments", message_dir);
+                                let decoded_parts_dir = format!("{}/decoded_parts", message_dir);
 
                                 if let Err(e) = fs::create_dir_all(&attachments_dir).await {
                                     error!("Failed to create archive dir {}: {}", message_dir, e);
                                 } else {
+                                    let _ = fs::create_dir_all(&decoded_parts_dir).await;
                                     let _ = fs::write(format!("{}/raw.eml", message_dir), &contents).await;
                                     let _ = fs::write(format!("{}/body.txt", message_dir), body.as_bytes()).await;
 
@@ -458,6 +484,36 @@ impl MailService {
                                                         );
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+
+                                    // Decode inline text parts (including base64-encoded plain/html) and persist.
+                                    let mut text_parts = Vec::new();
+                                    collect_inline_text_parts(&parsed, &mut text_parts);
+                                    for (idx, part) in text_parts.iter().enumerate() {
+                                        match part.get_body() {
+                                            Ok(decoded) => {
+                                                if decoded.trim().is_empty() {
+                                                    continue;
+                                                }
+                                                let ext = if part.ctype.mimetype.eq_ignore_ascii_case("text/html") {
+                                                    "html"
+                                                } else {
+                                                    "txt"
+                                                };
+                                                let decoded_path = format!(
+                                                    "{}/part_{:02}.{}",
+                                                    decoded_parts_dir,
+                                                    idx + 1,
+                                                    ext
+                                                );
+                                                if let Err(e) = fs::write(&decoded_path, decoded.as_bytes()).await {
+                                                    error!("Failed to save decoded text part {}: {}", decoded_path, e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to decode text MIME part: {}", e);
                                             }
                                         }
                                     }
