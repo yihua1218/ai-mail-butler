@@ -25,6 +25,17 @@ struct MailError {
     occurred_at: String,
 }
 
+#[derive(sqlx::FromRow, Serialize)]
+struct EmailRule {
+    id: i64,
+    user_id: String,
+    rule_text: String,
+    source: String,
+    is_enabled: bool,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
 async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context: Option<&str>) {
     let _ = sqlx::query(
         "INSERT INTO mail_errors (error_type, message, context) VALUES (?, ?, ?)"
@@ -34,6 +45,58 @@ async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context:
     .bind(context)
     .execute(pool)
     .await;
+}
+
+fn looks_like_email_rule(message: &str) -> bool {
+    let m = message.trim();
+    if m.len() < 8 {
+        return false;
+    }
+
+    let lower = m.to_lowercase();
+    let keywords = [
+        "轉寄", "請幫我", "遇到", "收到", "帳單", "通知", "發票", "提醒", "回覆", "處理",
+        "forward", "when", "invoice", "bill", "receipt", "notify", "remind", "reply", "urgent", "important",
+    ];
+    keywords.iter().any(|k| lower.contains(k))
+}
+
+async fn capture_rule_from_chat(pool: &SqlitePool, user_id: &str, message: &str) {
+    let cleaned = message.trim();
+    if !looks_like_email_rule(cleaned) {
+        return;
+    }
+
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM email_rules WHERE user_id = ? AND lower(rule_text) = lower(?) LIMIT 1"
+    )
+    .bind(user_id)
+    .bind(cleaned)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    if exists.is_some() {
+        return;
+    }
+
+    let _ = sqlx::query(
+        "INSERT INTO email_rules (user_id, rule_text, source, is_enabled) VALUES (?, ?, 'chat', 1)"
+    )
+    .bind(user_id)
+    .bind(cleaned)
+    .execute(pool)
+    .await;
+}
+
+async fn get_user_id_by_email(pool: &SqlitePool, email: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT id FROM users WHERE email = ?")
+        .bind(email)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[derive(Clone)]
@@ -193,6 +256,8 @@ async fn post_chat(
             if lower_msg.contains("forward") || lower_msg.contains("email") || lower_msg.contains("信箱") || lower_msg.contains("轉寄") {
                 let _ = OnboardingService::log_activity(pool, &user.id, "ask_forwarding_info").await;
             }
+
+            capture_rule_from_chat(pool, &user.id, &message).await;
 
             // Append Onboarding Question if needed
             if user.onboarding_step < 3 {
@@ -552,6 +617,26 @@ struct SettingsRequest {
     pdf_passwords: Option<Vec<String>>,
 }
 
+#[derive(Deserialize)]
+struct CreateRuleRequest {
+    email: String,
+    rule_text: String,
+}
+
+#[derive(Deserialize)]
+struct UpdateRuleRequest {
+    email: String,
+    id: i64,
+    rule_text: String,
+}
+
+#[derive(Deserialize)]
+struct ToggleRuleRequest {
+    email: String,
+    id: i64,
+    is_enabled: bool,
+}
+
 async fn post_settings(
     State(state): State<AppState>,
     Json(payload): Json<SettingsRequest>,
@@ -612,6 +697,117 @@ async fn get_admin_errors(
     Json(serde_json::json!({ "errors": errors }))
 }
 
+async fn get_rules(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+
+    let Some(user_id) = get_user_id_by_email(&state.pool, &email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let rules = sqlx::query_as::<_, EmailRule>(
+        "SELECT id, user_id, rule_text, source, is_enabled, CAST(created_at AS TEXT) as created_at, CAST(updated_at AS TEXT) as updated_at \
+         FROM email_rules WHERE user_id = ? ORDER BY is_enabled DESC, updated_at DESC"
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({ "status": "success", "rules": rules }))
+}
+
+async fn post_create_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateRuleRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let rule_text = payload.rule_text.trim();
+    if rule_text.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Rule cannot be empty" }));
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO email_rules (user_id, rule_text, source, is_enabled) VALUES (?, ?, 'manual', 1)"
+    )
+    .bind(&user_id)
+    .bind(rule_text)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Err(e) => {
+            tracing::error!("Failed to create rule: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Create failed" }))
+        }
+    }
+}
+
+async fn post_update_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateRuleRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let rule_text = payload.rule_text.trim();
+    if rule_text.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Rule cannot be empty" }));
+    }
+
+    let result = sqlx::query(
+        "UPDATE email_rules SET rule_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+    )
+    .bind(rule_text)
+    .bind(payload.id)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Err(e) => {
+            tracing::error!("Failed to update rule: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Update failed" }))
+        }
+    }
+}
+
+async fn post_toggle_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<ToggleRuleRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let result = sqlx::query(
+        "UPDATE email_rules SET is_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
+    )
+    .bind(payload.is_enabled)
+    .bind(payload.id)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(serde_json::json!({ "status": "success" })),
+        Err(e) => {
+            tracing::error!("Failed to toggle rule: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Toggle failed" }))
+        }
+    }
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -620,6 +816,10 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/auth/verify", post(post_verify))
         .route("/me", get(get_me))
         .route("/settings", post(post_settings))
+        .route("/rules", get(get_rules))
+        .route("/rules/create", post(post_create_rule))
+        .route("/rules/update", post(post_update_rule))
+        .route("/rules/toggle", post(post_toggle_rule))
         .route("/dashboard", get(get_dashboard))
         .route("/admin/errors", get(get_admin_errors))
         .route("/chat", post(post_chat));

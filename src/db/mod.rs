@@ -74,6 +74,22 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // User-defined and chat-captured email processing rules.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS email_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            rule_text TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',
+            is_enabled BOOLEAN NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
     // Track AI assistant chat replies (anonymous + logged-in)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS chat_logs (

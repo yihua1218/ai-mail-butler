@@ -15,6 +15,7 @@ export interface User {
   assistant_name_en: string | null;
   assistant_tone_zh: string | null;
   assistant_tone_en: string | null;
+  pdf_passwords: string | null;
 }
 
 interface AuthContextType {

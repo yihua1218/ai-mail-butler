@@ -3,7 +3,6 @@ use tracing::{info, warn, error};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::net::SocketAddr;
-use mailparse::MailHeaderMap;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio::fs;
@@ -16,6 +15,117 @@ use chrono::Utc;
 use crate::config::Config;
 
 pub struct MailService;
+
+fn first_email_address(raw: &str) -> Option<String> {
+    if let Ok(parsed) = mailparse::addrparse(raw) {
+        for addr in parsed.iter() {
+            match addr {
+                mailparse::MailAddr::Single(info) => {
+                    if !info.addr.trim().is_empty() {
+                        return Some(info.addr.trim().to_ascii_lowercase());
+                    }
+                }
+                mailparse::MailAddr::Group(group) => {
+                    for single in group.addrs.iter() {
+                        if !single.addr.trim().is_empty() {
+                            return Some(single.addr.trim().to_ascii_lowercase());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback for non-standard address formats.
+    if let Some((_, after_lt)) = raw.split_once('<') {
+        if let Some((inside, _)) = after_lt.split_once('>') {
+            let inside = inside.trim();
+            if inside.contains('@') {
+                return Some(inside.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let trimmed = raw.trim().trim_matches('"').trim_matches('>').trim_matches('<');
+    if trimmed.contains('@') {
+        Some(trimmed.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn sanitize_path_component(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn extension_from_mime(mime: &str) -> &'static str {
+    match mime {
+        "application/pdf" => "pdf",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "text/plain" => "txt",
+        "text/html" => "html",
+        "application/zip" => "zip",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        _ => "bin",
+    }
+}
+
+fn collect_attachment_parts<'a>(
+    part: &'a mailparse::ParsedMail<'a>,
+    out: &mut Vec<&'a mailparse::ParsedMail<'a>>,
+) {
+    if !part.subparts.is_empty() {
+        for sub in part.subparts.iter() {
+            collect_attachment_parts(sub, out);
+        }
+        return;
+    }
+
+    let disposition = part.get_content_disposition();
+    let has_filename = disposition.params.contains_key("filename")
+        || part.ctype.params.contains_key("name");
+    let is_attachment = matches!(
+        disposition.disposition,
+        mailparse::DispositionType::Attachment
+    );
+
+    if has_filename || is_attachment {
+        out.push(part);
+    }
+}
+
+fn infer_attachment_filename(part: &mailparse::ParsedMail<'_>, index: usize) -> String {
+    let disposition = part.get_content_disposition();
+    if let Some(name) = disposition.params.get("filename") {
+        return sanitize_path_component(name);
+    }
+    if let Some(name) = part.ctype.params.get("name") {
+        return sanitize_path_component(name);
+    }
+
+    let ext = extension_from_mime(&part.ctype.mimetype);
+    format!("attachment_{index:02}.{ext}")
+}
 
 async fn log_mail_error(pool: &SqlitePool, error_type: &str, msg: &str, context: Option<&str>) {
     let _ = sqlx::query(
@@ -242,20 +352,116 @@ impl MailService {
                                     from_addr, to_addr, subject
                                 );
 
-                                // Strip angle brackets / whitespace from To
-                                let to_clean = to_addr
-                                    .trim()
-                                    .trim_start_matches('<')
-                                    .trim_end_matches('>')
-                                    .to_string();
+                                let to_clean = first_email_address(&to_addr)
+                                    .unwrap_or_else(|| to_addr.trim().to_ascii_lowercase());
+                                let from_clean = first_email_address(&from_addr)
+                                    .unwrap_or_else(|| from_addr.trim().to_ascii_lowercase());
 
+                                // Forwarded email ownership is determined by the registered sender.
                                 let user = sqlx::query_as::<_, User>(
                                     "SELECT * FROM users WHERE email = ?",
                                 )
-                                .bind(&to_clean)
+                                .bind(&from_clean)
                                 .fetch_optional(&pool)
                                 .await
                                 .unwrap_or(None);
+
+                                let passwords: Vec<String> = user
+                                    .as_ref()
+                                    .and_then(|u| u.pdf_passwords.as_ref())
+                                    .and_then(|s| serde_json::from_str(s).ok())
+                                    .unwrap_or_default();
+
+                                let mut pdf_texts = Vec::new();
+
+                                // Archive by SMTP recipient for future assistant workflows.
+                                let recipient_key = if to_clean.is_empty() {
+                                    "unknown_recipient".to_string()
+                                } else {
+                                    sanitize_path_component(&to_clean)
+                                };
+                                let message_key = path
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| format!("mail_{}", Utc::now().timestamp_millis()));
+                                let message_dir = format!("{}/{}/{}", spool_dir, recipient_key, message_key);
+                                let attachments_dir = format!("{}/attachments", message_dir);
+
+                                if let Err(e) = fs::create_dir_all(&attachments_dir).await {
+                                    error!("Failed to create archive dir {}: {}", message_dir, e);
+                                } else {
+                                    let _ = fs::write(format!("{}/raw.eml", message_dir), &contents).await;
+                                    let _ = fs::write(format!("{}/body.txt", message_dir), body.as_bytes()).await;
+
+                                    let metadata = format!(
+                                        "from: {}\nto: {}\nsubject: {}\nreceived_at: {}\n",
+                                        from_clean,
+                                        to_clean,
+                                        subject,
+                                        Utc::now().to_rfc3339()
+                                    );
+                                    let _ = fs::write(format!("{}/meta.txt", message_dir), metadata).await;
+
+                                    let mut attachment_parts = Vec::new();
+                                    collect_attachment_parts(&parsed, &mut attachment_parts);
+                                    for (idx, part) in attachment_parts.iter().enumerate() {
+                                        if let Ok(data) = part.get_body_raw() {
+                                            let filename = infer_attachment_filename(part, idx + 1);
+                                            let attachment_path = format!(
+                                                "{}/{}",
+                                                attachments_dir,
+                                                sanitize_path_component(&filename)
+                                            );
+                                            if let Err(e) = fs::write(&attachment_path, &data).await {
+                                                error!("Failed to save attachment {}: {}", attachment_path, e);
+                                            }
+
+                                            if part.ctype.mimetype.eq_ignore_ascii_case("application/pdf") {
+                                                match crate::services::OnboardingService::extract_pdf_text(&data, &passwords) {
+                                                    Ok(text) => {
+                                                        if !text.trim().is_empty() {
+                                                            pdf_texts.push(text.clone());
+
+                                                            let md_filename = if filename
+                                                                .to_ascii_lowercase()
+                                                                .ends_with(".pdf")
+                                                            {
+                                                                format!("{}.md", &filename[..filename.len() - 4])
+                                                            } else {
+                                                                format!("{}.md", filename)
+                                                            };
+                                                            let md_path = format!(
+                                                                "{}/{}",
+                                                                attachments_dir,
+                                                                sanitize_path_component(&md_filename)
+                                                            );
+
+                                                            let md_content = format!(
+                                                                "# Extracted PDF Content\n\nSource: {}\n\n{}",
+                                                                filename,
+                                                                text
+                                                            );
+                                                            if let Err(e) =
+                                                                fs::write(&md_path, md_content.as_bytes()).await
+                                                            {
+                                                                error!(
+                                                                    "Failed to save PDF markdown {}: {}",
+                                                                    md_path, e
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Failed to extract PDF text from {}: {}",
+                                                            filename, e
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 if let Some(u) = user {
                                     let id = Uuid::new_v4().to_string();
@@ -263,7 +469,7 @@ impl MailService {
 
                                     sqlx::query(
                                         "INSERT INTO emails (id, user_id, subject, preview, status) \
-                                         VALUES (?, ?, ?, ?, 'received')",
+                                         VALUES (?, ?, ?, ?, 'pending')",
                                     )
                                     .bind(&id)
                                     .bind(&u.id)
@@ -272,48 +478,62 @@ impl MailService {
                                     .execute(&pool)
                                     .await
                                     .unwrap_or_default();
-
-                                    let mut pdf_texts = Vec::new();
-                                    let passwords: Vec<String> = u
-                                        .pdf_passwords
-                                        .as_ref()
-                                        .and_then(|s| serde_json::from_str(s).ok())
-                                        .unwrap_or_default();
-
-                                    for part in parsed.subparts.iter() {
-                                        if part
-                                            .get_headers()
-                                            .get_first_header("Content-Type")
-                                            .map(|h| h.get_value())
-                                            .unwrap_or_default()
-                                            .contains("application/pdf")
-                                        {
-                                            if let Ok(data) = part.get_body_raw() {
-                                                if let Ok(text) =
-                                                    crate::services::OnboardingService::extract_pdf_text(
-                                                        &data, &passwords,
-                                                    )
-                                                {
-                                                    pdf_texts.push(text);
-                                                }
-                                            }
-                                        }
-                                    }
                                     let pdf_context = if pdf_texts.is_empty() {
                                         None
                                     } else {
                                         Some(pdf_texts.join("\n---\n"))
                                     };
 
-                                    if u.is_onboarded {
+                                    let has_preference_rules = u
+                                        .preferences
+                                        .as_ref()
+                                        .map(|p| !p.trim().is_empty())
+                                        .unwrap_or(false);
+
+                                    let enabled_rule_count: i64 = sqlx::query_scalar(
+                                        "SELECT COUNT(*) FROM email_rules WHERE user_id = ? AND is_enabled = 1"
+                                    )
+                                    .bind(&u.id)
+                                    .fetch_one(&pool)
+                                    .await
+                                    .unwrap_or(0);
+
+                                    let has_rules = has_preference_rules || enabled_rule_count > 0;
+
+                                    let enabled_rules: Vec<String> = sqlx::query_scalar(
+                                        "SELECT rule_text FROM email_rules WHERE user_id = ? AND is_enabled = 1 ORDER BY updated_at DESC"
+                                    )
+                                    .bind(&u.id)
+                                    .fetch_all(&pool)
+                                    .await
+                                    .unwrap_or_default();
+
+                                    if has_rules {
                                         info!("Triggering AI for email {}", id);
                                         let memory = crate::services::OnboardingService::get_memory(
                                             &pool, &u.id,
                                         )
                                         .await;
+
+                                        let mut ai_user = u.clone();
+                                        if !enabled_rules.is_empty() {
+                                            let rules_context = enabled_rules
+                                                .iter()
+                                                .map(|r| format!("- {}", r))
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            let merged = match ai_user.preferences.as_ref() {
+                                                Some(p) if !p.trim().is_empty() => {
+                                                    format!("{}\n\nActive email processing rules:\n{}", p, rules_context)
+                                                }
+                                                _ => format!("Active email processing rules:\n{}", rules_context),
+                                            };
+                                            ai_user.preferences = Some(merged);
+                                        }
+
                                         match crate::services::OnboardingService::generate_reply(
                                             &ai_client,
-                                            &u,
+                                            &ai_user,
                                             &body,
                                             &memory,
                                             &config.assistant_email,
@@ -461,11 +681,16 @@ impl MailService {
                                                 .await;
                                             }
                                         }
+                                    } else {
+                                        info!(
+                                            "No processing rules for user {}; leaving email {} as pending",
+                                            u.email, id
+                                        );
                                     }
                                 } else {
                                     warn!(
-                                        "No user found for recipient {:?}; email discarded",
-                                        to_clean
+                                        "No user found for sender {:?} (recipient {:?}); email discarded",
+                                        from_clean, to_clean
                                     );
                                 }
                             }

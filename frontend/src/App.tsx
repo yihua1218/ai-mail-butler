@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Layout, Menu, Typography, Card, Table, Row, Col, Statistic, Button, 
-  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge
+  Input, Form, Switch, message, Dropdown, ConfigProvider, Alert, Radio, Tag, Badge, Space, Modal
 } from 'antd';
-import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined } from '@ant-design/icons';
+import { GlobalOutlined, UserOutlined, MailOutlined, MessageOutlined, LoginOutlined, LogoutOutlined, SettingOutlined, RobotOutlined, WarningOutlined, PlusOutlined, EditOutlined } from '@ant-design/icons';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
@@ -21,6 +21,7 @@ const PATH_TO_KEY: Record<string, string> = {
   '/chat': '2',
   '/settings': '3',
   '/about': '4',
+  '/rules': '5',
   '/login': '1', // Login also maps to dashboard view
 };
 const KEY_TO_PATH: Record<string, string> = {
@@ -28,6 +29,7 @@ const KEY_TO_PATH: Record<string, string> = {
   '2': '/chat',
   '3': '/settings',
   '4': '/about',
+  '5': '/rules',
 };
 
 const Dashboard: React.FC = () => {
@@ -111,7 +113,20 @@ const Dashboard: React.FC = () => {
 
   const columns = [
     { title: 'Subject', dataIndex: 'subject', key: 'subject' },
-    { title: 'Status', dataIndex: 'status', key: 'status' },
+    {
+      title: 'Status',
+      dataIndex: 'status',
+      key: 'status',
+      render: (value: string) => {
+        const statusColor: Record<string, string> = {
+          pending: 'gold',
+          drafted: 'blue',
+          replied: 'green',
+        };
+        const label = t(`status_${value}`, { defaultValue: value });
+        return <Tag color={statusColor[value] || 'default'}>{label}</Tag>;
+      }
+    },
     { title: 'Received At', dataIndex: 'received_at', key: 'received_at' }
   ];
 
@@ -213,6 +228,18 @@ const Settings: React.FC = () => {
 
   useEffect(() => {
     if (user) {
+      let pdfPasswords: string[] = [];
+      if (user.pdf_passwords) {
+        try {
+          const parsed = JSON.parse(user.pdf_passwords);
+          if (Array.isArray(parsed)) {
+            pdfPasswords = parsed;
+          }
+        } catch {
+          pdfPasswords = [];
+        }
+      }
+
       form.setFieldsValue({
         display_name: user.display_name,
         auto_reply: user.auto_reply,
@@ -222,6 +249,7 @@ const Settings: React.FC = () => {
         assistant_name_en: user.assistant_name_en,
         assistant_tone_zh: user.assistant_tone_zh,
         assistant_tone_en: user.assistant_tone_en,
+        pdf_passwords: pdfPasswords,
       });
     } else {
       // Guest settings from localStorage
@@ -311,6 +339,36 @@ const Settings: React.FC = () => {
                 <Radio value="plain">{t('format_plain')}</Radio>
               </Radio.Group>
             </Form.Item>
+
+            <Title level={5} style={{ margin: '24px 0 16px' }}>PDF Passwords</Title>
+            <Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 16 }}>
+              If some PDF attachments are encrypted, add the passwords here so the system can decode and convert them into Markdown.
+            </Paragraph>
+            <Form.List name="pdf_passwords">
+              {(fields, { add, remove }) => (
+                <>
+                  {fields.map((field) => (
+                    <Space key={field.key} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
+                      <Form.Item
+                        {...field}
+                        style={{ marginBottom: 0, minWidth: 340 }}
+                        rules={[{ required: true, message: 'Password cannot be empty' }]}
+                      >
+                        <Input.Password placeholder="PDF password" />
+                      </Form.Item>
+                      <Button onClick={() => remove(field.name)} danger>
+                        Remove
+                      </Button>
+                    </Space>
+                  ))}
+                  <Form.Item>
+                    <Button type="dashed" onClick={() => add()} icon={<PlusOutlined />}>
+                      Add PDF Password
+                    </Button>
+                  </Form.Item>
+                </>
+              )}
+            </Form.List>
           </>
         )}
         <Form.Item style={{ marginTop: 32 }}>
@@ -319,6 +377,176 @@ const Settings: React.FC = () => {
           </Button>
         </Form.Item>
       </Form>
+    </Card>
+  );
+};
+
+type EmailRule = {
+  id: number;
+  rule_text: string;
+  source: string;
+  is_enabled: boolean;
+  updated_at?: string;
+};
+
+const RulesManager: React.FC = () => {
+  const { user } = useAuth();
+  const [rules, setRules] = useState<EmailRule[]>([]);
+  const [newRule, setNewRule] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editingRule, setEditingRule] = useState<EmailRule | null>(null);
+  const [editText, setEditText] = useState('');
+
+  const loadRules = async () => {
+    if (!user) return;
+    try {
+      const res = await axios.get(`/api/rules?email=${encodeURIComponent(user.email)}`);
+      setRules(res.data.rules || []);
+    } catch {
+      message.error('Failed to load rules.');
+    }
+  };
+
+  useEffect(() => {
+    loadRules();
+  }, [user?.email]);
+
+  const addRule = async () => {
+    if (!user || !newRule.trim()) return;
+    setSaving(true);
+    try {
+      await axios.post('/api/rules/create', { email: user.email, rule_text: newRule.trim() });
+      setNewRule('');
+      message.success('Rule added.');
+      loadRules();
+    } catch {
+      message.error('Failed to add rule.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleRule = async (rule: EmailRule, enabled: boolean) => {
+    if (!user) return;
+    try {
+      await axios.post('/api/rules/toggle', { email: user.email, id: rule.id, is_enabled: enabled });
+      loadRules();
+    } catch {
+      message.error('Failed to update rule status.');
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!user || !editingRule || !editText.trim()) return;
+    setSaving(true);
+    try {
+      await axios.post('/api/rules/update', {
+        email: user.email,
+        id: editingRule.id,
+        rule_text: editText.trim(),
+      });
+      setEditingRule(null);
+      setEditText('');
+      message.success('Rule updated.');
+      loadRules();
+    } catch {
+      message.error('Failed to update rule.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const columns = [
+    {
+      title: 'Rule',
+      dataIndex: 'rule_text',
+      key: 'rule_text',
+      render: (v: string) => <span>{v}</span>,
+    },
+    {
+      title: 'Source',
+      dataIndex: 'source',
+      key: 'source',
+      width: 120,
+      render: (v: string) => <Tag color={v === 'chat' ? 'cyan' : 'default'}>{v}</Tag>,
+    },
+    {
+      title: 'Enabled',
+      dataIndex: 'is_enabled',
+      key: 'is_enabled',
+      width: 120,
+      render: (_: boolean, record: EmailRule) => (
+        <Switch checked={record.is_enabled} onChange={(checked) => toggleRule(record, checked)} />
+      ),
+    },
+    {
+      title: 'Updated',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      width: 200,
+    },
+    {
+      title: 'Action',
+      key: 'action',
+      width: 120,
+      render: (_: unknown, record: EmailRule) => (
+        <Button
+          icon={<EditOutlined />}
+          onClick={() => {
+            setEditingRule(record);
+            setEditText(record.rule_text);
+          }}
+        >
+          Edit
+        </Button>
+      ),
+    },
+  ];
+
+  if (!user) {
+    return (
+      <Card bordered={false}>
+        <Alert
+          type="info"
+          showIcon
+          message="Please login first"
+          description="Rule management is available for logged-in users only."
+        />
+      </Card>
+    );
+  }
+
+  return (
+    <Card bordered={false} title="Email Processing Rules">
+      <Paragraph style={{ color: '#666' }}>
+        Rules below include conversational instructions you told the assistant in chat, plus manual rules you add here.
+      </Paragraph>
+      <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+        <Input
+          placeholder="Example: 如果是信用卡帳單，先摘要重點再提醒繳費期限"
+          value={newRule}
+          onChange={(e) => setNewRule(e.target.value)}
+          onPressEnter={addRule}
+        />
+        <Button type="primary" icon={<PlusOutlined />} onClick={addRule} loading={saving}>
+          Add Rule
+        </Button>
+      </Space.Compact>
+
+      <Table rowKey="id" dataSource={rules} columns={columns} pagination={{ pageSize: 8 }} />
+
+      <Modal
+        title="Edit Rule"
+        open={!!editingRule}
+        onCancel={() => {
+          setEditingRule(null);
+          setEditText('');
+        }}
+        onOk={saveEdit}
+        confirmLoading={saving}
+      >
+        <Input.TextArea rows={5} value={editText} onChange={(e) => setEditText(e.target.value)} />
+      </Modal>
     </Card>
   );
 };
@@ -364,6 +592,7 @@ const App: React.FC = () => {
       '2': t('ai_chat'),
       '3': t('settings'),
       '4': 'About',
+      '5': 'Rules',
     };
     document.title = `${titles[activeMenu] ?? 'AI Mail Butler'} | AI Mail Butler`;
   }, [activeMenu, t]);
@@ -427,6 +656,7 @@ const App: React.FC = () => {
                 { key: '2', label: t('ai_chat') },
                 { key: '3', label: t('settings') },
                 { key: '4', label: 'About' },
+                { key: '5', label: 'Rules' },
               ]}
             />
           </div>
@@ -465,6 +695,7 @@ const App: React.FC = () => {
           {activeMenu === '2' && <Chat />}
           {activeMenu === '3' && <Settings />}
           {activeMenu === '4' && <About />}
+          {activeMenu === '5' && <RulesManager />}
         </Content>
         <Footer style={{ textAlign: 'center', color: '#86868b' }}>
           AI Mail Butler ©{new Date().getFullYear()} - Released into the Public Domain
