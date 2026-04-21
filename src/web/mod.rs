@@ -126,6 +126,35 @@ fn docs_index_cache() -> &'static RwLock<DocsIndexCache> {
     DOCS_INDEX_CACHE.get_or_init(|| RwLock::new(DocsIndexCache::default()))
 }
 
+fn is_doc_allowed(file_name: &str, whitelist: &[String]) -> bool {
+    if whitelist.is_empty() {
+        return true;
+    }
+
+    let lowered_name = file_name.to_lowercase();
+    whitelist.iter().any(|allowed| {
+        let token = allowed.trim().to_lowercase();
+        if token.is_empty() {
+            return false;
+        }
+        lowered_name == token || lowered_name.ends_with(&token) || lowered_name.contains(&token)
+    })
+}
+
+fn is_zh_tw_doc(file_name: &str) -> bool {
+    file_name.to_lowercase().ends_with(".zh-tw.md")
+}
+
+fn language_bonus(file_name: &str, preferred_language: Option<&str>) -> usize {
+    match preferred_language {
+        Some("zh-TW") if is_zh_tw_doc(file_name) => 8,
+        Some("zh-TW") => 1,
+        Some(_) if is_zh_tw_doc(file_name) => 0,
+        Some(_) => 4,
+        None => 0,
+    }
+}
+
 async fn rebuild_docs_index() -> DocsIndexCache {
     let mut entries = match fs::read_dir("docs").await {
         Ok(v) => v,
@@ -222,7 +251,7 @@ fn best_matching_snippet(content: &str, terms: &[String]) -> String {
     lines.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
 }
 
-async fn build_docs_context(query: &str) -> Option<String> {
+async fn build_docs_context(query: &str, preferred_language: Option<&str>, docs_whitelist: &[String]) -> Option<String> {
     let terms = extract_query_terms(query);
     if terms.is_empty() {
         return None;
@@ -240,13 +269,18 @@ async fn build_docs_context(query: &str) -> Option<String> {
     let mut scored: Vec<(usize, String, String)> = Vec::new();
 
     for entry in docs_entries.iter() {
+        if !is_doc_allowed(&entry.file_name, docs_whitelist) {
+            continue;
+        }
+
         let score: usize = terms.iter().map(|t| entry.lower_content.matches(t).count()).sum();
         if score == 0 {
             continue;
         }
 
         let snippet = best_matching_snippet(&entry.content, &terms);
-        scored.push((score, entry.file_name.clone(), snippet));
+        let final_score = score + language_bonus(&entry.file_name, preferred_language);
+        scored.push((final_score, entry.file_name.clone(), snippet));
     }
 
     if scored.is_empty() {
@@ -292,39 +326,128 @@ fn looks_like_email_rule(message: &str) -> bool {
 
     let lower = m.to_lowercase();
     let keywords = [
-        "轉寄", "請幫我", "遇到", "收到", "帳單", "通知", "發票", "提醒", "回覆", "處理",
-        "forward", "when", "invoice", "bill", "receipt", "notify", "remind", "reply", "urgent", "important",
+        "轉寄", "請幫我", "遇到", "收到", "帳單", "通知", "發票", "提醒", "回覆", "處理", "規則", "新增規則", "建立規則",
+        "forward", "when", "invoice", "bill", "receipt", "notify", "remind", "reply", "urgent", "important", "rule", "add rule", "create rule", "set a rule",
     ];
     keywords.iter().any(|k| lower.contains(k))
 }
 
-async fn capture_rule_from_chat(pool: &SqlitePool, user_id: &str, message: &str) {
-    let cleaned = message.trim();
-    if !looks_like_email_rule(cleaned) {
-        return;
+enum RuleCaptureOutcome {
+    None,
+    Duplicate(String),
+    Created(String),
+}
+
+fn strip_leading_rule_prefix(message: &str, lower: &str, prefix: &str) -> Option<String> {
+    if !lower.starts_with(prefix) {
+        return None;
     }
+
+    let trimmed = message
+        .chars()
+        .skip(prefix.chars().count())
+        .collect::<String>()
+        .trim()
+        .trim_start_matches([':', '：', '-', ' '])
+        .trim()
+        .to_string();
+
+    if trimmed.len() >= 6 {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn extract_rule_from_message(message: &str) -> Option<String> {
+    let cleaned = message.trim();
+    if cleaned.len() < 8 {
+        return None;
+    }
+
+    let lower = cleaned.to_lowercase();
+    let prefixes = [
+        "新增規則", "建立規則", "設定規則", "幫我新增規則", "幫我建立規則",
+        "add rule", "create rule", "set a rule", "new rule", "rule",
+    ];
+
+    for p in prefixes {
+        if let Some(value) = strip_leading_rule_prefix(cleaned, &lower, p) {
+            return Some(value);
+        }
+    }
+
+    if (lower.starts_with("規則:") || lower.starts_with("規則：")) && cleaned.len() > 3 {
+        let extracted = cleaned
+            .chars()
+            .skip(3)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if extracted.len() >= 6 {
+            return Some(extracted);
+        }
+    }
+
+    if looks_like_email_rule(cleaned) {
+        return Some(cleaned.to_string());
+    }
+
+    None
+}
+
+fn rule_capture_notice(preferred_language: &str, outcome: &RuleCaptureOutcome) -> Option<String> {
+    match outcome {
+        RuleCaptureOutcome::Created(rule) => {
+            if preferred_language == "zh-TW" {
+                Some(format!("[Rule Created] 已根據你的需求建立新規則：{}", rule))
+            } else {
+                Some(format!("[Rule Created] I created a new rule from your request: {}", rule))
+            }
+        }
+        RuleCaptureOutcome::Duplicate(rule) => {
+            if preferred_language == "zh-TW" {
+                Some(format!("[Rule Exists] 這條規則已存在，已略過重複新增：{}", rule))
+            } else {
+                Some(format!("[Rule Exists] This rule already exists, so I skipped creating a duplicate: {}", rule))
+            }
+        }
+        RuleCaptureOutcome::None => None,
+    }
+}
+
+async fn capture_rule_from_chat(pool: &SqlitePool, user_id: &str, message: &str) -> RuleCaptureOutcome {
+    let Some(cleaned) = extract_rule_from_message(message) else {
+        return RuleCaptureOutcome::None;
+    };
 
     let exists: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM email_rules WHERE user_id = ? AND lower(rule_text) = lower(?) LIMIT 1"
     )
     .bind(user_id)
-    .bind(cleaned)
+    .bind(&cleaned)
     .fetch_optional(pool)
     .await
     .ok()
     .flatten();
 
     if exists.is_some() {
-        return;
+        return RuleCaptureOutcome::Duplicate(cleaned);
     }
 
-    let _ = sqlx::query(
+    let insert_result = sqlx::query(
         "INSERT INTO email_rules (user_id, rule_text, source, is_enabled) VALUES (?, ?, 'chat', 1)"
     )
     .bind(user_id)
-    .bind(cleaned)
+    .bind(&cleaned)
     .execute(pool)
     .await;
+
+    if insert_result.is_ok() {
+        RuleCaptureOutcome::Created(cleaned)
+    } else {
+        RuleCaptureOutcome::None
+    }
 }
 
 async fn get_user_id_by_email(pool: &SqlitePool, email: &str) -> Option<String> {
@@ -602,7 +725,6 @@ async fn post_chat(
     let message = payload.message;
     let guest_name = payload.guest_name;
     let pool = &state.pool;
-    let docs_context = build_docs_context(&message).await;
 
     let chat_res = if !email.is_empty() {
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
@@ -630,6 +752,12 @@ async fn post_chat(
                 .bind(&new_pref).bind(&user.id).execute(pool).await.ok();
             user.preferences = Some(new_pref);
 
+            let docs_context = build_docs_context(
+                &message,
+                Some(user.preferred_language.as_str()),
+                &state.config.docs_whitelist,
+            ).await;
+
             let memory = OnboardingService::get_memory(pool, &user.id).await;
             let mut res = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory, &state.config.assistant_email, None, docs_context.clone()).await {
                 Ok(r) => r,
@@ -645,7 +773,10 @@ async fn post_chat(
                 let _ = OnboardingService::log_activity(pool, &user.id, "ask_forwarding_info").await;
             }
 
-            capture_rule_from_chat(pool, &user.id, &message).await;
+            let rule_capture = capture_rule_from_chat(pool, &user.id, &message).await;
+            if let Some(notice) = rule_capture_notice(&user.preferred_language, &rule_capture) {
+                res.content = format!("{}\n\n{}", res.content, notice);
+            }
 
             // Append Onboarding Question if needed
             if user.onboarding_step < 4 {
@@ -678,10 +809,12 @@ async fn post_chat(
 
             res
         } else {
+            let docs_context = build_docs_context(&message, None, &state.config.docs_whitelist).await;
             OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email, docs_context.clone()).await
                 .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
         }
     } else {
+        let docs_context = build_docs_context(&message, None, &state.config.docs_whitelist).await;
         OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email, docs_context.clone()).await
             .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
     };
@@ -1302,8 +1435,38 @@ mod tests {
     fn looks_like_email_rule_detects_common_intents() {
         assert!(looks_like_email_rule("請幫我把帳單通知都轉寄並提醒我"));
         assert!(looks_like_email_rule("When I receive invoice emails, remind me to reply quickly"));
+        assert!(looks_like_email_rule("Please add rule: remind me when invoice arrives"));
         assert!(!looks_like_email_rule("hi"));
         assert!(!looks_like_email_rule("just browsing this dashboard"));
+    }
+
+    #[test]
+    fn extract_rule_from_message_parses_explicit_prefixes() {
+        assert_eq!(
+            extract_rule_from_message("新增規則：收到發票時提醒我回覆"),
+            Some("收到發票時提醒我回覆".to_string())
+        );
+        assert_eq!(
+            extract_rule_from_message("add rule: when invoice email arrives, remind me"),
+            Some("when invoice email arrives, remind me".to_string())
+        );
+        assert_eq!(extract_rule_from_message("hello there"), None);
+    }
+
+    #[test]
+    fn docs_language_bonus_and_allowlist_behave_as_expected() {
+        assert!(is_doc_allowed("GMAIL-SMTP-SETUP.md", &[]));
+        assert!(is_doc_allowed(
+            "GMAIL-FILTER-FORWARDING.zh-TW.md",
+            &["zh-tw".to_string()]
+        ));
+        assert!(!is_doc_allowed(
+            "RBAC.md",
+            &["gmail".to_string()]
+        ));
+
+        assert!(language_bonus("RBAC.zh-TW.md", Some("zh-TW")) > language_bonus("RBAC.md", Some("zh-TW")));
+        assert!(language_bonus("RBAC.md", Some("en")) > language_bonus("RBAC.zh-TW.md", Some("en")));
     }
 
     #[test]
@@ -1368,8 +1531,11 @@ mod tests {
 
         let user_id = "u1";
         let msg = "forward invoices to me and remind me";
-        capture_rule_from_chat(&pool, user_id, msg).await;
-        capture_rule_from_chat(&pool, user_id, msg).await;
+        let first = capture_rule_from_chat(&pool, user_id, msg).await;
+        let second = capture_rule_from_chat(&pool, user_id, msg).await;
+
+        assert!(matches!(first, RuleCaptureOutcome::Created(_)));
+        assert!(matches!(second, RuleCaptureOutcome::Duplicate(_)));
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules WHERE user_id = ?")
             .bind(user_id)
@@ -1398,7 +1564,8 @@ mod tests {
         .await
         .expect("create email_rules");
 
-        capture_rule_from_chat(&pool, "u1", "hello there").await;
+        let outcome = capture_rule_from_chat(&pool, "u1", "hello there").await;
+        assert!(matches!(outcome, RuleCaptureOutcome::None));
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules")
             .fetch_one(&pool)

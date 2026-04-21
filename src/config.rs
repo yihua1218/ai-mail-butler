@@ -8,6 +8,7 @@ pub struct Config {
     pub smtp_relay_user: Option<String>,
     pub smtp_relay_pass: Option<String>,
     pub assistant_email: String,
+    pub docs_whitelist: Vec<String>,
 }
 
 impl Config {
@@ -23,6 +24,12 @@ impl Config {
             smtp_relay_user: std::env::var("SMTP_RELAY_USER").ok(),
             smtp_relay_pass: std::env::var("SMTP_RELAY_PASS").ok(),
             assistant_email: std::env::var("ASSISTANT_EMAIL").unwrap_or_else(|_| "assistant@example.com".to_string()),
+            docs_whitelist: std::env::var("DOCS_WHITELIST")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         }
     }
 }

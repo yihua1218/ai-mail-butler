@@ -17,6 +17,7 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 - **AI Chat Interface**: Converse directly with your email assistant via the Web UI. Anonymous visitors can also chat with the AI to learn about the system. Features detailed chat stats (token count and generation speed).
 - **Document-Grounded Answers**: The chat assistant can retrieve relevant content from project documentation and answer with context from matched docs.
 - **Documentation Cache Index**: Documentation lookup uses an in-memory cache index with periodic refresh, reducing repeated disk scans while keeping answers current.
+- **Chat-Driven Rule Creation**: When users ask in chat to add processing behavior, the assistant can extract and create new email rules automatically (with dedup protection).
 - **Long-term Memory**: The AI assistant maintains memory of past interactions to provide more personalized and context-aware responses.
 - **Interactive Onboarding**: New users are guided through a series of onboarding questions to set up their preferences and assistant identity.
 - **Custom AI Persona**: Users can define their assistant's Chinese and English names, as well as its reply tone (e.g., professional, friendly).
@@ -43,6 +44,10 @@ cargo build
 ```bash
 cargo run
 ```
+
+Optional docs retrieval controls:
+- `DOCS_WHITELIST`: Comma-separated file names or keywords to allow for AI document references. Example: `DOCS_WHITELIST=GMAIL-SMTP-SETUP.md,zh-TW`
+- Language preference effect: logged-in users with `preferred_language=zh-TW` will prioritize matches from `*.zh-TW.md` documents.
 
 ### Test
 ```bash
