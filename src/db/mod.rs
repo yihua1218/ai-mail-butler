@@ -48,6 +48,8 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN pdf_passwords TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN preferred_language TEXT NOT NULL DEFAULT 'en'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_data_consent BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_consent_updated_at DATETIME").execute(&pool).await;
 
     // Table for tracking repetitive behaviors/questions for analytics
     sqlx::query(
@@ -97,6 +99,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         "CREATE TABLE IF NOT EXISTS chat_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_email TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS chat_transcripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            user_email TEXT,
+            user_message TEXT NOT NULL,
+            ai_reply TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );"
     )

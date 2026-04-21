@@ -110,9 +110,10 @@ impl OnboardingService {
 
     pub async fn get_next_onboarding_question(user: &User) -> Option<&'static str> {
         match user.onboarding_step {
-            0 => Some("首先，請問您主要打算如何使用我？（例如：處理工作郵件、個人生活瑣事，還是整理電子報？）"),
-            1 => Some("了解。那麼在回覆郵件時，您希望我展現什麼樣的語氣？（例如：正式專業、輕鬆友善，或是簡短直接？）"),
-            2 => Some("沒問題。最後一個基本設定：您希望我在產生回覆後，先寄到您的信箱給您預覽（試運行），還是直接幫您回覆給對方？"),
+            0 => Some("在開始前，請先確認：你是否同意將你與 AI 助理的對話內容，在脫敏後匯出作為模型訓練資料？（請回答：同意 / 不同意）"),
+            1 => Some("接著，請問您主要打算如何使用我？（例如：處理工作郵件、個人生活瑣事，還是整理電子報？）"),
+            2 => Some("了解。那麼在回覆郵件時，您希望我展現什麼樣的語氣？（例如：正式專業、輕鬆友善，或是簡短直接？）"),
+            3 => Some("沒問題。最後一個基本設定：您希望我在產生回覆後，先寄到您的信箱給您預覽（試運行），還是直接幫您回覆給對方？"),
             _ => None,
         }
     }
@@ -192,6 +193,8 @@ mod tests {
             pdf_passwords: None,
             timezone: "UTC".to_string(),
             preferred_language: "zh-TW".to_string(),
+            training_data_consent: false,
+            training_consent_updated_at: None,
         };
 
         assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
@@ -200,6 +203,8 @@ mod tests {
         user.onboarding_step = 2;
         assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
         user.onboarding_step = 3;
+        assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
+        user.onboarding_step = 4;
         assert!(OnboardingService::get_next_onboarding_question(&user).await.is_none());
     }
 }

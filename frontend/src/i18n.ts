@@ -46,7 +46,10 @@ const en = {
     assistant_name_en: "Assistant English Name",
     assistant_tone_zh: "Chinese Reply Tone",
     assistant_tone_en: "English Reply Tone",
-    identity_desc: "Customize how your AI assistant identifies itself and its speaking style."
+    identity_desc: "Customize how your AI assistant identifies itself and its speaking style.",
+    training_data_consent: "Allow De-identified Chat Export for Model Training",
+    training_data_consent_desc: "If enabled, your chat records may be exported only after de-identification for model training purposes.",
+    training_data_consent_note: "Only users who explicitly consent are included in training export datasets."
   }
 };
 
@@ -95,7 +98,10 @@ const zhTW = {
     assistant_name_en: "助理英文名稱",
     assistant_tone_zh: "中文回覆語氣",
     assistant_tone_en: "英文回覆語氣",
-    identity_desc: "自訂 AI 助理的自我介紹名稱與說話風格。"
+    identity_desc: "自訂 AI 助理的自我介紹名稱與說話風格。",
+    training_data_consent: "同意脫敏後對話可匯出供模型訓練",
+    training_data_consent_desc: "開啟後，你的對話只會在去識別化（脫敏）後，才可能被匯出作為模型訓練資料。",
+    training_data_consent_note: "只有明確同意授權的使用者，才會被納入訓練匯出資料。"
   }
 };
 

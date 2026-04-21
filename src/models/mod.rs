@@ -28,6 +28,9 @@ pub struct User {
     pub timezone: String,
     #[serde(default = "default_language")]
     pub preferred_language: String,
+    #[serde(default)]
+    pub training_data_consent: bool,
+    pub training_consent_updated_at: Option<String>,
 }
 
 fn default_both() -> String { "both".to_string() }

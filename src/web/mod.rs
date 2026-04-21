@@ -13,6 +13,8 @@ use tokio::fs;
 
 use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
+use regex::Regex;
+use std::sync::OnceLock;
 
 use crate::models::{User, EmailRecord};
 use crate::ai::AiClient;
@@ -54,6 +56,52 @@ struct ChatFeedback {
     replied_at: Option<String>,
     replied_by: Option<String>,
     created_at: String,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct TrainingExportRow {
+    id: i64,
+    user_email: Option<String>,
+    user_message: String,
+    ai_reply: String,
+    created_at: String,
+}
+
+fn parse_training_consent_answer(message: &str) -> Option<bool> {
+    let m = message.trim().to_lowercase();
+    let yes_markers = [
+        "yes", "agree", "i agree", "consent", "allow", "ok",
+        "同意", "願意", "可以", "好", "是",
+    ];
+    let no_markers = [
+        "no", "disagree", "do not", "don't", "deny",
+        "不同意", "不願意", "不要", "否", "不行",
+    ];
+
+    if no_markers.iter().any(|k| m.contains(k)) {
+        return Some(false);
+    }
+    if yes_markers.iter().any(|k| m.contains(k)) {
+        return Some(true);
+    }
+    None
+}
+
+fn redact_training_text(input: &str) -> String {
+    static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
+    static US_PHONE_RE: OnceLock<Regex> = OnceLock::new();
+    static TW_PHONE_RE: OnceLock<Regex> = OnceLock::new();
+    static LONG_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+
+    let email_re = EMAIL_RE.get_or_init(|| Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").expect("email regex"));
+    let us_phone_re = US_PHONE_RE.get_or_init(|| Regex::new(r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}").expect("us phone regex"));
+    let tw_phone_re = TW_PHONE_RE.get_or_init(|| Regex::new(r"(?:\+886[-.\s]?)?0?9\d{2}[-.\s]?\d{3}[-.\s]?\d{3}").expect("tw phone regex"));
+    let long_token_re = LONG_TOKEN_RE.get_or_init(|| Regex::new(r"\b[A-Za-z0-9_-]{24,}\b").expect("token regex"));
+
+    let out = email_re.replace_all(input, "[REDACTED_EMAIL]").to_string();
+    let out = us_phone_re.replace_all(&out, "[REDACTED_PHONE]").to_string();
+    let out = tw_phone_re.replace_all(&out, "[REDACTED_PHONE]").to_string();
+    long_token_re.replace_all(&out, "[REDACTED_TOKEN]").to_string()
 }
 
 async fn log_mail_event(
@@ -401,6 +449,17 @@ async fn post_chat(
             .fetch_optional(pool).await.unwrap_or(None);
 
         if let Some(mut user) = user {
+            if user.onboarding_step == 0 {
+                if let Some(consent) = parse_training_consent_answer(&message) {
+                    let _ = sqlx::query("UPDATE users SET training_data_consent = ?, training_consent_updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                        .bind(consent)
+                        .bind(&user.id)
+                        .execute(pool)
+                        .await;
+                    user.training_data_consent = consent;
+                }
+            }
+
             // Update preferences
             let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
                 Ok(p) => p,
@@ -428,7 +487,7 @@ async fn post_chat(
             capture_rule_from_chat(pool, &user.id, &message).await;
 
             // Append Onboarding Question if needed
-            if user.onboarding_step < 3 {
+            if user.onboarding_step < 4 {
                 if let Some(question) = OnboardingService::get_next_onboarding_question(&user).await {
                     res.content = format!("{}\n\n---\n💡 [Onboarding] {}", res.content, question);
                 }
@@ -445,6 +504,16 @@ async fn post_chat(
             tokio::spawn(async move {
                 let _ = OnboardingService::update_memory(&ai_client_clone, &pool_clone, &user_id, &msg_clone, &reply_clone).await;
             });
+
+            let _ = sqlx::query(
+                "INSERT INTO chat_transcripts (user_id, user_email, user_message, ai_reply) VALUES (?, ?, ?, ?)"
+            )
+            .bind(&user.id)
+            .bind(&user.email)
+            .bind(&message)
+            .bind(&res.content)
+            .execute(pool)
+            .await;
 
             res
         } else {
@@ -467,6 +536,48 @@ async fn post_chat(
         "duration_ms": chat_res.duration_ms,
         "finish_reason": chat_res.finish_reason,
         "timestamp": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+async fn get_training_export(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+    if !is_admin_or_developer(&state, &email) {
+        return Json(serde_json::json!({ "status": "error", "message": "Unauthorized" }));
+    }
+
+    let rows = sqlx::query_as::<_, TrainingExportRow>(
+        "SELECT t.id, t.user_email, t.user_message, t.ai_reply, CAST(t.created_at AS TEXT) as created_at \
+         FROM chat_transcripts t \
+         JOIN users u ON u.id = t.user_id \
+         WHERE u.training_data_consent = 1 \
+         ORDER BY t.created_at DESC LIMIT 2000"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let sanitized: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "user_email": r.user_email.as_deref().map(redact_training_text),
+                "user_message": redact_training_text(&r.user_message),
+                "ai_reply": redact_training_text(&r.ai_reply),
+                "created_at": r.created_at,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "status": "success",
+        "records": sanitized,
+        "note": "Only consented users are exported and all records are de-identified.",
     }))
 }
 
@@ -1055,6 +1166,26 @@ mod tests {
         assert_eq!(parse_mx_records(output), None);
     }
 
+    #[test]
+    fn parse_training_consent_answer_handles_yes_no() {
+        assert_eq!(parse_training_consent_answer("Yes, I agree"), Some(true));
+        assert_eq!(parse_training_consent_answer("我同意"), Some(true));
+        assert_eq!(parse_training_consent_answer("No, I do not consent"), Some(false));
+        assert_eq!(parse_training_consent_answer("不同意"), Some(false));
+        assert_eq!(parse_training_consent_answer("maybe later"), None);
+    }
+
+    #[test]
+    fn redact_training_text_masks_sensitive_patterns() {
+        let raw = "Contact me at alice@example.com or +1 212-555-1234, token abcdefghijklmnopqrstuvwxyz123456";
+        let redacted = redact_training_text(raw);
+        assert!(!redacted.contains("alice@example.com"));
+        assert!(!redacted.contains("212-555-1234"));
+        assert!(redacted.contains("[REDACTED_EMAIL]"));
+        assert!(redacted.contains("[REDACTED_PHONE]"));
+        assert!(redacted.contains("[REDACTED_TOKEN]"));
+    }
+
     #[tokio::test]
     async fn capture_rule_from_chat_inserts_once_and_deduplicates() {
         let pool = SqlitePool::connect("sqlite::memory:")
@@ -1178,6 +1309,7 @@ struct SettingsRequest {
     auto_reply: bool,
     dry_run: bool,
     email_format: String,
+    training_data_consent: bool,
     timezone: Option<String>,
     preferred_language: Option<String>,
     display_name: Option<String>,
@@ -1244,11 +1376,14 @@ async fn post_settings(
         .unwrap_or("en")
         .to_string();
     
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, timezone = ?, preferred_language = ?, display_name = ?, \
-                              assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, training_data_consent = ?, \
+                              training_consent_updated_at = CASE WHEN training_data_consent != ? THEN CURRENT_TIMESTAMP ELSE training_consent_updated_at END, \
+                              timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
+        .bind(payload.training_data_consent)
+        .bind(payload.training_data_consent)
         .bind(&timezone)
         .bind(&preferred_language)
         .bind(&payload.display_name)
@@ -1701,6 +1836,7 @@ async fn post_confirm_data_deletion(
     let _ = sqlx::query("DELETE FROM user_activity_stats WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
     let _ = sqlx::query("DELETE FROM mail_errors WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
     let _ = sqlx::query("DELETE FROM chat_logs WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM chat_transcripts WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
     let _ = sqlx::query("DELETE FROM chat_feedback WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
     let _ = sqlx::query("UPDATE data_deletion_requests SET status = 'finalized', finalized_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(&row.id)
@@ -1738,6 +1874,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
+        .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))
         .route("/feedback/mark-read", post(post_mark_feedback_read))
         .route("/feedback/reply", post(post_reply_feedback))

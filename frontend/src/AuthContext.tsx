@@ -18,6 +18,8 @@ export interface User {
   pdf_passwords: string | null;
   timezone: string | null;
   preferred_language: string | null;
+  training_data_consent: boolean;
+  training_consent_updated_at: string | null;
 }
 
 interface AuthContextType {

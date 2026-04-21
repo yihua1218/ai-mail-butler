@@ -544,6 +544,7 @@ const Settings: React.FC = () => {
         auto_reply: user.auto_reply,
         dry_run: user.dry_run,
         email_format: user.email_format,
+        training_data_consent: !!user.training_data_consent,
         timezone: user.timezone || 'UTC',
         preferred_language: user.preferred_language || 'en',
         assistant_name_zh: user.assistant_name_zh,
@@ -657,6 +658,18 @@ const Settings: React.FC = () => {
                 <Radio value="plain">{t('format_plain')}</Radio>
               </Radio.Group>
             </Form.Item>
+
+            <Form.Item
+              name="training_data_consent"
+              label={t('training_data_consent')}
+              valuePropName="checked"
+              tooltip={t('training_data_consent_desc')}
+            >
+              <Switch />
+            </Form.Item>
+            <Paragraph style={{ color: '#86868b', fontSize: '12px', marginTop: -8 }}>
+              {t('training_data_consent_note')}
+            </Paragraph>
 
             <Form.Item
               name="preferred_language"
