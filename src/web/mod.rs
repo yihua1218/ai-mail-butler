@@ -549,6 +549,13 @@ async fn post_magic_link(
             );
         }
 
+        let assistant_name = if preferred_language == "zh-TW" {
+            "AI 郵件助理"
+        } else {
+            "AI Mail Butler"
+        };
+        let assistant_mailbox = format!("{} <{}>", assistant_name, state.config.assistant_email);
+
         let html_body = if preferred_language == "zh-TW" {
             format!(
             r#"<!DOCTYPE html>
@@ -593,7 +600,8 @@ async fn post_magic_link(
 
         // Build message using mail-send's builder
         let mut builder = MessageBuilder::new()
-            .from(from_addr.to_string())
+            .from(assistant_mailbox.clone())
+            .reply_to(assistant_mailbox)
             .to(to_addr.to_string())
             .subject(subject.as_str());
 
@@ -1118,8 +1126,16 @@ async fn send_data_deletion_confirmation_email(
         )
     };
 
+    let assistant_name = if preferred_language == "zh-TW" {
+        "AI 郵件助理"
+    } else {
+        "AI Mail Butler"
+    };
+    let assistant_mailbox = format!("{} <{}>", assistant_name, state.config.assistant_email);
+
     let message = MessageBuilder::new()
-        .from(state.config.assistant_email.clone())
+        .from(assistant_mailbox.clone())
+        .reply_to(assistant_mailbox)
         .to(user_email.to_string())
         .subject(subject)
         .text_body(text_body)

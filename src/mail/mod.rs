@@ -651,13 +651,23 @@ impl MailService {
                                                         .unwrap_or_default();
 
                                                     let message =
-                                                        mail_send::mail_builder::MessageBuilder::new()
-                                                            .from(config.assistant_email.clone())
+                                                        {
+                                                            let preferred_language = u.preferred_language.as_str();
+                                                            let assistant_name = if preferred_language == "zh-TW" {
+                                                                u.assistant_name_zh.as_deref().unwrap_or("AI 郵件助理")
+                                                            } else {
+                                                                u.assistant_name_en.as_deref().unwrap_or("AI Mail Butler")
+                                                            };
+                                                            let assistant_mailbox = format!("{} <{}>", assistant_name, config.assistant_email);
+                                                            mail_send::mail_builder::MessageBuilder::new()
+                                                            .from(assistant_mailbox.clone())
+                                                            .reply_to(assistant_mailbox)
                                                             .to(target_email
                                                                 .replace('<', "")
                                                                 .replace('>', ""))
                                                             .subject(format!("Re: {}", subject))
-                                                            .text_body(ai_reply);
+                                                            .text_body(ai_reply)
+                                                        };
 
                                                     let is_implicit = port == 465;
                                                     let pool_clone = pool.clone();

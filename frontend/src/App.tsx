@@ -36,8 +36,8 @@ const KEY_TO_PATH: Record<string, string> = {
 const Dashboard: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
-  const defaultRecentFrom = () => {
-    const d = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const defaultRecentFrom = (days: number = 1) => {
+    const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
@@ -240,6 +240,11 @@ const Dashboard: React.FC = () => {
   const LogFilterBar = () => (
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
+        <Space>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(1)); setLogTimeTo(''); }}>1d</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(7)); setLogTimeTo(''); }}>7d</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(30)); setLogTimeTo(''); }}>30d</Button>
+        </Space>
         <Select
           value={logLevelFilter}
           style={{ width: 130 }}
