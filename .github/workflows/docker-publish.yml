@@ -174,5 +174,10 @@ jobs:
             export IMAGE_TAG="$IMAGE_TAG"
 
             docker pull "$IMAGE_REF"
-            docker compose down
-            docker compose up -d
+            if docker compose version > /dev/null 2>&1; then
+              docker compose down
+              docker compose up -d
+            else
+              docker-compose down
+              docker-compose up -d
+            fi
