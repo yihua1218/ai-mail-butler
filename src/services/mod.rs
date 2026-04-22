@@ -332,6 +332,17 @@ mod tests {
             preferred_language: "zh-TW".to_string(),
             training_data_consent: false,
             training_consent_updated_at: None,
+            data_retention_days: 365,
+            data_location: "unknown".to_string(),
+            training_export_destinations: None,
+            do_not_sell: false,
+            do_not_sell_updated_at: None,
+            age_verified: false,
+            guardian_consent: false,
+            guardian_email: None,
+            date_of_birth: None,
+            preferred_ai_model: "gpt-4o-mini".to_string(),
+            processing_restricted: false,
         };
 
         assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());

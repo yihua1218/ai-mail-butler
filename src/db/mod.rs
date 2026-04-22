@@ -281,7 +281,103 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
 
+    // Consent audit trail for legal proof (policy version, source, timestamp, optional IP/UA)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS consent_audit_trail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL DEFAULT '1.0',
+            consent_type TEXT NOT NULL,
+            granted BOOLEAN NOT NULL,
+            consent_source TEXT NOT NULL DEFAULT 'settings_ui',
+            ip_address TEXT,
+            user_agent TEXT,
+            recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Immutable DSAR action log
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dsar_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT,
+            performed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // New users columns for privacy/compliance features
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN data_retention_days INTEGER NOT NULL DEFAULT 365").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN data_location TEXT NOT NULL DEFAULT 'unknown'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_export_destinations TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN do_not_sell BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN do_not_sell_updated_at DATETIME").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN age_verified BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN guardian_consent BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN guardian_email TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN date_of_birth TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN preferred_ai_model TEXT NOT NULL DEFAULT 'gpt-4o-mini'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN processing_restricted BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
+
     Ok(pool)
+}
+
+/// Delete records older than each user's configured retention period.
+/// Purges chat_transcripts, chat_feedback, and mail_errors.
+pub async fn cleanup_expired_data(pool: &SqlitePool) -> Result<u64> {
+    let mut total_deleted: u64 = 0;
+
+    let rows_deleted = sqlx::query(
+        "DELETE FROM chat_transcripts
+         WHERE user_id IN (
+             SELECT id FROM users
+             WHERE julianday('now') - julianday(COALESCE(created_at, '1970-01-01')) > data_retention_days
+         )
+         OR (created_at IS NOT NULL AND julianday('now') - julianday(created_at) > (
+             SELECT COALESCE(u.data_retention_days, 365)
+             FROM users u WHERE u.id = chat_transcripts.user_id
+         ))"
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+    total_deleted += rows_deleted;
+
+    let rows_deleted = sqlx::query(
+        "DELETE FROM chat_feedback
+         WHERE created_at IS NOT NULL
+           AND julianday('now') - julianday(created_at) > 365"
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+    total_deleted += rows_deleted;
+
+    let rows_deleted = sqlx::query(
+        "DELETE FROM mail_errors
+         WHERE occurred_at IS NOT NULL
+           AND julianday('now') - julianday(occurred_at) > (
+               SELECT COALESCE(u.data_retention_days, 365)
+               FROM users u WHERE u.id = mail_errors.user_id
+           )"
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+    total_deleted += rows_deleted;
+
+    tracing::info!("cleanup_expired_data: deleted {} total records", total_deleted);
+    Ok(total_deleted)
 }
 
 pub async fn run_startup_diagnostics(pool: &SqlitePool) -> Result<()> {

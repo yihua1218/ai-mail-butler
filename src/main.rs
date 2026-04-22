@@ -26,6 +26,19 @@ async fn main() -> Result<()> {
     info!("Database connected successfully.");
     db::run_startup_diagnostics(&pool).await?;
 
+    // Run initial data retention cleanup and schedule it every 24h
+    {
+        let pool_cleanup = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = db::cleanup_expired_data(&pool_cleanup).await {
+                    tracing::warn!("cleanup_expired_data error: {}", e);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(86400)).await;
+            }
+        });
+    }
+
     // 2. Initialize AI Client
     let ai_client = ai::AiClient::new(&config);
 

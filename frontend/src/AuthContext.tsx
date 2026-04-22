@@ -21,6 +21,11 @@ export interface User {
   preferred_language: string | null;
   training_data_consent: boolean;
   training_consent_updated_at: string | null;
+  preferred_ai_model: string | null;
+  data_retention_days: number | null;
+  do_not_sell: boolean;
+  age_verified: boolean;
+  processing_restricted: boolean;
 }
 
 interface AuthContextType {

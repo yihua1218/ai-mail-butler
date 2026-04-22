@@ -27,7 +27,16 @@ const SettingsPage: React.FC = () => {
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [availableModels, setAvailableModels] = useState<string[]>(['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo']);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    axios.get('/api/ai/models').then(res => {
+      if (res.data?.available_models?.length) {
+        setAvailableModels(res.data.available_models);
+      }
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -57,6 +66,9 @@ const SettingsPage: React.FC = () => {
         assistant_tone_zh: user.assistant_tone_zh,
         assistant_tone_en: user.assistant_tone_en,
         pdf_passwords: pdfPasswords,
+        preferred_ai_model: user.preferred_ai_model || 'gpt-4o-mini',
+        data_retention_days: user.data_retention_days || 365,
+        do_not_sell: !!user.do_not_sell,
       });
     } else {
       form.setFieldsValue({
@@ -75,6 +87,8 @@ const SettingsPage: React.FC = () => {
     setLoading(true);
     try {
       await axios.post('/api/settings', { email: user.email, ...values });
+      // Handle do_not_sell separately
+      await axios.post('/api/privacy/do-not-sell', { email: user.email, do_not_sell: !!values.do_not_sell });
       message.success('Settings saved successfully!');
       refreshUser();
     } catch {
@@ -146,6 +160,17 @@ const SettingsPage: React.FC = () => {
                 </Form.Item>
               </Col>
             </Row>
+
+            <Title level={5} style={{ margin: '24px 0 16px' }}>AI Model</Title>
+            <Form.Item
+              name="preferred_ai_model"
+              label="Preferred AI Model"
+              tooltip="Select which AI model to use for chat replies."
+            >
+              <Select
+                options={availableModels.map(m => ({ value: m, label: m }))}
+              />
+            </Form.Item>
 
             <Title level={5} style={{ margin: '24px 0 16px' }}>{t('processing_preferences')}</Title>
             <Form.Item name="dry_run" label="Dry Run Mode (試運行模式)" valuePropName="checked" tooltip="When enabled, AI replies are drafted and sent to your own email for review. When disabled, they are sent directly to the original sender.">
@@ -221,6 +246,36 @@ const SettingsPage: React.FC = () => {
                 ]}
               />
             </Form.Item>
+
+            <Title level={5} style={{ margin: '24px 0 16px' }}>Privacy & Compliance</Title>
+            <Form.Item
+              name="do_not_sell"
+              label="Do Not Sell/Share My Data"
+              valuePropName="checked"
+              tooltip="Opt out of the sale or sharing of your personal information (US state privacy laws)."
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              name="data_retention_days"
+              label="Data Retention Period (days)"
+              tooltip="How many days to keep your chat transcripts, feedback, and logs. Min 30, max 3650."
+            >
+              <Select
+                options={[
+                  { value: 30, label: '30 days' },
+                  { value: 90, label: '90 days' },
+                  { value: 180, label: '180 days' },
+                  { value: 365, label: '1 year (default)' },
+                  { value: 730, label: '2 years' },
+                  { value: 1825, label: '5 years' },
+                  { value: 3650, label: '10 years' },
+                ]}
+              />
+            </Form.Item>
+            <Typography.Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 8 }}>
+              Note: Users under 13 (COPPA) require verifiable guardian consent before using this service.
+            </Typography.Paragraph>
 
             <Title level={5} style={{ margin: '24px 0 16px' }}>PDF Passwords</Title>
             <Typography.Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 16 }}>

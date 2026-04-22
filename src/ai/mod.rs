@@ -67,8 +67,12 @@ impl AiClient {
     }
 
     pub async fn chat(&self, system_prompt: &str, user_message: &str) -> Result<ChatResult> {
+        self.chat_with_model(&self.model_name.clone(), system_prompt, user_message).await
+    }
+
+    pub async fn chat_with_model(&self, model: &str, system_prompt: &str, user_message: &str) -> Result<ChatResult> {
         let req_body = ChatRequest {
-            model: self.model_name.clone(),
+            model: model.to_string(),
             messages: vec![
                 ChatMessage { role: "system".to_string(), content: system_prompt.to_string() },
                 ChatMessage { role: "user".to_string(), content: user_message.to_string() },

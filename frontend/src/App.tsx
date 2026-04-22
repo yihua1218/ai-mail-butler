@@ -9,6 +9,7 @@ const DashboardPage = lazy(() => import('./pages/DashboardPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const RulesManagerPage = lazy(() => import('./pages/RulesManagerPage'));
 const FinanceAnalysisPage = lazy(() => import('./pages/FinanceAnalysisPage'));
+const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'));
 const GdprDeletePage = lazy(() => import('./pages/GdprDeletePage'));
 const ChatPage = lazy(() => import('./Chat').then((m) => ({ default: m.Chat })));
 const AboutPage = lazy(() => import('./About').then((m) => ({ default: m.About })));
@@ -25,6 +26,7 @@ const PATH_TO_KEY: Record<string, string> = {
   '/about': '4',
   '/rules': '5',
   '/finance': '6',
+  '/analytics': '7',
   '/gdpr-delete': '0',
   '/login': '1', // Login also maps to dashboard view
 };
@@ -35,6 +37,7 @@ const KEY_TO_PATH: Record<string, string> = {
   '4': '/about',
   '5': '/rules',
   '6': '/finance',
+  '7': '/analytics',
 };
 
 const App: React.FC = () => {
@@ -139,6 +142,8 @@ const App: React.FC = () => {
         return <RulesManagerPage />;
       case '6':
         return <FinanceAnalysisPage />;
+      case '7':
+        return <AnalyticsPage />;
       default:
         return <DashboardPage />;
     }
@@ -202,6 +207,7 @@ const App: React.FC = () => {
                 { key: '3', label: t('settings') },
                 { key: '5', label: t('rules') },
                 { key: '6', label: 'Finance' },
+                { key: '7', label: 'Analytics' },
                 { key: '4', label: t('about') },
               ]}
             />

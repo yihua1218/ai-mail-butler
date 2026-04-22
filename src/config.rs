@@ -9,6 +9,7 @@ pub struct Config {
     pub smtp_relay_pass: Option<String>,
     pub assistant_email: String,
     pub docs_whitelist: Vec<String>,
+    pub ai_available_models: Vec<String>,
 }
 
 impl Config {
@@ -26,6 +27,12 @@ impl Config {
             assistant_email: std::env::var("ASSISTANT_EMAIL").unwrap_or_else(|_| "assistant@example.com".to_string()),
             docs_whitelist: std::env::var("DOCS_WHITELIST")
                 .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            ai_available_models: std::env::var("AI_AVAILABLE_MODELS")
+                .unwrap_or_else(|_| "gpt-4o-mini,gpt-4o,gpt-4-turbo".to_string())
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

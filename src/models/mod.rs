@@ -33,6 +33,24 @@ pub struct User {
     pub training_consent_updated_at: Option<String>,
     #[serde(default = "default_mail_send_method")]
     pub mail_send_method: String,
+    #[serde(default = "default_retention")]
+    pub data_retention_days: i32,
+    #[serde(default = "default_location")]
+    pub data_location: String,
+    pub training_export_destinations: Option<String>,
+    #[serde(default)]
+    pub do_not_sell: bool,
+    pub do_not_sell_updated_at: Option<String>,
+    #[serde(default)]
+    pub age_verified: bool,
+    #[serde(default)]
+    pub guardian_consent: bool,
+    pub guardian_email: Option<String>,
+    pub date_of_birth: Option<String>,
+    #[serde(default = "default_ai_model")]
+    pub preferred_ai_model: String,
+    #[serde(default)]
+    pub processing_restricted: bool,
 }
 
 fn default_both() -> String { "both".to_string() }
@@ -44,6 +62,12 @@ fn default_utc() -> String { "UTC".to_string() }
 fn default_language() -> String { "en".to_string() }
 
 fn default_mail_send_method() -> String { "direct_mx".to_string() }
+
+fn default_retention() -> i32 { 365 }
+
+fn default_location() -> String { "unknown".to_string() }
+
+fn default_ai_model() -> String { "gpt-4o-mini".to_string() }
 
 #[derive(Serialize, FromRow)]
 pub struct EmailRecord {

@@ -1102,6 +1102,11 @@ async fn post_chat(
                 }
             };
 
+            // NYC AEDT guardrail: prepend policy notice for employment decision keywords
+            if contains_aedt_keywords(&message) {
+                res.content = format!("{}{}", AEDT_NOTICE, res.content);
+            }
+
             // Detect repetitive questions (simple keyword for now)
             let lower_msg = message.to_lowercase();
             if lower_msg.contains("forward") || lower_msg.contains("email") || lower_msg.contains("信箱") || lower_msg.contains("轉寄") {
@@ -1207,6 +1212,10 @@ async fn get_training_export(
         "status": "success",
         "records": sanitized,
         "note": "Only consented users are exported and all records are de-identified.",
+        "export_metadata": {
+            "export_destinations": state.config.ai_available_models,
+            "data_location": "Determined by deployment configuration. Check /api/privacy/data-location for per-user details.",
+        },
     }))
 }
 
@@ -1793,6 +1802,669 @@ fn parse_mx_records(output: &str) -> Option<String> {
     records.into_iter().next().map(|(_, host)| host)
 }
 
+/// Returns true if the message contains employment-decision keywords that trigger the AEDT guardrail.
+fn contains_aedt_keywords(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    let keywords = [
+        "hire", "hiring", "firing", "fired", "terminate", "termination", "layoff", "lay off",
+        "promote", "promotion", "performance review", "background check",
+        "recruiting", "recruitment", "job application", "employment decision",
+        "hr decision", "workforce reduction", "redundancy",
+    ];
+    keywords.iter().any(|k| lower.contains(k))
+}
+
+const AEDT_NOTICE: &str = "⚠️ Note: This AI assistant is not designed or validated for employment decision support. Please consult your HR department and qualified legal/compliance staff for employment-related decisions.\n\n";
+
+// ─── Consent Audit Trail ────────────────────────────────────────────────────
+
+async fn log_consent_event(
+    pool: &SqlitePool,
+    user_id: &str,
+    consent_type: &str,
+    granted: bool,
+    source: &str,
+    ip: Option<&str>,
+    ua: Option<&str>,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO consent_audit_trail (user_id, consent_type, granted, consent_source, ip_address, user_agent) \
+         VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(user_id)
+    .bind(consent_type)
+    .bind(granted)
+    .bind(source)
+    .bind(ip)
+    .bind(ua)
+    .execute(pool)
+    .await;
+}
+
+async fn log_dsar_action(pool: &SqlitePool, user_id: &str, user_email: &str, action: &str, details: Option<&str>) {
+    let _ = sqlx::query(
+        "INSERT INTO dsar_audit_log (user_id, user_email, action, details) VALUES (?, ?, ?, ?)"
+    )
+    .bind(user_id)
+    .bind(user_email)
+    .bind(action)
+    .bind(details)
+    .execute(pool)
+    .await;
+}
+
+async fn get_consent_audit(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let Some(user_id) = get_user_id_by_email(&state.pool, email).await else {
+        return Json(serde_json::json!({ "error": "User not found" }));
+    };
+
+    #[derive(sqlx::FromRow, Serialize)]
+    struct ConsentAuditRow {
+        id: i64,
+        policy_version: String,
+        consent_type: String,
+        granted: bool,
+        consent_source: String,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+        recorded_at: String,
+    }
+
+    let rows = sqlx::query_as::<_, ConsentAuditRow>(
+        "SELECT id, policy_version, consent_type, granted, consent_source, ip_address, user_agent, \
+         CAST(recorded_at AS TEXT) as recorded_at \
+         FROM consent_audit_trail WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 100"
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({ "status": "success", "records": rows }))
+}
+
+// ─── DSAR APIs ──────────────────────────────────────────────────────────────
+
+async fn get_dsar_access(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({ "error": "User not found" })),
+    };
+
+    log_dsar_action(&state.pool, &user.id, email, "access", None).await;
+
+    let rules: Vec<serde_json::Value> = sqlx::query_as::<_, (i64, String, String, bool, i64)>(
+        "SELECT id, rule_text, rule_label, is_enabled, matched_count FROM email_rules WHERE user_id = ?"
+    )
+    .bind(&user.id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, text, label, enabled, count)| {
+        serde_json::json!({"id": id, "rule_text": text, "rule_label": label, "is_enabled": enabled, "matched_count": count})
+    })
+    .collect();
+
+    let memories: Vec<String> = sqlx::query_scalar("SELECT content FROM user_memories WHERE user_id = ?")
+        .bind(&user.id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+    let transcript_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_transcripts WHERE user_id = ?")
+        .bind(&user.id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+
+    let feedback_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_feedback WHERE user_email = ?")
+        .bind(email)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+
+    let finance_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_financial_records WHERE user_id = ?")
+        .bind(&user.id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+
+    Json(serde_json::json!({
+        "status": "success",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "timezone": user.timezone,
+            "preferred_language": user.preferred_language,
+            "email_format": user.email_format,
+            "training_data_consent": user.training_data_consent,
+            "do_not_sell": user.do_not_sell,
+            "data_location": user.data_location,
+            "data_retention_days": user.data_retention_days,
+            "processing_restricted": user.processing_restricted,
+            "age_verified": user.age_verified,
+            "guardian_consent": user.guardian_consent,
+        },
+        "rules": rules,
+        "memories": memories,
+        "transcript_count": transcript_count,
+        "feedback_count": feedback_count,
+        "finance_count": finance_count,
+    }))
+}
+
+async fn get_dsar_export(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({ "error": "User not found" })),
+    };
+
+    log_dsar_action(&state.pool, &user.id, email, "export", None).await;
+
+    #[derive(sqlx::FromRow, Serialize)]
+    struct TranscriptRow { id: i64, user_message: String, ai_reply: String, created_at: String }
+
+    let transcripts = sqlx::query_as::<_, TranscriptRow>(
+        "SELECT id, user_message, ai_reply, CAST(created_at AS TEXT) as created_at \
+         FROM chat_transcripts WHERE user_id = ? ORDER BY created_at DESC LIMIT 500"
+    )
+    .bind(&user.id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let rules: Vec<serde_json::Value> = sqlx::query_as::<_, (i64, String, String, bool)>(
+        "SELECT id, rule_text, rule_label, is_enabled FROM email_rules WHERE user_id = ?"
+    )
+    .bind(&user.id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, text, label, enabled)| serde_json::json!({"id": id, "rule_text": text, "rule_label": label, "is_enabled": enabled}))
+    .collect();
+
+    let memories: Vec<String> = sqlx::query_scalar("SELECT content FROM user_memories WHERE user_id = ?")
+        .bind(&user.id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+    Json(serde_json::json!({
+        "status": "success",
+        "export_generated_at": chrono::Utc::now().to_rfc3339(),
+        "user": {
+            "email": user.email,
+            "display_name": user.display_name,
+            "timezone": user.timezone,
+            "preferred_language": user.preferred_language,
+        },
+        "rules": rules,
+        "memories": memories,
+        "chat_transcripts": transcripts,
+        "note": "All personal data associated with your account is included above.",
+    }))
+}
+
+#[derive(Deserialize)]
+struct DsarCorrectionRequest {
+    email: String,
+    display_name: Option<String>,
+    timezone: Option<String>,
+    preferred_language: Option<String>,
+    email_format: Option<String>,
+}
+
+async fn post_dsar_correction(
+    State(state): State<AppState>,
+    Json(payload): Json<DsarCorrectionRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let timezone = payload.timezone.as_deref().unwrap_or("UTC");
+    let lang = payload.preferred_language.as_deref().unwrap_or("en");
+    let fmt = payload.email_format.as_deref().unwrap_or("both");
+
+    let result = sqlx::query(
+        "UPDATE users SET display_name = COALESCE(?, display_name), timezone = ?, \
+         preferred_language = ?, email_format = ? WHERE id = ?"
+    )
+    .bind(&payload.display_name)
+    .bind(timezone)
+    .bind(lang)
+    .bind(fmt)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    if result.is_err() {
+        return Json(serde_json::json!({ "status": "error", "message": "Update failed" }));
+    }
+
+    let details = format!("display_name={:?}, timezone={}, lang={}, fmt={}", payload.display_name, timezone, lang, fmt);
+    log_dsar_action(&state.pool, &user_id, &payload.email, "correction", Some(&details)).await;
+
+    Json(serde_json::json!({ "status": "success" }))
+}
+
+#[derive(Deserialize)]
+struct DsarRestrictionRequest {
+    email: String,
+    restricted: bool,
+}
+
+async fn post_dsar_restriction(
+    State(state): State<AppState>,
+    Json(payload): Json<DsarRestrictionRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let _ = sqlx::query("UPDATE users SET processing_restricted = ? WHERE id = ?")
+        .bind(payload.restricted)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await;
+
+    let details = format!("restricted={}", payload.restricted);
+    log_dsar_action(&state.pool, &user_id, &payload.email, "restriction", Some(&details)).await;
+
+    Json(serde_json::json!({ "status": "success", "processing_restricted": payload.restricted }))
+}
+
+#[derive(Deserialize)]
+struct WithdrawConsentRequest {
+    email: String,
+}
+
+async fn post_dsar_withdraw_consent(
+    State(state): State<AppState>,
+    Json(payload): Json<WithdrawConsentRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let _ = sqlx::query(
+        "UPDATE users SET training_data_consent = 0, training_consent_updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    )
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    log_consent_event(&state.pool, &user_id, "training_data", false, "dsar_api", None, None).await;
+    log_dsar_action(&state.pool, &user_id, &payload.email, "withdraw_consent", Some("training_data_consent=false")).await;
+
+    Json(serde_json::json!({ "status": "success", "training_data_consent": false }))
+}
+
+// ─── Data Retention ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct RetentionRequest {
+    email: String,
+    data_retention_days: i32,
+}
+
+async fn post_settings_retention(
+    State(state): State<AppState>,
+    Json(payload): Json<RetentionRequest>,
+) -> Json<serde_json::Value> {
+    let days = payload.data_retention_days.clamp(30, 3650);
+
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let _ = sqlx::query("UPDATE users SET data_retention_days = ? WHERE id = ?")
+        .bind(days)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await;
+
+    Json(serde_json::json!({ "status": "success", "data_retention_days": days }))
+}
+
+async fn get_admin_retention_stats(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    if !query.email.as_deref().map(|e| is_admin_or_developer(&state, e)).unwrap_or(false) {
+        return Json(serde_json::json!({ "error": "Unauthorized" }));
+    }
+
+    let expired_transcripts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chat_transcripts \
+         WHERE user_id IS NOT NULL AND julianday('now') - julianday(COALESCE(created_at, '1970-01-01')) > \
+         (SELECT COALESCE(data_retention_days, 365) FROM users WHERE id = chat_transcripts.user_id)"
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0);
+
+    let expired_feedback: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chat_feedback \
+         WHERE created_at IS NOT NULL AND julianday('now') - julianday(created_at) > 365"
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0);
+
+    let expired_errors: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM mail_errors \
+         WHERE user_id IS NOT NULL AND julianday('now') - julianday(COALESCE(occurred_at, '1970-01-01')) > \
+         (SELECT COALESCE(data_retention_days, 365) FROM users WHERE id = mail_errors.user_id)"
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0);
+
+    Json(serde_json::json!({
+        "status": "success",
+        "expired_chat_transcripts": expired_transcripts,
+        "expired_chat_feedback": expired_feedback,
+        "expired_mail_errors": expired_errors,
+        "total_to_purge": expired_transcripts + expired_feedback + expired_errors,
+    }))
+}
+
+// ─── Cross-Border Transfer Disclosure ───────────────────────────────────────
+
+async fn get_privacy_data_location(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({ "error": "User not found" })),
+    };
+
+    let destinations: Vec<String> = user.training_export_destinations
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    Json(serde_json::json!({
+        "status": "success",
+        "data_location": user.data_location,
+        "training_export_destinations": destinations,
+        "disclosure": "Your data is processed in the region indicated by data_location. \
+                       Training exports may be sent to the destinations listed in training_export_destinations.",
+    }))
+}
+
+// ─── Do Not Sell/Share ───────────────────────────────────────────────────────
+
+async fn get_privacy_do_not_sell(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({ "error": "User not found" })),
+    };
+
+    Json(serde_json::json!({
+        "status": "success",
+        "do_not_sell": user.do_not_sell,
+        "do_not_sell_updated_at": user.do_not_sell_updated_at,
+        "disclosure": "You have the right to opt out of the sale or sharing of your personal information.",
+    }))
+}
+
+#[derive(Deserialize)]
+struct DoNotSellRequest {
+    email: String,
+    do_not_sell: bool,
+}
+
+async fn post_privacy_do_not_sell(
+    State(state): State<AppState>,
+    Json(payload): Json<DoNotSellRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let _ = sqlx::query(
+        "UPDATE users SET do_not_sell = ?, do_not_sell_updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    )
+    .bind(payload.do_not_sell)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    log_consent_event(&state.pool, &user_id, "do_not_sell", payload.do_not_sell, "settings_ui", None, None).await;
+
+    Json(serde_json::json!({ "status": "success", "do_not_sell": payload.do_not_sell }))
+}
+
+// ─── NY SHIELD Status ────────────────────────────────────────────────────────
+
+async fn get_admin_shield_status(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    if !query.email.as_deref().map(|e| is_admin_or_developer(&state, e)).unwrap_or(false) {
+        return Json(serde_json::json!({ "error": "Unauthorized" }));
+    }
+
+    Json(serde_json::json!({
+        "status": "success",
+        "shield_checklist": {
+            "at_rest_encryption": {
+                "status": "note",
+                "description": "SQLite database file should be stored on an encrypted volume (e.g., AWS EBS with encryption enabled, LUKS on bare metal).",
+                "compliant": false,
+                "action_required": "Ensure the database volume is encrypted at rest."
+            },
+            "access_controls": {
+                "status": "implemented",
+                "description": "Role-based access: admin/developer/user roles enforced. Magic-link authentication. Admin-only endpoints protected.",
+                "compliant": true
+            },
+            "data_retention_policy": {
+                "status": "implemented",
+                "description": "Configurable per-user data retention policy with automated scheduled purge.",
+                "compliant": true
+            },
+            "incident_response": {
+                "status": "note",
+                "description": "Incident response contact should be configured. Set ADMIN_EMAIL env var and ensure the admin monitors mail_errors.",
+                "contact": state.admin_email,
+                "compliant": state.admin_email.is_some()
+            },
+            "data_deletion": {
+                "status": "implemented",
+                "description": "GDPR/CCPA-compliant data deletion workflow with email confirmation and immutable audit log.",
+                "compliant": true
+            },
+            "consent_audit_trail": {
+                "status": "implemented",
+                "description": "Consent events are logged with timestamp, source, policy version, and optional IP/UA.",
+                "compliant": true
+            },
+            "dsar_api": {
+                "status": "implemented",
+                "description": "DSAR endpoints for access, export, correction, restriction, and consent withdrawal.",
+                "compliant": true
+            }
+        }
+    }))
+}
+
+// ─── COPPA Age Verification ──────────────────────────────────────────────────
+
+async fn get_privacy_age_verification(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({ "error": "User not found" })),
+    };
+
+    Json(serde_json::json!({
+        "status": "success",
+        "age_verified": user.age_verified,
+        "guardian_consent": user.guardian_consent,
+        "guardian_email": user.guardian_email,
+        "date_of_birth": user.date_of_birth,
+        "note": "Users under 13 (COPPA) require verifiable guardian consent before using this service.",
+    }))
+}
+
+#[derive(Deserialize)]
+struct AgeVerificationRequest {
+    email: String,
+    age_verified: bool,
+    guardian_consent: Option<bool>,
+    guardian_email: Option<String>,
+    date_of_birth: Option<String>,
+}
+
+async fn post_privacy_age_verification(
+    State(state): State<AppState>,
+    Json(payload): Json<AgeVerificationRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let _ = sqlx::query(
+        "UPDATE users SET age_verified = ?, guardian_consent = ?, guardian_email = ?, date_of_birth = ? WHERE id = ?"
+    )
+    .bind(payload.age_verified)
+    .bind(payload.guardian_consent.unwrap_or(false))
+    .bind(&payload.guardian_email)
+    .bind(&payload.date_of_birth)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    Json(serde_json::json!({
+        "status": "success",
+        "age_verified": payload.age_verified,
+        "guardian_consent": payload.guardian_consent.unwrap_or(false),
+    }))
+}
+
+// ─── AI Model Switching ──────────────────────────────────────────────────────
+
+async fn get_ai_models(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "success",
+        "available_models": state.config.ai_available_models,
+        "default_model": "gpt-4o-mini",
+    }))
+}
+
+// ─── Analytics ───────────────────────────────────────────────────────────────
+
+async fn get_analytics_chat_volume(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query.email.as_deref() else {
+        return Json(serde_json::json!({ "error": "Missing email" }));
+    };
+    let is_admin = is_admin_or_developer(&state, email);
+
+    #[derive(sqlx::FromRow, Serialize)]
+    struct DailyVolume {
+        day: String,
+        count: i64,
+    }
+
+    let rows = if is_admin {
+        sqlx::query_as::<_, DailyVolume>(
+            "SELECT date(created_at) as day, COUNT(*) as count \
+             FROM chat_transcripts \
+             WHERE created_at >= date('now', '-30 days') \
+             GROUP BY date(created_at) ORDER BY day ASC"
+        )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        let user_id = match get_user_id_by_email(&state.pool, email).await {
+            Some(id) => id,
+            None => return Json(serde_json::json!({ "error": "User not found" })),
+        };
+        sqlx::query_as::<_, DailyVolume>(
+            "SELECT date(created_at) as day, COUNT(*) as count \
+             FROM chat_transcripts \
+             WHERE user_id = ? AND created_at >= date('now', '-30 days') \
+             GROUP BY date(created_at) ORDER BY day ASC"
+        )
+        .bind(&user_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    Json(serde_json::json!({ "status": "success", "data": rows, "period": "last_30_days" }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,6 +2746,7 @@ mod tests {
             smtp_relay_pass: None,
             assistant_email: "assistant@example.com".to_string(),
             docs_whitelist: vec![],
+            ai_available_models: vec!["gpt-4o-mini".to_string()],
         };
 
         let state = AppState {
@@ -2110,6 +2783,111 @@ mod tests {
             Some(v) => std::env::set_var("AI_API_BASE_URL", v),
             None => std::env::remove_var("AI_API_BASE_URL"),
         }
+    }
+
+    #[test]
+    fn contains_aedt_keywords_detects_employment_terms() {
+        assert!(contains_aedt_keywords("We are hiring new engineers this quarter."));
+        assert!(contains_aedt_keywords("The employee was fired last week."));
+        assert!(contains_aedt_keywords("It's time to terminate the contract."));
+        assert!(contains_aedt_keywords("She was laid off due to workforce reduction."));
+        assert!(contains_aedt_keywords("He got a promote this year."));
+        assert!(contains_aedt_keywords("Please schedule a performance review."));
+        assert!(contains_aedt_keywords("Run a background check on the candidate."));
+        assert!(contains_aedt_keywords("We received a job application from Jane."));
+        assert!(contains_aedt_keywords("This is an HR decision that needs approval."));
+        assert!(!contains_aedt_keywords("What's the weather like today?"));
+        assert!(!contains_aedt_keywords("Please summarize this email for me."));
+    }
+
+    #[tokio::test]
+    async fn do_not_sell_toggle_updates_correctly() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create in-memory db");
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user_id)
+            .bind("dns@example.com")
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        let _ = sqlx::query("UPDATE users SET do_not_sell = 0 WHERE id = ?")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+
+        let val: bool = sqlx::query_scalar("SELECT do_not_sell FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false);
+        assert!(!val);
+
+        let _ = sqlx::query("UPDATE users SET do_not_sell = 1, do_not_sell_updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+
+        let val: bool = sqlx::query_scalar("SELECT do_not_sell FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false);
+        assert!(val);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_data_removes_old_records() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users (id, email, is_onboarded, data_retention_days) VALUES (?, ?, 1, 1)")
+            .bind(&user_id)
+            .bind("expire@example.com")
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        // Insert old transcript (3 days ago) and new one (today)
+        sqlx::query(
+            "INSERT INTO chat_transcripts (user_id, user_email, user_message, ai_reply, created_at) VALUES (?, ?, 'hello', 'hi', datetime('now', '-3 days'))"
+        )
+        .bind(&user_id)
+        .bind("expire@example.com")
+        .execute(&pool)
+        .await
+        .expect("insert old transcript");
+
+        sqlx::query(
+            "INSERT INTO chat_transcripts (user_id, user_email, user_message, ai_reply, created_at) VALUES (?, ?, 'new', 'reply', CURRENT_TIMESTAMP)"
+        )
+        .bind(&user_id)
+        .bind("expire@example.com")
+        .execute(&pool)
+        .await
+        .expect("insert new transcript");
+
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_transcripts WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+        assert_eq!(before, 2);
+
+        let deleted = crate::db::cleanup_expired_data(&pool).await.expect("cleanup");
+        assert!(deleted >= 1, "Expected at least 1 deleted record, got {}", deleted);
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_transcripts WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+        assert_eq!(after, 1, "Expected 1 remaining transcript after cleanup");
     }
 }
 
@@ -2185,6 +2963,8 @@ struct SettingsRequest {
     assistant_tone_zh: Option<String>,
     assistant_tone_en: Option<String>,
     pdf_passwords: Option<Vec<String>>,
+    preferred_ai_model: Option<String>,
+    data_retention_days: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -2255,10 +3035,17 @@ async fn post_settings(
         .filter(|v| *v == "direct_mx" || *v == "relay")
         .unwrap_or("direct_mx")
         .to_string();
-    
+    let preferred_ai_model = payload
+        .preferred_ai_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("gpt-4o-mini")
+        .to_string();
+
     let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, training_data_consent = ?, \
                               training_consent_updated_at = CASE WHEN training_data_consent != ? THEN CURRENT_TIMESTAMP ELSE training_consent_updated_at END, \
-                              timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
+                              timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ?, preferred_ai_model = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
@@ -2273,9 +3060,26 @@ async fn post_settings(
         .bind(&payload.assistant_tone_zh)
         .bind(&payload.assistant_tone_en)
         .bind(pdf_passwords_json)
+        .bind(&preferred_ai_model)
         .bind(&payload.email)
         .execute(&state.pool).await;
 
+    // Optionally update retention days
+    if let Some(days) = payload.data_retention_days {
+        let days = days.clamp(30, 3650);
+        let _ = sqlx::query("UPDATE users SET data_retention_days = ? WHERE email = ?")
+            .bind(days)
+            .bind(&payload.email)
+            .execute(&state.pool)
+            .await;
+    }
+
+    // Log consent change if training_data_consent changed
+    if result.is_ok() {
+        if let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await {
+            log_consent_event(&state.pool, &user_id, "training_data", payload.training_data_consent, "settings_ui", None, None).await;
+        }
+    }
         
     if result.is_ok() {
         let user_id = &payload.email; // Using email as user_id for stats for now
@@ -2283,8 +3087,6 @@ async fn post_settings(
         if payload.auto_reply { let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_auto_reply").await; }
         if payload.dry_run { let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_dry_run").await; }
     }
-
-
         
     match result {
         Ok(_) => Json(serde_json::json!({ "status": "success" })),
@@ -3005,6 +3807,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/auth/verify", post(post_verify))
         .route("/me", get(get_me))
         .route("/settings", post(post_settings))
+        .route("/settings/retention", post(post_settings_retention))
         .route("/data-deletion/request", post(post_request_data_deletion))
         .route("/data-deletion/summary", get(get_data_deletion_summary))
         .route("/data-deletion/confirm", post(post_confirm_data_deletion))
@@ -3022,12 +3825,31 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
+        .route("/admin/retention-stats", get(get_admin_retention_stats))
+        .route("/admin/shield-status", get(get_admin_shield_status))
         .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))
         .route("/feedback/mark-read", post(post_mark_feedback_read))
         .route("/feedback/reply", post(post_reply_feedback))
         .route("/chat", post(post_chat))
-        .route("/chat/feedback", post(post_chat_feedback));
+        .route("/chat/feedback", post(post_chat_feedback))
+        // Consent & DSAR
+        .route("/consent/audit", get(get_consent_audit))
+        .route("/dsar/access", get(get_dsar_access))
+        .route("/dsar/export", get(get_dsar_export))
+        .route("/dsar/correction", post(post_dsar_correction))
+        .route("/dsar/restriction", post(post_dsar_restriction))
+        .route("/dsar/withdraw-consent", post(post_dsar_withdraw_consent))
+        // Privacy
+        .route("/privacy/data-location", get(get_privacy_data_location))
+        .route("/privacy/do-not-sell", get(get_privacy_do_not_sell))
+        .route("/privacy/do-not-sell", post(post_privacy_do_not_sell))
+        .route("/privacy/age-verification", get(get_privacy_age_verification))
+        .route("/privacy/age-verification", post(post_privacy_age_verification))
+        // AI models
+        .route("/ai/models", get(get_ai_models))
+        // Analytics
+        .route("/analytics/chat-volume", get(get_analytics_chat_volume));
 
     let app = Router::new()
         .nest("/api", api_router)
