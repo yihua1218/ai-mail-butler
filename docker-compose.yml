@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   ai-mail-butler:
+    image: ${IMAGE_NAME:-ghcr.io/yihua/ai-mail-butler}:${IMAGE_TAG:-latest}
     build: .
     container_name: ai-mail-butler
     ports:

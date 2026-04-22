@@ -10,6 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DEPLOY_IMAGE_TAG: sha-${{ github.sha }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -119,6 +120,7 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=sha
+            type=raw,value=${{ env.DEPLOY_IMAGE_TAG }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
@@ -132,3 +134,46 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [build-docker]
+    if: github.event_name != 'pull_request' && github.ref_type != 'tag'
+    environment: staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to remote server over SSH
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ env.DEPLOY_IMAGE_TAG }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          GHCR_USERNAME: ${{ secrets.DEPLOY_REGISTRY_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.DEPLOY_REGISTRY_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: REGISTRY,IMAGE_NAME,IMAGE_TAG,DEPLOY_PATH,GHCR_USERNAME,GHCR_TOKEN
+          script_stop: true
+          script: |
+            set -eu
+            IMAGE_REF="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+
+            if [ -z "$DEPLOY_PATH" ]; then
+              echo "DEPLOY_PATH is required"
+              exit 1
+            fi
+
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USERNAME" --password-stdin
+            fi
+
+            cd "$DEPLOY_PATH"
+            export IMAGE_NAME="$REGISTRY/$IMAGE_NAME"
+            export IMAGE_TAG="$IMAGE_TAG"
+
+            docker pull "$IMAGE_REF"
+            docker compose down
+            docker compose up -d

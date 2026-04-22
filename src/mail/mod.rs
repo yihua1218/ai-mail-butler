@@ -3,6 +3,7 @@ use tracing::{info, warn, error};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::net::SocketAddr;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio::fs;
@@ -54,6 +55,55 @@ fn first_email_address(raw: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn all_email_addresses(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    if let Ok(parsed) = mailparse::addrparse(raw) {
+        for addr in parsed.iter() {
+            match addr {
+                mailparse::MailAddr::Single(info) => {
+                    let email = info.addr.trim().to_ascii_lowercase();
+                    if !email.is_empty() {
+                        out.push(email);
+                    }
+                }
+                mailparse::MailAddr::Group(group) => {
+                    for single in group.addrs.iter() {
+                        let email = single.addr.trim().to_ascii_lowercase();
+                        if !email.is_empty() {
+                            out.push(email);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback for non-standard headers such as
+    // X-Forwarded-For: foo@example.com assistant@example.com
+    for token in raw.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+        let cleaned = token
+            .trim()
+            .trim_matches(|c: char| "<>\"'()[]".contains(c))
+            .to_ascii_lowercase();
+        if cleaned.contains('@') && !cleaned.is_empty() {
+            out.push(cleaned);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    out.into_iter().filter(|email| seen.insert(email.clone())).collect()
+}
+
+fn header_values(parsed: &mailparse::ParsedMail<'_>, header_key: &str) -> Vec<String> {
+    parsed
+        .headers
+        .iter()
+        .filter(|h| h.get_key().eq_ignore_ascii_case(header_key))
+        .map(|h| h.get_value())
+        .collect()
 }
 
 fn sanitize_path_component(input: &str) -> String {
@@ -766,14 +816,62 @@ impl MailService {
                                 let from_clean = first_email_address(&from_addr)
                                     .unwrap_or_else(|| from_addr.trim().to_ascii_lowercase());
 
-                                // Forwarded email ownership is determined by the registered sender.
-                                let user = sqlx::query_as::<_, User>(
-                                    "SELECT * FROM users WHERE email = ?",
-                                )
-                                .bind(&from_clean)
-                                .fetch_optional(&pool)
-                                .await
-                                .unwrap_or(None);
+                                let assistant_addr = first_email_address(&config.assistant_email)
+                                    .unwrap_or_else(|| config.assistant_email.trim().to_ascii_lowercase());
+
+                                // Build candidates in priority order:
+                                // 1) Delivered-To / X-Original-To (intended mailbox owner)
+                                // 2) X-Forwarded-For / X-Forwarded-To and related forwarding headers
+                                // 3) From sender (legacy fallback)
+                                let mut owner_candidates: Vec<String> = Vec::new();
+                                let mut seen = HashSet::new();
+                                let mut push_candidate = |candidate: String| {
+                                    let c = candidate.trim().to_ascii_lowercase();
+                                    if c.is_empty() || c == assistant_addr {
+                                        return;
+                                    }
+                                    if seen.insert(c.clone()) {
+                                        owner_candidates.push(c);
+                                    }
+                                };
+
+                                for key in [
+                                    "Delivered-To",
+                                    "X-Original-To",
+                                    "Original-Recipient",
+                                    "X-Forwarded-For",
+                                    "X-Forwarded-To",
+                                    "Envelope-To",
+                                ] {
+                                    for raw in header_values(&parsed, key) {
+                                        for addr in all_email_addresses(&raw) {
+                                            push_candidate(addr);
+                                        }
+                                    }
+                                }
+
+                                if !from_clean.is_empty() {
+                                    push_candidate(from_clean.clone());
+                                }
+
+                                let mut user: Option<User> = None;
+                                let mut matched_owner_email: Option<String> = None;
+
+                                for owner_email in owner_candidates.iter() {
+                                    let found = sqlx::query_as::<_, User>(
+                                        "SELECT * FROM users WHERE email = ?",
+                                    )
+                                    .bind(owner_email)
+                                    .fetch_optional(&pool)
+                                    .await
+                                    .unwrap_or(None);
+
+                                    if let Some(u) = found {
+                                        matched_owner_email = Some(owner_email.clone());
+                                        user = Some(u);
+                                        break;
+                                    }
+                                }
 
                                 let passwords: Vec<String> = user
                                     .as_ref()
@@ -783,11 +881,16 @@ impl MailService {
 
                                 let mut pdf_texts = Vec::new();
 
-                                // Archive by sender because this assistant processes forwarded emails per sender.
-                                let sender_key = if from_clean.is_empty() {
+                                // Archive by resolved owner when possible, fallback to sender/candidates.
+                                let archive_owner = user
+                                    .as_ref()
+                                    .map(|u| u.email.clone())
+                                    .or_else(|| owner_candidates.first().cloned())
+                                    .unwrap_or_else(|| from_clean.clone());
+                                let sender_key = if archive_owner.is_empty() {
                                     "unknown_sender".to_string()
                                 } else {
-                                    sanitize_path_component(&from_clean)
+                                    sanitize_path_component(&archive_owner)
                                 };
                                 let message_key = path
                                     .file_stem()
@@ -905,6 +1008,14 @@ impl MailService {
                                 }
 
                                 if let Some(u) = user {
+                                    if let Some(owner_email) = matched_owner_email.as_ref() {
+                                        info!(
+                                            "Resolved owner via headers: sender={:?}, owner={:?}, recipient={:?}",
+                                            from_clean,
+                                            owner_email,
+                                            to_clean
+                                        );
+                                    }
                                     let id = Uuid::new_v4().to_string();
                                     let preview = body.chars().take(100).collect::<String>();
 
@@ -1346,8 +1457,8 @@ impl MailService {
                                     }
                                 } else {
                                     let warn_msg = format!(
-                                        "No user found for sender {:?} (recipient {:?}); email discarded",
-                                        from_clean, to_clean
+                                        "No user found for sender {:?} (recipient {:?}, candidates {:?}); email discarded",
+                                        from_clean, to_clean, owner_candidates
                                     );
                                     warn!(
                                         "{}",

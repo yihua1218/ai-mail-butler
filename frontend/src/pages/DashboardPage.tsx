@@ -78,6 +78,7 @@ const DashboardPage: React.FC = () => {
   const [replying, setReplying] = useState(false);
   const [selectedEmailRowKeys, setSelectedEmailRowKeys] = useState<React.Key[]>([]);
   const [processingSelected, setProcessingSelected] = useState(false);
+  const [retryingErrorId, setRetryingErrorId] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [resultsModalVisible, setResultsModalVisible] = useState(false);
   const [resultsData, setResultsData] = useState<any>(null);
@@ -236,6 +237,48 @@ const DashboardPage: React.FC = () => {
       key: 'occurred_at',
       width: 190,
       render: (value: string) => formatInUserTimezone(value),
+    },
+    {
+      title: 'Action',
+      key: 'action',
+      width: 120,
+      render: (_: unknown, record: any) => {
+        const canRetry = record.error_type === 'unknown_sender' && !!record.context;
+        if (!canRetry) return '-';
+        return (
+          <Button
+            size="small"
+            loading={retryingErrorId === record.id}
+            onClick={async () => {
+              if (!user?.email) return;
+              setRetryingErrorId(record.id);
+              try {
+                const res = await axios.post('/api/errors/retry', {
+                  email: user.email,
+                  error_id: record.id,
+                });
+                if (res.data?.status === 'success') {
+                  message.success('Queued for retry. The spool worker will reprocess it shortly.');
+                } else {
+                  message.error(res.data?.message || 'Retry failed.');
+                }
+
+                const url = isPrivileged
+                  ? `/api/admin/errors?email=${encodeURIComponent(user.email)}`
+                  : `/api/errors?email=${encodeURIComponent(user.email)}`;
+                const refreshed = await axios.get(url);
+                setMailErrors(refreshed.data.errors || []);
+              } catch {
+                message.error('Retry failed.');
+              } finally {
+                setRetryingErrorId(null);
+              }
+            }}
+          >
+            Retry
+          </Button>
+        );
+      },
     },
   ];
 

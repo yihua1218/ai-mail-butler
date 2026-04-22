@@ -916,6 +916,30 @@ struct ManualProcessRequest {
     force_reextract: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct RetryMailErrorRequest {
+    email: String,
+    error_id: i64,
+}
+
+fn resolve_mail_error_source_path(context: &str) -> Option<PathBuf> {
+    let trimmed = context.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut candidates = vec![PathBuf::from(trimmed)];
+    if let Some(file_name) = PathBuf::from(trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+    {
+        candidates.push(PathBuf::from(format!("data/mail_spool/processed/{}", file_name)));
+        candidates.push(PathBuf::from(format!("data/mail_spool/{}", file_name)));
+    }
+
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 async fn get_me(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
@@ -2345,6 +2369,81 @@ async fn get_user_errors(
     Json(serde_json::json!({ "errors": errors }))
 }
 
+async fn post_retry_mail_error(
+    State(state): State<AppState>,
+    Json(payload): Json<RetryMailErrorRequest>,
+) -> Json<serde_json::Value> {
+    let requester_email = payload.email.trim().to_lowercase();
+    if requester_email.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    }
+
+    let requester_user_id = get_user_id_by_email(&state.pool, &requester_email).await;
+    let is_privileged = is_admin_or_developer(&state, &requester_email);
+
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT error_type, context, user_id, message FROM mail_errors WHERE id = ?"
+    )
+    .bind(payload.error_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some((error_type, context, error_user_id, _message)) = row else {
+        return Json(serde_json::json!({ "status": "error", "message": "Error log not found" }));
+    };
+
+    if !is_privileged {
+        let Some(uid) = requester_user_id.as_ref() else {
+            return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+        };
+        if error_user_id.as_deref() != Some(uid.as_str()) {
+            return Json(serde_json::json!({ "status": "error", "message": "Unauthorized" }));
+        }
+    }
+
+    if error_type != "unknown_sender" {
+        return Json(serde_json::json!({ "status": "error", "message": "Only unknown_sender logs can be retried" }));
+    }
+
+    let Some(context_path) = context else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing log context path" }));
+    };
+
+    let Some(source_path) = resolve_mail_error_source_path(&context_path) else {
+        return Json(serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }));
+    };
+
+    let file_name = source_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mail.eml");
+    let retry_name = format!("retry_{}_{}", chrono::Utc::now().timestamp_millis(), file_name);
+    let retry_path = PathBuf::from("data/mail_spool").join(retry_name);
+
+    if let Err(e) = fs::copy(&source_path, &retry_path).await {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to queue retry file: {}", e)
+        }));
+    }
+
+    log_mail_event(
+        &state.pool,
+        "INFO",
+        "manual_retry",
+        &format!("Queued retry for mail_errors.id={} from {}", payload.error_id, source_path.display()),
+        Some(&retry_path.to_string_lossy()),
+        requester_user_id.as_deref(),
+    )
+    .await;
+
+    Json(serde_json::json!({
+        "status": "success",
+        "queued_path": retry_path.to_string_lossy(),
+    }))
+}
+
 async fn get_rules(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
@@ -3022,6 +3121,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
+        .route("/errors/retry", post(post_retry_mail_error))
         .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))
         .route("/feedback/mark-read", post(post_mark_feedback_read))
