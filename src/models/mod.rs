@@ -150,3 +150,30 @@ pub struct UserAgeVerification {
     pub age_verified_at: Option<String>,
     pub created_at: String,
 }
+
+/// A feature wish that registered users can vote on.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FeatureWish {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub created_by: Option<String>,
+    pub is_official: bool,
+    pub created_at: String,
+    /// Computed at query time — total number of votes.
+    pub vote_count: i64,
+    /// Computed at query time — whether the requesting user has voted.
+    pub user_has_voted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWishRequest {
+    pub email: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VoteWishRequest {
+    pub email: String,
+}

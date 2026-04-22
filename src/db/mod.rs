@@ -360,6 +360,75 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // Feature wish list — users propose and vote on future capabilities.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS feature_wishes (
+            id TEXT PRIMARY KEY NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            created_by TEXT,
+            is_official BOOLEAN NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // One vote per user per wish (unique constraint enforces this).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS feature_votes (
+            id TEXT PRIMARY KEY NOT NULL,
+            wish_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(wish_id, user_id),
+            FOREIGN KEY(wish_id) REFERENCES feature_wishes(id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Seed official wishes (idempotent — ignored if they already exist).
+    let official_wishes: &[(&str, &str, &str)] = &[
+        (
+            "official-auto-reply",
+            "自動回信 / Auto Reply",
+            "根據您的規則自動產生並寄出回信。AI 助理會分析來信內容，套用您定義的回覆規則，自動草擬或直接寄出回覆。\nAutomatically draft and send replies based on your rules. The AI assistant analyzes incoming messages and applies your defined reply rules.",
+        ),
+        (
+            "official-bill-accounting",
+            "帳務整理 / Bill & Finance Accounting",
+            "自動從信件中萃取帳單、交易、繳費通知等財務資訊，彙整為月度報表。\nAutomatically extract billing, transaction, and payment notices from emails and aggregate them into monthly finance summaries.",
+        ),
+        (
+            "wish-smart-labels",
+            "智慧分類標籤 / Smart Label Classification",
+            "讓 AI 依信件內容自動建立分類標籤，不再需要手動整理收件匣。\nLet the AI automatically create classification labels based on email content, keeping your inbox organized without manual effort.",
+        ),
+        (
+            "wish-meeting-summary",
+            "會議邀請摘要 / Meeting Invitation Summary",
+            "自動解析信件中的會議邀請，摘要時間、地點、議程，並可匯出至日曆。\nAutomatically parse meeting invitations from emails, summarize time, location, and agenda, with calendar export support.",
+        ),
+        (
+            "wish-subscription-tracker",
+            "訂閱追蹤 / Subscription Tracker",
+            "偵測並追蹤所有訂閱通知與定期扣款，彙整成訂閱管理清單。\nDetect and track all subscription notifications and recurring charges, aggregated into a subscription management list.",
+        ),
+    ];
+
+    for (id, title, description) in official_wishes {
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO feature_wishes (id, title, description, created_by, is_official) VALUES (?, ?, ?, NULL, 1)"
+        )
+        .bind(id)
+        .bind(title)
+        .bind(description)
+        .execute(&pool)
+        .await;
+    }
+
     Ok(pool)
 }
 

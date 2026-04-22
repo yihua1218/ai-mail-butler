@@ -29,6 +29,7 @@ AI Mail Butler is a self-hosted email processing assistant platform. It consists
 - **Web Dashboard**: View history of received emails and actions taken, featuring an Apple-style aesthetic inspired by Ant Design.
 - **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment.
 - **Diagnostics**: Self-healing database schema verification on startup.
+- **Readonly Overlay Mode**: Run the application against a data snapshot without modifying it. All writes go to a separate overlay directory; reads transparently fall back to the base snapshot. Useful for demo, staging, and read-only mirror deployments.
 
 ## Development and Testing
 
@@ -151,6 +152,13 @@ If you use a Microsoft 365 (M365) account to send emails, you have two options:
 2.  **OAuth 2.0 (Microsoft Graph)**: Recommended for production (required if SMTP AUTH is disabled by your organization).
     - [English OAuth Setup Guide](docs/M365_OAUTH_SETUP.md)
     - [繁體中文 OAuth 設定指南](docs/M365_OAUTH_SETUP.zh-TW.md)
+
+## Readonly Overlay Mode
+
+Run AI Mail Butler against an existing data snapshot without modifying it. All writes are redirected to an overlay directory; spool and file reads transparently fall back to the base snapshot when the overlay doesn't have the file yet. The API is locked to read-only operations for the duration of the session.
+
+- [Readonly Overlay Mode Guide (English)](docs/READONLY-OVERLAY-MODE.md)
+- [唯讀疊加模式說明 (繁體中文)](docs/READONLY-OVERLAY-MODE.zh-TW.md)
 
 ## Role-Based Access Control (RBAC)
 

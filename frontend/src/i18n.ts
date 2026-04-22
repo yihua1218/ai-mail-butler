@@ -77,6 +77,7 @@ const en = {
     reason: "Reason",
     your_emails: "Your Emails",
     process_selected_failed: "Failed to process selected emails.",
+    how_it_works: "How It Works",
     common: {
       error: "An error occurred. Please try again.",
     },
@@ -216,6 +217,7 @@ const zhTW = {
     reason: "原因",
     your_emails: "你的郵件",
     process_selected_failed: "處理已選取郵件失敗。",
+    how_it_works: "功能介紹",
     common: {
       error: "發生錯誤，請重試。",
     },

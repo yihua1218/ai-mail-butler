@@ -3774,6 +3774,209 @@ async fn run_data_retention_purge(State(state): State<AppState>) -> Json<serde_j
     Json(serde_json::json!({"status": "success", "purged": purged}))
 }
 
+// ─── Feature Wishes & Voting ────────────────────────────────────────────────
+
+#[derive(sqlx::FromRow)]
+struct WishRow {
+    id: String,
+    title: String,
+    description: Option<String>,
+    created_by: Option<String>,
+    is_official: bool,
+    created_at: String,
+    vote_count: i64,
+}
+
+#[derive(Deserialize)]
+struct WishesQuery {
+    email: Option<String>,
+}
+
+async fn get_wishes(
+    State(state): State<AppState>,
+    Query(params): Query<WishesQuery>,
+) -> impl IntoResponse {
+    use crate::models::FeatureWish;
+
+    // Resolve the requesting user's ID (if logged in) so we can compute user_has_voted.
+    let user_id_opt: Option<String> = if let Some(ref email) = params.email {
+        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE email = ?")
+            .bind(email)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let rows = sqlx::query_as::<_, WishRow>(
+        r#"
+        SELECT
+            w.id         AS id,
+            w.title      AS title,
+            w.description AS description,
+            w.created_by  AS created_by,
+            w.is_official AS is_official,
+            w.created_at  AS created_at,
+            COUNT(v.id)   AS vote_count
+        FROM feature_wishes w
+        LEFT JOIN feature_votes v ON v.wish_id = w.id
+        GROUP BY w.id
+        ORDER BY w.is_official DESC, vote_count DESC, w.created_at ASC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            // Fetch voted wish IDs for the logged-in user.
+            let voted_ids: Vec<String> = if let Some(ref uid) = user_id_opt {
+                sqlx::query_scalar::<_, String>("SELECT wish_id FROM feature_votes WHERE user_id = ?")
+                    .bind(uid)
+                    .fetch_all(&state.pool)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+
+            let wishes: Vec<FeatureWish> = rows
+                .into_iter()
+                .map(|r| FeatureWish {
+                    user_has_voted: voted_ids.contains(&r.id),
+                    id: r.id,
+                    title: r.title,
+                    description: r.description,
+                    created_by: r.created_by,
+                    is_official: r.is_official,
+                    created_at: r.created_at,
+                    vote_count: r.vote_count,
+                })
+                .collect();
+
+            (StatusCode::OK, Json(wishes)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("get_wishes DB error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "db error"}))).into_response()
+        }
+    }
+}
+
+async fn post_create_wish(
+    State(state): State<AppState>,
+    Json(body): Json<crate::models::CreateWishRequest>,
+) -> impl IntoResponse {
+    // Validate inputs to prevent injection / abuse.
+    let title = body.title.trim().to_string();
+    if title.is_empty() || title.len() > 200 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "title must be 1–200 characters"})),
+        ).into_response();
+    }
+    let description = body.description.as_deref().map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+
+    // Verify the user exists.
+    let user_id: Option<String> =
+        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE email = ?")
+            .bind(&body.email)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+
+    let Some(user_id) = user_id else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "user not found"})),
+        ).into_response();
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let result = sqlx::query(
+        "INSERT INTO feature_wishes (id, title, description, created_by, is_official) VALUES (?, ?, ?, ?, 0)"
+    )
+    .bind(&id)
+    .bind(&title)
+    .bind(&description)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"id": id, "status": "created"}))).into_response(),
+        Err(e) => {
+            tracing::error!("post_create_wish DB error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "db error"}))).into_response()
+        }
+    }
+}
+
+async fn post_vote_wish(
+    State(state): State<AppState>,
+    axum::extract::Path(wish_id): axum::extract::Path<String>,
+    Json(body): Json<crate::models::VoteWishRequest>,
+) -> impl IntoResponse {
+    // Verify the user exists.
+    let user_id: Option<String> =
+        sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE email = ?")
+            .bind(&body.email)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+
+    let Some(user_id) = user_id else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "user not found"})),
+        ).into_response();
+    };
+
+    // Verify the wish exists.
+    let wish_exists: bool =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM feature_wishes WHERE id = ?")
+            .bind(&wish_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0) > 0;
+
+    if !wish_exists {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "wish not found"}))).into_response();
+    }
+
+    // Toggle: if already voted, remove vote; otherwise add it.
+    let already_voted: bool =
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM feature_votes WHERE wish_id = ? AND user_id = ?",
+        )
+        .bind(&wish_id)
+        .bind(&user_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0) > 0;
+
+    if already_voted {
+        let _ = sqlx::query("DELETE FROM feature_votes WHERE wish_id = ? AND user_id = ?")
+            .bind(&wish_id)
+            .bind(&user_id)
+            .execute(&state.pool)
+            .await;
+        (StatusCode::OK, Json(serde_json::json!({"voted": false}))).into_response()
+    } else {
+        let vote_id = uuid::Uuid::new_v4().to_string();
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO feature_votes (id, wish_id, user_id) VALUES (?, ?, ?)",
+        )
+        .bind(&vote_id)
+        .bind(&wish_id)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await;
+        (StatusCode::OK, Json(serde_json::json!({"voted": true}))).into_response()
+    }
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -3818,6 +4021,9 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/admin/retention/policies", post(post_retention_policy))
         .route("/admin/retention/policies", get(get_retention_policies))
         .route("/admin/retention/purge", post(run_data_retention_purge))
+        .route("/wishes", get(get_wishes))
+        .route("/wishes", post(post_create_wish))
+        .route("/wishes/:id/vote", post(post_vote_wish))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             readonly_write_guard,
