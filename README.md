@@ -45,6 +45,56 @@ cargo build
 cargo run
 ```
 
+### CLI Debug Mode (No Backend Server)
+Use CLI mode to process local `.eml` files from the spool directory without starting SMTP/Web servers.
+
+Single pass (default):
+```bash
+cargo run -- --mode cli
+```
+
+Custom spool directory + JSON report output:
+```bash
+cargo run -- --mode cli --spool-dir data/mail_spool --report-json data/mail_spool/cli-report.json
+```
+
+Keep source `.eml` files in place for repeated debugging:
+```bash
+cargo run -- --mode cli --keep-files
+```
+
+Watch mode (continuous processing):
+```bash
+cargo run -- --mode cli --watch
+```
+
+Interactive REPL mode:
+```bash
+cargo run -- --mode cli --repl
+```
+REPL commands: `list`, `show <index|path>`, `process <index|path>`, `retry-unknown`, `report`, `exit`.
+
+Process one specific `.eml` file:
+```bash
+cargo run -- --mode cli --eml-file /absolute/path/to/mail_123.eml --keep-files
+```
+
+Simulate AI agent steps (rules + memory) and print step-by-step status:
+```bash
+cargo run -- --mode cli \
+    --eml-file /absolute/path/to/mail_123.eml \
+    --simulate-agent --simulate-rules --simulate-memory \
+    --as-user user@example.com \
+    --step --keep-files
+```
+
+Notes:
+- `--simulate-agent` enables simulation flow.
+- `--simulate-rules` checks enabled `email_rules` and generates a simulated auto-reply preview.
+- `--simulate-memory` loads `user_memories` and generates a memory-aware simulated reply preview.
+- `--as-user` forces a user context for debugging when sender mapping fails.
+- `--step` prints each processing stage and simulation progress in CLI output.
+
 Optional docs retrieval controls:
 - `DOCS_WHITELIST`: Comma-separated file names or keywords to allow for AI document references. Example: `DOCS_WHITELIST=GMAIL-SMTP-SETUP.md,zh-TW`
 - Language preference effect: logged-in users with `preferred_language=zh-TW` will prioritize matches from `*.zh-TW.md` documents.

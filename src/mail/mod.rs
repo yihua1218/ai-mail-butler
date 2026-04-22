@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio::fs;
+use std::path::{Path, PathBuf};
 use crate::models::User;
 use crate::ai::AiClient;
 use sqlx::SqlitePool;
@@ -18,6 +19,122 @@ use lettre::{SmtpTransport, Transport};
 use crate::config::Config;
 
 pub struct MailService;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CliFileResult {
+    pub file_path: String,
+    pub status: String,
+    pub message: String,
+    pub error_type: Option<String>,
+    pub processed_path: Option<String>,
+    pub simulation_logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CliRunReport {
+    pub scanned: usize,
+    pub processed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub results: Vec<CliFileResult>,
+}
+
+impl CliRunReport {
+    pub fn push_result(&mut self, result: CliFileResult) {
+        self.scanned += 1;
+        match result.status.as_str() {
+            "processed" => self.processed += 1,
+            "skipped" => self.skipped += 1,
+            _ => self.failed += 1,
+        }
+        self.results.push(result);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CliProcessOptions {
+    pub keep_files: bool,
+    pub simulate_agent: bool,
+    pub simulate_rules: bool,
+    pub simulate_memory: bool,
+    pub as_user_email: Option<String>,
+    pub step: bool,
+}
+
+fn push_step(logs: &mut Vec<String>, options: &CliProcessOptions, msg: impl Into<String>) {
+    let line = msg.into();
+    if options.step {
+        println!("[STEP] {}", line);
+    }
+    logs.push(line);
+}
+
+pub async fn list_spool_eml_files(spool_dir: &str) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if let Ok(mut entries) = fs::read_dir(spool_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let is_eml = path.extension().map(|e| e == "eml").unwrap_or(false);
+            if path.is_file() && is_eml {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+pub async fn resolve_cli_target_path(spool_dir: &str, target: &str) -> Result<PathBuf> {
+    if let Ok(index) = target.parse::<usize>() {
+        let files = list_spool_eml_files(spool_dir).await?;
+        return files
+            .get(index)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Index {} out of range", index));
+    }
+
+    let candidate = PathBuf::from(target);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+
+    let joined = Path::new(spool_dir).join(target);
+    if joined.exists() {
+        return Ok(joined);
+    }
+
+    Err(anyhow::anyhow!("Target not found: {}", target))
+}
+
+pub async fn requeue_unknown_sender_errors(pool: &SqlitePool, spool_dir: &str) -> Result<usize> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT context FROM mail_errors WHERE error_type = 'unknown_sender' AND context IS NOT NULL ORDER BY occurred_at DESC LIMIT 200"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    fs::create_dir_all(spool_dir).await?;
+
+    let mut copied = 0_usize;
+    for context in rows {
+        let source = PathBuf::from(context);
+        if !source.exists() {
+            continue;
+        }
+        let file_name = source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mail.eml");
+        let retry_name = format!("retry_{}_{}", Utc::now().timestamp_millis(), file_name);
+        let retry_path = Path::new(spool_dir).join(retry_name);
+        if fs::copy(&source, &retry_path).await.is_ok() {
+            copied += 1;
+        }
+    }
+
+    Ok(copied)
+}
 
 fn first_email_address(raw: &str) -> Option<String> {
     if let Ok(parsed) = mailparse::addrparse(raw) {
@@ -791,6 +908,440 @@ async fn handle_smtp_connection(
 }
 
 impl MailService {
+    pub async fn process_spool_once(
+        pool: &SqlitePool,
+        ai_client: &AiClient,
+        config: Arc<Config>,
+        spool_dir: &str,
+        processed_dir: &str,
+        options: &CliProcessOptions,
+    ) -> CliRunReport {
+        let _ = fs::create_dir_all(spool_dir).await;
+        let _ = fs::create_dir_all(processed_dir).await;
+
+        let mut report = CliRunReport::default();
+        match list_spool_eml_files(spool_dir).await {
+            Ok(files) => {
+                for path in files {
+                    let result = Self::process_single_spool_file(
+                        pool,
+                        ai_client,
+                        config.clone(),
+                        spool_dir,
+                        processed_dir,
+                        path,
+                        options,
+                    )
+                    .await;
+                    report.push_result(result);
+                }
+            }
+            Err(e) => {
+                report.push_result(CliFileResult {
+                    file_path: spool_dir.to_string(),
+                    status: "failed".to_string(),
+                    message: format!("Failed to read spool directory: {}", e),
+                    error_type: Some("read_dir_error".to_string()),
+                    processed_path: None,
+                    simulation_logs: Vec::new(),
+                });
+            }
+        }
+
+        report
+    }
+
+    pub async fn process_spool_watch(
+        pool: SqlitePool,
+        ai_client: AiClient,
+        config: Arc<Config>,
+        spool_dir: &str,
+        processed_dir: &str,
+        options: CliProcessOptions,
+    ) {
+        info!("CLI spool watcher running on {} every 3 s", spool_dir);
+        loop {
+            let report = Self::process_spool_once(
+                &pool,
+                &ai_client,
+                config.clone(),
+                spool_dir,
+                processed_dir,
+                &options,
+            )
+            .await;
+            if report.scanned > 0 {
+                info!(
+                    "CLI watch pass: scanned={}, processed={}, failed={}",
+                    report.scanned, report.processed, report.failed
+                );
+            }
+            sleep(Duration::from_secs(3)).await;
+        }
+    }
+
+    pub async fn process_single_spool_file(
+        pool: &SqlitePool,
+        ai_client: &AiClient,
+        config: Arc<Config>,
+        _spool_dir: &str,
+        processed_dir: &str,
+        path: PathBuf,
+        options: &CliProcessOptions,
+    ) -> CliFileResult {
+        let mut simulation_logs = Vec::new();
+        let file_path_str = path.to_string_lossy().to_string();
+        let is_eml = path.extension().map(|e| e == "eml").unwrap_or(false);
+        if !path.is_file() || !is_eml {
+            return CliFileResult {
+                file_path: file_path_str,
+                status: "skipped".to_string(),
+                message: "Not a .eml file".to_string(),
+                error_type: None,
+                processed_path: None,
+                simulation_logs,
+            };
+        }
+
+        push_step(
+            &mut simulation_logs,
+            options,
+            format!("Read file {}", path.display()),
+        );
+        info!("[CLI] Processing spool file: {}", path.display());
+        let contents = match fs::read(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                return CliFileResult {
+                    file_path: file_path_str,
+                    status: "failed".to_string(),
+                    message: format!("Read failed: {}", e),
+                    error_type: Some("read_error".to_string()),
+                    processed_path: None,
+                    simulation_logs,
+                };
+            }
+        };
+
+        push_step(&mut simulation_logs, options, "Parse MIME email");
+        let parsed = match mailparse::parse_mail(&contents) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("[CLI] Failed to parse mail {:?}: {}", path.file_name(), e);
+                log_mail_event(pool, "ERROR", "parse_error", &e.to_string(), path.to_str(), None).await;
+                return CliFileResult {
+                    file_path: file_path_str,
+                    status: "failed".to_string(),
+                    message: format!("Parse failed: {}", e),
+                    error_type: Some("parse_error".to_string()),
+                    processed_path: None,
+                    simulation_logs,
+                };
+            }
+        };
+
+        let subject = parsed
+            .headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case("Subject"))
+            .map(|h| h.get_value())
+            .unwrap_or_else(|| "No Subject".to_string());
+        let to_addr = parsed
+            .headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case("To"))
+            .map(|h| h.get_value())
+            .unwrap_or_default();
+        let from_addr = parsed
+            .headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case("From"))
+            .map(|h| h.get_value())
+            .unwrap_or_default();
+        let body = parsed.get_body().unwrap_or_default();
+
+        let to_clean =
+            first_email_address(&to_addr).unwrap_or_else(|| to_addr.trim().to_ascii_lowercase());
+        let from_clean = first_email_address(&from_addr)
+            .unwrap_or_else(|| from_addr.trim().to_ascii_lowercase());
+        let assistant_addr = first_email_address(&config.assistant_email)
+            .unwrap_or_else(|| config.assistant_email.trim().to_ascii_lowercase());
+
+        let mut owner_candidates: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push_candidate = |candidate: String| {
+            let c = candidate.trim().to_ascii_lowercase();
+            if c.is_empty() || c == assistant_addr {
+                return;
+            }
+            if seen.insert(c.clone()) {
+                owner_candidates.push(c);
+            }
+        };
+
+        for key in [
+            "Delivered-To",
+            "X-Original-To",
+            "Original-Recipient",
+            "X-Forwarded-For",
+            "X-Forwarded-To",
+            "Envelope-To",
+        ] {
+            for raw in header_values(&parsed, key) {
+                for addr in all_email_addresses(&raw) {
+                    push_candidate(addr);
+                }
+            }
+        }
+        if !from_clean.is_empty() {
+            push_candidate(from_clean.clone());
+        }
+
+        let mut user: Option<User> = None;
+        for owner_email in owner_candidates.iter() {
+            let found = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+                .bind(owner_email)
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+            if let Some(u) = found {
+                user = Some(u);
+                break;
+            }
+        }
+
+        if user.is_none() {
+            if let Some(force_email) = options.as_user_email.as_deref() {
+                push_step(
+                    &mut simulation_logs,
+                    options,
+                    format!("Fallback owner to --as-user={force_email}"),
+                );
+                user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+                    .bind(force_email)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap_or(None);
+            }
+        }
+
+        if let Some(u) = user {
+            push_step(
+                &mut simulation_logs,
+                options,
+                format!("Resolved user {}", u.email),
+            );
+            let id = Uuid::new_v4().to_string();
+            let preview = body.chars().take(100).collect::<String>();
+            let _ = sqlx::query(
+                "INSERT INTO emails (id, user_id, subject, preview, status) VALUES (?, ?, ?, ?, 'pending')",
+            )
+            .bind(&id)
+            .bind(&u.id)
+            .bind(&subject)
+            .bind(&preview)
+            .execute(pool)
+            .await;
+
+            let _ = sqlx::query("UPDATE emails SET stored_content = ? WHERE id = ?")
+                .bind(&body)
+                .bind(&id)
+                .execute(pool)
+                .await;
+
+            push_step(
+                &mut simulation_logs,
+                options,
+                "Run financial extraction",
+            );
+            analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body).await;
+
+            let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+                .bind(&id)
+                .execute(pool)
+                .await;
+
+            if options.simulate_agent {
+                push_step(
+                    &mut simulation_logs,
+                    options,
+                    "Start agent simulation",
+                );
+
+                let enabled_rules: Vec<String> = sqlx::query_scalar(
+                    "SELECT rule_text FROM email_rules WHERE user_id = ? AND is_enabled = 1 ORDER BY updated_at DESC",
+                )
+                .bind(&u.id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+
+                if options.simulate_rules {
+                    push_step(
+                        &mut simulation_logs,
+                        options,
+                        format!("Evaluate {} enabled rules", enabled_rules.len()),
+                    );
+                    match crate::services::EmailReplyService::find_matching_rule(
+                        pool,
+                        &u.id,
+                        &subject,
+                        &body,
+                        &from_clean,
+                    )
+                    .await
+                    {
+                        Ok(Some((rule_id, rule_text, rule_label))) => {
+                            push_step(
+                                &mut simulation_logs,
+                                options,
+                                format!("Matched rule #{rule_id} [{rule_label}]"),
+                            );
+                            match crate::services::EmailReplyService::generate_auto_reply(
+                                ai_client,
+                                &u,
+                                &rule_text,
+                                &from_clean,
+                                &subject,
+                                &body,
+                            )
+                            .await
+                            {
+                                Ok(reply) => {
+                                    let preview = reply.chars().take(180).collect::<String>();
+                                    push_step(
+                                        &mut simulation_logs,
+                                        options,
+                                        format!(
+                                            "Simulated auto-reply preview: {}{}",
+                                            preview,
+                                            if reply.len() > 180 { "..." } else { "" }
+                                        ),
+                                    );
+                                }
+                                Err(e) => {
+                                    push_step(
+                                        &mut simulation_logs,
+                                        options,
+                                        format!("Auto-reply simulation failed: {}", e),
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            push_step(
+                                &mut simulation_logs,
+                                options,
+                                "No rule matched for this email",
+                            );
+                        }
+                        Err(e) => {
+                            push_step(
+                                &mut simulation_logs,
+                                options,
+                                format!("Rule matching failed: {}", e),
+                            );
+                        }
+                    }
+                }
+
+                if options.simulate_memory {
+                    push_step(
+                        &mut simulation_logs,
+                        options,
+                        "Load user long-term memory",
+                    );
+                    let memory = crate::services::OnboardingService::get_memory(pool, &u.id).await;
+
+                    let mut ai_user = u.clone();
+                    if !enabled_rules.is_empty() {
+                        let rules_context = enabled_rules
+                            .iter()
+                            .map(|r| format!("- {}", r))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let merged = match ai_user.preferences.as_ref() {
+                            Some(p) if !p.trim().is_empty() => {
+                                format!("{}\n\nActive email processing rules:\n{}", p, rules_context)
+                            }
+                            _ => format!("Active email processing rules:\n{}", rules_context),
+                        };
+                        ai_user.preferences = Some(merged);
+                    }
+
+                    match crate::services::OnboardingService::generate_reply(
+                        ai_client,
+                        &ai_user,
+                        &body,
+                        &memory,
+                        &config.assistant_email,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(reply) => {
+                            let preview = reply.content.chars().take(180).collect::<String>();
+                            push_step(
+                                &mut simulation_logs,
+                                options,
+                                format!(
+                                    "Simulated memory-aware reply preview: {}{}",
+                                    preview,
+                                    if reply.content.len() > 180 { "..." } else { "" }
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            push_step(
+                                &mut simulation_logs,
+                                options,
+                                format!("Memory-aware simulation failed: {}", e),
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            let warn_msg = format!(
+                "No user found for sender {:?} (recipient {:?}, candidates {:?}); email discarded",
+                from_clean, to_clean, owner_candidates
+            );
+            warn!("{}", warn_msg);
+            log_mail_event(
+                pool,
+                "WARN",
+                "unknown_sender",
+                &warn_msg,
+                path.to_str(),
+                None,
+            )
+            .await;
+        }
+
+        let mut processed_path = None;
+        if !options.keep_files {
+            if let Some(fname) = path.file_name() {
+                let dest = format!("{}/{}", processed_dir, fname.to_string_lossy());
+                if let Err(e) = fs::rename(&path, &dest).await {
+                    error!("Failed to move {:?} to processed/: {}", path, e);
+                    let _ = fs::remove_file(&path).await;
+                } else {
+                    processed_path = Some(dest);
+                }
+            }
+        }
+
+        CliFileResult {
+            file_path: file_path_str,
+            status: "processed".to_string(),
+            message: "Processed successfully".to_string(),
+            error_type: None,
+            processed_path,
+            simulation_logs,
+        }
+    }
+
     pub async fn start(pool: SqlitePool, ai_client: AiClient, config: Arc<Config>) -> Result<()> {
         let spool_dir = "data/mail_spool";
         let processed_dir = "data/mail_spool/processed";

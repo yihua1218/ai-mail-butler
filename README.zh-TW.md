@@ -45,6 +45,56 @@ cargo build
 cargo run
 ```
 
+### CLI 除錯模式（不啟動後端伺服器）
+可使用 CLI 模式直接處理本地 `spool` 目錄中的 `.eml` 檔案，不啟動 SMTP/Web server。
+
+單次處理（預設）：
+```bash
+cargo run -- --mode cli
+```
+
+指定 spool 目錄並輸出 JSON 報表：
+```bash
+cargo run -- --mode cli --spool-dir data/mail_spool --report-json data/mail_spool/cli-report.json
+```
+
+保留原始 `.eml` 檔案（方便重複除錯）：
+```bash
+cargo run -- --mode cli --keep-files
+```
+
+持續監看模式：
+```bash
+cargo run -- --mode cli --watch
+```
+
+互動式 REPL 模式：
+```bash
+cargo run -- --mode cli --repl
+```
+REPL 指令：`list`、`show <index|path>`、`process <index|path>`、`retry-unknown`、`report`、`exit`。
+
+處理單一指定 `.eml` 檔案：
+```bash
+cargo run -- --mode cli --eml-file /absolute/path/to/mail_123.eml --keep-files
+```
+
+啟用 AI Agent 模擬（規則 + 記憶）並顯示 step-by-step：
+```bash
+cargo run -- --mode cli \
+    --eml-file /absolute/path/to/mail_123.eml \
+    --simulate-agent --simulate-rules --simulate-memory \
+    --as-user user@example.com \
+    --step --keep-files
+```
+
+參數說明：
+- `--simulate-agent`：開啟模擬流程。
+- `--simulate-rules`：套用啟用中的 `email_rules`，並產生模擬自動回覆預覽。
+- `--simulate-memory`：讀取 `user_memories`，產生含記憶脈絡的模擬回覆預覽。
+- `--as-user`：當寄件者無法映射使用者時，強制指定使用者情境以便除錯。
+- `--step`：在 CLI 直接顯示每個處理步驟與模擬進度。
+
 可選文件檢索控制：
 - `DOCS_WHITELIST`：以逗號分隔可被 AI 引用的文件檔名或關鍵字。例如：`DOCS_WHITELIST=GMAIL-SMTP-SETUP.md,zh-TW`
 - 語言偏好效果：登入使用者若設定 `preferred_language=zh-TW`，系統會優先命中 `*.zh-TW.md` 文件內容。
