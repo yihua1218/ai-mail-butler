@@ -18,6 +18,9 @@ interface BuildInfo {
   build_ram: string;
   build_disk: string;
   assistant_email: string;
+  readonly_mode_enabled: boolean;
+  readonly_base?: string | null;
+  overlay_dir?: string | null;
 }
 
 export const About: React.FC = () => {
@@ -66,6 +69,7 @@ export const About: React.FC = () => {
         scope: '可協助：轉寄郵件處理、規則設定、回覆草稿/寄送偏好、Dashboard 與 Log 判讀。',
         limits: '限制：不提供寫程式、非郵件助理主題的問題解答；可短暫閒聊，但會引導回郵件處理工作。',
         gdpr: 'GDPR 宣告：使用者可要求刪除個人資料，系統會提供刪除前統計報表與二次確認流程。',
+        runtimeMode: '執行模式',
         buildEnvTitle: '建置環境指紋',
         machineTitle: '建置機器硬體資訊',
         appVersion: '應用程式版本',
@@ -87,6 +91,7 @@ export const About: React.FC = () => {
         scope: 'Supported: forwarded-email processing, rule setup, draft/sending preferences, dashboard and log interpretation.',
         limits: 'Limits: no coding help and no unrelated Q&A; brief casual chat is allowed but the assistant will guide back to email workflow tasks.',
         gdpr: 'GDPR declaration: users can request personal data deletion with a pre-deletion summary report and a required second confirmation step.',
+        runtimeMode: 'Runtime Mode',
         buildEnvTitle: 'Build Environment Fingerprint',
         machineTitle: 'Build Machine Hardware',
         appVersion: 'App Version',
@@ -134,6 +139,11 @@ export const About: React.FC = () => {
           <Descriptions.Item label={isZh ? '功能範圍' : 'Scope'}>{text.scope}</Descriptions.Item>
           <Descriptions.Item label={isZh ? '使用限制' : 'Limitations'}>{text.limits}</Descriptions.Item>
           <Descriptions.Item label="GDPR">{text.gdpr}</Descriptions.Item>
+          <Descriptions.Item label={text.runtimeMode}>
+            {info?.readonly_mode_enabled
+              ? `${isZh ? '唯讀 Overlay' : 'Read-only Overlay'} (overlay=${info.overlay_dir || '-'}, base=${info.readonly_base || '-'})`
+              : (isZh ? '一般可寫模式' : 'Writable Mode')}
+          </Descriptions.Item>
         </Descriptions>
       </Card>
 

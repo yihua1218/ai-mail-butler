@@ -84,9 +84,69 @@ pub async fn list_spool_eml_files(spool_dir: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-pub async fn resolve_cli_target_path(spool_dir: &str, target: &str) -> Result<PathBuf> {
+/// List all .eml files with union overlay-first + base-fallback semantics.
+/// In readonly mode the overlay spool is read first; then any files from the
+/// corresponding base spool whose filenames are not already present in the
+/// overlay are appended.  In normal mode this is identical to
+/// `list_spool_eml_files`.
+pub async fn union_list_eml_files(config: &Config, runtime_spool_dir: &str) -> Result<Vec<PathBuf>> {
+    // overlay (or sole) spool
+    let mut files = list_spool_eml_files(runtime_spool_dir).await?;
+
+    // base fallback – readonly mode only
+    if config.readonly_mode_enabled {
+        let seen: HashSet<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect();
+
+        let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
+        if let Some(base) = &config.readonly_base {
+            let runtime_pb = Path::new(runtime_spool_dir);
+            let overlay_pb = Path::new(overlay_root);
+            let logical = runtime_pb.strip_prefix(overlay_pb).unwrap_or(runtime_pb);
+            let base_spool = Path::new(base).join(logical);
+            if let Ok(mut entries) = fs::read_dir(&base_spool).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().map(|e| e == "eml").unwrap_or(false) {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if !seen.contains(name) {
+                                files.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+/// Read file bytes with union overlay-first + base-fallback semantics.
+/// If the read of `path` fails in readonly mode and the path is inside the
+/// overlay root, the matching file from the base directory tree is tried.
+async fn union_read_file(config: &Config, path: &Path) -> std::io::Result<Vec<u8>> {
+    match fs::read(path).await {
+        Ok(data) => Ok(data),
+        Err(e) if config.readonly_mode_enabled => {
+            let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
+            if let (Some(base), Ok(rel)) = (&config.readonly_base, path.strip_prefix(overlay_root)) {
+                let base_path = Path::new(base).join(rel);
+                fs::read(&base_path).await
+            } else {
+                Err(e)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub async fn resolve_cli_target_path(config: &Config, spool_dir: &str, target: &str) -> Result<PathBuf> {
     if let Ok(index) = target.parse::<usize>() {
-        let files = list_spool_eml_files(spool_dir).await?;
+        let files = union_list_eml_files(config, spool_dir).await?;
         return files
             .get(index)
             .cloned()
@@ -257,6 +317,37 @@ fn extension_from_mime(mime: &str) -> &'static str {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
         _ => "bin",
     }
+}
+
+fn resolve_runtime_path(config: &Config, logical_path: &str) -> PathBuf {
+    let logical_buf = PathBuf::from(logical_path);
+    if !config.readonly_mode_enabled {
+        return logical_buf;
+    }
+
+    let overlay_root = config
+        .overlay_dir
+        .as_deref()
+        .unwrap_or("data/overlay");
+    let overlay_root_path = PathBuf::from(overlay_root);
+    if logical_buf.starts_with(&overlay_root_path) {
+        return logical_buf;
+    }
+
+    let logical = Path::new(logical_path);
+    let relative = if logical.is_absolute() {
+        logical.strip_prefix("/").unwrap_or(logical)
+    } else {
+        logical
+    };
+
+    overlay_root_path.join(relative)
+}
+
+fn resolve_runtime_dir(config: &Config, logical_dir: &str) -> String {
+    resolve_runtime_path(config, logical_dir)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn collect_attachment_parts<'a>(
@@ -916,19 +1007,21 @@ impl MailService {
         processed_dir: &str,
         options: &CliProcessOptions,
     ) -> CliRunReport {
-        let _ = fs::create_dir_all(spool_dir).await;
-        let _ = fs::create_dir_all(processed_dir).await;
+        let runtime_spool_dir = resolve_runtime_dir(&config, spool_dir);
+        let runtime_processed_dir = resolve_runtime_dir(&config, processed_dir);
+        let _ = fs::create_dir_all(&runtime_spool_dir).await;
+        let _ = fs::create_dir_all(&runtime_processed_dir).await;
 
         let mut report = CliRunReport::default();
-        match list_spool_eml_files(spool_dir).await {
+        match union_list_eml_files(&config, &runtime_spool_dir).await {
             Ok(files) => {
                 for path in files {
                     let result = Self::process_single_spool_file(
                         pool,
                         ai_client,
                         config.clone(),
-                        spool_dir,
-                        processed_dir,
+                        &runtime_spool_dir,
+                        &runtime_processed_dir,
                         path,
                         options,
                     )
@@ -938,7 +1031,7 @@ impl MailService {
             }
             Err(e) => {
                 report.push_result(CliFileResult {
-                    file_path: spool_dir.to_string(),
+                    file_path: runtime_spool_dir.to_string(),
                     status: "failed".to_string(),
                     message: format!("Failed to read spool directory: {}", e),
                     error_type: Some("read_dir_error".to_string()),
@@ -990,6 +1083,7 @@ impl MailService {
         options: &CliProcessOptions,
     ) -> CliFileResult {
         let mut simulation_logs = Vec::new();
+        let runtime_processed_dir = resolve_runtime_dir(&config, processed_dir);
         let file_path_str = path.to_string_lossy().to_string();
         let is_eml = path.extension().map(|e| e == "eml").unwrap_or(false);
         if !path.is_file() || !is_eml {
@@ -1322,7 +1416,7 @@ impl MailService {
         let mut processed_path = None;
         if !options.keep_files {
             if let Some(fname) = path.file_name() {
-                let dest = format!("{}/{}", processed_dir, fname.to_string_lossy());
+                let dest = format!("{}/{}", runtime_processed_dir, fname.to_string_lossy());
                 if let Err(e) = fs::rename(&path, &dest).await {
                     error!("Failed to move {:?} to processed/: {}", path, e);
                     let _ = fs::remove_file(&path).await;
@@ -1343,13 +1437,19 @@ impl MailService {
     }
 
     pub async fn start(pool: SqlitePool, ai_client: AiClient, config: Arc<Config>) -> Result<()> {
-        let spool_dir = "data/mail_spool";
-        let processed_dir = "data/mail_spool/processed";
-        fs::create_dir_all(spool_dir).await?;
-        fs::create_dir_all(processed_dir).await?;
+        let logical_spool_dir = "data/mail_spool";
+        let logical_processed_dir = "data/mail_spool/processed";
+        let spool_dir = resolve_runtime_dir(&config, logical_spool_dir);
+        let processed_dir = resolve_runtime_dir(&config, logical_processed_dir);
+        fs::create_dir_all(&spool_dir).await?;
+        fs::create_dir_all(&processed_dir).await?;
 
         let listener = TcpListener::bind("0.0.0.0:25").await?;
-        info!("SMTP server listening on 0.0.0.0:25  (spool: {})", spool_dir);
+        info!(
+            "SMTP server listening on 0.0.0.0:25  (logical spool: {}, runtime spool: {})",
+            logical_spool_dir,
+            spool_dir
+        );
 
         let spool_owned = spool_dir.to_string();
         tokio::spawn(async move {
@@ -1369,7 +1469,7 @@ impl MailService {
         });
 
         tokio::spawn(async move {
-            Self::process_spool(pool, ai_client, config, spool_dir, processed_dir).await;
+            Self::process_spool(pool, ai_client, config, &spool_dir, &processed_dir).await;
         });
 
         Ok(())
@@ -1384,10 +1484,8 @@ impl MailService {
     ) {
         info!("Spool processor watching {} every 3 s", spool_dir);
         loop {
-            if let Ok(mut entries) = fs::read_dir(spool_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-
+            if let Ok(paths) = union_list_eml_files(&config, spool_dir).await {
+                for path in paths {
                     // Only process .eml files; skip subdirectories and .log files
                     let is_eml = path
                         .extension()
@@ -1399,7 +1497,7 @@ impl MailService {
 
                     info!("Processing spool file: {}", path.display());
 
-                    if let Ok(contents) = fs::read(&path).await {
+                    if let Ok(contents) = union_read_file(&config, &path).await {
                         match mailparse::parse_mail(&contents) {
                             Err(e) => {
                                 error!("Failed to parse mail {:?}: {}", path.file_name(), e);

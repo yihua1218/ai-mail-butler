@@ -1,5 +1,9 @@
 use axum::{
+    body::Body,
     extract::{State, Query},
+    http::{Method, Request, StatusCode},
+    middleware::{self, Next},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -960,10 +964,13 @@ fn sanitize_path_component(input: &str) -> String {
     }
 }
 
-async fn collect_dir_stats(base_dir: &str) -> (i64, i64) {
+async fn collect_dir_stats(base_dir: &str, extra_base_dir: Option<&str>) -> (i64, i64) {
     let mut total_files = 0_i64;
     let mut total_bytes = 0_i64;
     let mut stack = vec![PathBuf::from(base_dir)];
+    if let Some(extra) = extra_base_dir {
+        stack.push(PathBuf::from(extra));
+    }
 
     while let Some(dir) = stack.pop() {
         let mut entries = match fs::read_dir(&dir).await {
@@ -986,9 +993,28 @@ async fn collect_dir_stats(base_dir: &str) -> (i64, i64) {
     (total_files, total_bytes)
 }
 
-async fn build_user_data_snapshot(pool: &SqlitePool, user_id: &str, user_email: &str) -> DataDeletionSnapshot {
-    let sender_dir = format!("data/mail_spool/{}", sanitize_path_component(&user_email.to_ascii_lowercase()));
-    let (file_count, total_file_bytes) = collect_dir_stats(&sender_dir).await;
+async fn build_user_data_snapshot(
+    pool: &SqlitePool,
+    user_id: &str,
+    user_email: &str,
+    sender_dir: &str,
+    config: &crate::config::Config,
+) -> DataDeletionSnapshot {
+    // In readonly mode also count files from the base sender directory.
+    let extra_base: Option<String> = if config.readonly_mode_enabled {
+        let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
+        config.readonly_base.as_deref().and_then(|base| {
+            let runtime_pb = std::path::Path::new(sender_dir);
+            let overlay_pb = std::path::Path::new(overlay_root);
+            runtime_pb
+                .strip_prefix(overlay_pb)
+                .ok()
+                .map(|rel| std::path::Path::new(base).join(rel).to_string_lossy().into_owned())
+        })
+    } else {
+        None
+    };
+    let (file_count, total_file_bytes) = collect_dir_stats(sender_dir, extra_base.as_deref()).await;
 
     let email_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?")
         .bind(user_id)
@@ -1048,6 +1074,57 @@ pub struct AppState {
     pub config: std::sync::Arc<crate::config::Config>,
 }
 
+fn resolve_runtime_mail_path(state: &AppState, logical_path: &str) -> PathBuf {
+    if !state.config.readonly_mode_enabled {
+        return PathBuf::from(logical_path);
+    }
+
+    let overlay_root = state
+        .config
+        .overlay_dir
+        .as_deref()
+        .unwrap_or("data/overlay");
+    let overlay_root_path = PathBuf::from(overlay_root);
+    let logical = PathBuf::from(logical_path);
+    if logical.starts_with(&overlay_root_path) {
+        return logical;
+    }
+
+    if logical.is_absolute() {
+        overlay_root_path.join(logical.strip_prefix("/").unwrap_or(&logical))
+    } else {
+        overlay_root_path.join(logical)
+    }
+}
+
+async fn readonly_write_guard(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> impl IntoResponse {
+    if !state.config.readonly_mode_enabled {
+        return next.run(req).await;
+    }
+
+    let method = req.method();
+    let path = req.uri().path();
+    let read_only_method = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if read_only_method {
+        return next.run(req).await;
+    }
+
+    // Allow authentication bootstrap while all other writes are blocked.
+    if path == "/api/auth/magic-link" || path == "/api/auth/verify" {
+        return next.run(req).await;
+    }
+
+    let payload = serde_json::json!({
+        "status": "error",
+        "message": "Read-only overlay mode is enabled. Write operations are blocked.",
+    });
+    (StatusCode::SERVICE_UNAVAILABLE, Json(payload)).into_response()
+}
+
 fn is_admin_or_developer(state: &AppState, email: &str) -> bool {
     Some(email) == state.admin_email.as_deref() || Some(email) == state.developer_email.as_deref()
 }
@@ -1080,7 +1157,7 @@ struct RetryMailErrorRequest {
     error_id: i64,
 }
 
-fn resolve_mail_error_source_path(context: &str) -> Option<PathBuf> {
+fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<PathBuf> {
     let trimmed = context.trim();
     if trimmed.is_empty() {
         return None;
@@ -1091,8 +1168,14 @@ fn resolve_mail_error_source_path(context: &str) -> Option<PathBuf> {
         .file_name()
         .and_then(|s| s.to_str())
     {
-        candidates.push(PathBuf::from(format!("data/mail_spool/processed/{}", file_name)));
-        candidates.push(PathBuf::from(format!("data/mail_spool/{}", file_name)));
+        candidates.push(resolve_runtime_mail_path(
+            state,
+            &format!("data/mail_spool/processed/{}", file_name),
+        ));
+        candidates.push(resolve_runtime_mail_path(
+            state,
+            &format!("data/mail_spool/{}", file_name),
+        ));
     }
 
     candidates.into_iter().find(|p| p.is_file())
@@ -1107,12 +1190,13 @@ async fn get_me(
         
         // Use UPSERT logic or separate check to handle concurrency/re-registrations
         let role = role_for_email(&state, &email);
-        let new_id = uuid::Uuid::new_v4().to_string();
-        
-        let _ = sqlx::query("INSERT OR IGNORE INTO users (id, email) VALUES (?, ?)")
-            .bind(&new_id)
-            .bind(&email)
-            .execute(&state.pool).await;
+        if !state.config.readonly_mode_enabled {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let _ = sqlx::query("INSERT OR IGNORE INTO users (id, email) VALUES (?, ?)")
+                .bind(&new_id)
+                .bind(&email)
+                .execute(&state.pool).await;
+        }
 
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
@@ -1618,6 +1702,9 @@ struct BuildInfo {
     build_ram: &'static str,
     build_disk: &'static str,
     assistant_email: String,
+    readonly_mode_enabled: bool,
+    readonly_base: Option<String>,
+    overlay_dir: Option<String>,
 }
 
 async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
@@ -1633,6 +1720,9 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
         build_ram: env!("BUILD_RAM"),
         build_disk: env!("BUILD_DISK"),
         assistant_email: state.config.assistant_email.clone(),
+        readonly_mode_enabled: state.config.readonly_mode_enabled,
+        readonly_base: state.config.readonly_base.clone(),
+        overlay_dir: state.config.overlay_dir.clone(),
     })
 }
 
@@ -2577,7 +2667,7 @@ async fn post_retry_mail_error(
         return Json(serde_json::json!({ "status": "error", "message": "Missing log context path" }));
     };
 
-    let Some(source_path) = resolve_mail_error_source_path(&context_path) else {
+    let Some(source_path) = resolve_mail_error_source_path(&state, &context_path) else {
         return Json(serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }));
     };
 
@@ -2586,7 +2676,8 @@ async fn post_retry_mail_error(
         .and_then(|s| s.to_str())
         .unwrap_or("mail.eml");
     let retry_name = format!("retry_{}_{}", chrono::Utc::now().timestamp_millis(), file_name);
-    let retry_path = PathBuf::from("data/mail_spool").join(retry_name);
+    let retry_spool_root = resolve_runtime_mail_path(&state, "data/mail_spool");
+    let retry_path = retry_spool_root.join(retry_name);
 
     if let Err(e) = fs::copy(&source_path, &retry_path).await {
         return Json(serde_json::json!({
@@ -3188,7 +3279,12 @@ async fn post_request_data_deletion(
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
-    let snapshot = build_user_data_snapshot(&state.pool, &user_id, &email).await;
+    let sender_dir = resolve_runtime_mail_path(
+        &state,
+        &format!("data/mail_spool/{}", sanitize_path_component(&email.to_ascii_lowercase())),
+    );
+    let sender_dir_str = sender_dir.to_string_lossy().to_string();
+    let snapshot = build_user_data_snapshot(&state.pool, &user_id, &email, &sender_dir_str, &state.config).await;
     let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
     let token = uuid::Uuid::new_v4().to_string();
     let req_id = uuid::Uuid::new_v4().to_string();
@@ -3291,7 +3387,10 @@ async fn post_confirm_data_deletion(
         return Json(serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }));
     }
 
-    let sender_dir = format!("data/mail_spool/{}", sanitize_path_component(&row.user_email.to_ascii_lowercase()));
+    let sender_dir = resolve_runtime_mail_path(
+        &state,
+        &format!("data/mail_spool/{}", sanitize_path_component(&row.user_email.to_ascii_lowercase())),
+    );
 
     let mut tx = match state.pool.begin().await {
         Ok(t) => t,
@@ -3718,7 +3817,11 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/privacy/age-verification", get(get_age_verification))
         .route("/admin/retention/policies", post(post_retention_policy))
         .route("/admin/retention/policies", get(get_retention_policies))
-        .route("/admin/retention/purge", post(run_data_retention_purge));
+        .route("/admin/retention/purge", post(run_data_retention_purge))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            readonly_write_guard,
+        ));
 
     let app = Router::new()
         .nest("/api", api_router)

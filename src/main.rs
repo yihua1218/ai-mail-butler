@@ -8,6 +8,7 @@ mod web;
 
 use anyhow::Result;
 use clap::Parser;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::info;
@@ -39,6 +40,105 @@ struct CliArgs {
     as_user: Option<String>,
     #[arg(long)]
     step: bool,
+    #[arg(long)]
+    readonly_mode: bool,
+    #[arg(long)]
+    readonly_base: Option<String>,
+    #[arg(long)]
+    overlay_dir: Option<String>,
+}
+
+fn sqlite_url_to_path(database_url: &str) -> PathBuf {
+    PathBuf::from(
+        database_url
+            .trim_start_matches("sqlite:")
+            .trim_start_matches("//"),
+    )
+}
+
+fn resolve_overlay_relative_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        PathBuf::from(path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("data.sqlite")))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn resolve_runtime_dir(config: &config::Config, logical_dir: &str) -> String {
+    if !config.readonly_mode_enabled {
+        return logical_dir.to_string();
+    }
+
+    let overlay_root = config
+        .overlay_dir
+        .clone()
+        .unwrap_or_else(|| "data/overlay".to_string());
+    let overlay_root_path = PathBuf::from(&overlay_root);
+    let logical_path = PathBuf::from(logical_dir);
+    if logical_path.starts_with(&overlay_root_path) {
+        return logical_path.to_string_lossy().to_string();
+    }
+
+    let relative = if logical_path.is_absolute() {
+        logical_path
+            .strip_prefix("/")
+            .unwrap_or(&logical_path)
+            .to_path_buf()
+    } else {
+        logical_path
+    };
+
+    overlay_root_path
+        .join(relative)
+        .to_string_lossy()
+        .to_string()
+}
+
+async fn prepare_readonly_overlay_db(config: &mut config::Config) -> Result<()> {
+    if !config.readonly_mode_enabled {
+        return Ok(());
+    }
+
+    let overlay_root = PathBuf::from(
+        config
+            .overlay_dir
+            .clone()
+            .unwrap_or_else(|| "data/overlay".to_string()),
+    );
+    tokio::fs::create_dir_all(&overlay_root).await?;
+
+    let configured_db_path = sqlite_url_to_path(&config.database_url);
+    let relative_db_path = resolve_overlay_relative_path(&configured_db_path);
+    let overlay_db_path = overlay_root.join(&relative_db_path);
+
+    if let Some(parent) = overlay_db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let base_db_path = if let Some(base) = config.readonly_base.as_deref() {
+        PathBuf::from(base).join(&relative_db_path)
+    } else {
+        configured_db_path.clone()
+    };
+
+    if tokio::fs::try_exists(&base_db_path).await.unwrap_or(false)
+        && !tokio::fs::try_exists(&overlay_db_path).await.unwrap_or(false)
+    {
+        tokio::fs::copy(&base_db_path, &overlay_db_path).await?;
+    }
+
+    config.database_url = format!("sqlite:{}", overlay_db_path.to_string_lossy());
+    config.overlay_dir = Some(overlay_root.to_string_lossy().to_string());
+
+    info!(
+        "Readonly overlay mode enabled. base_db='{}', overlay_db='{}'",
+        base_db_path.display(),
+        overlay_db_path.display()
+    );
+
+    Ok(())
 }
 
 async fn write_cli_report(path: &str, report: &mail::CliRunReport) -> Result<()> {
@@ -59,6 +159,8 @@ async fn run_cli_repl(
     args: &CliArgs,
 ) -> Result<()> {
     let mut aggregate = mail::CliRunReport::default();
+    let runtime_spool_dir = resolve_runtime_dir(&config, &args.spool_dir);
+    let runtime_processed_dir = format!("{}/processed", runtime_spool_dir);
     let process_options = mail::CliProcessOptions {
         keep_files: args.keep_files,
         simulate_agent: args.simulate_agent,
@@ -97,9 +199,9 @@ async fn run_cli_repl(
                 println!("  exit                  Exit REPL");
             }
             "list" => {
-                let files = mail::list_spool_eml_files(&args.spool_dir).await?;
+                let files = mail::union_list_eml_files(&config, &runtime_spool_dir).await?;
                 if files.is_empty() {
-                    println!("No pending .eml files in {}", args.spool_dir);
+                    println!("No pending .eml files in {}", runtime_spool_dir);
                 } else {
                     for (idx, file) in files.iter().enumerate() {
                         println!("[{idx}] {}", file.display());
@@ -108,7 +210,7 @@ async fn run_cli_repl(
             }
             "show" => {
                 if let Some(target) = parts.next() {
-                    let path = mail::resolve_cli_target_path(&args.spool_dir, target).await?;
+                    let path = mail::resolve_cli_target_path(&config, &runtime_spool_dir, target).await?;
                     let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
                     for line in content.lines().take(40) {
                         println!("{}", line);
@@ -119,13 +221,13 @@ async fn run_cli_repl(
             }
             "process" => {
                 if let Some(target) = parts.next() {
-                    let path = mail::resolve_cli_target_path(&args.spool_dir, target).await?;
+                    let path = mail::resolve_cli_target_path(&config, &runtime_spool_dir, target).await?;
                     let result = mail::MailService::process_single_spool_file(
                         pool,
                         ai_client,
                         config.clone(),
-                        &args.spool_dir,
-                        &format!("{}/processed", args.spool_dir),
+                        &runtime_spool_dir,
+                        &runtime_processed_dir,
                         path,
                         &process_options,
                     )
@@ -137,7 +239,7 @@ async fn run_cli_repl(
                 }
             }
             "retry-unknown" => {
-                let count = mail::requeue_unknown_sender_errors(pool, &args.spool_dir).await?;
+                let count = mail::requeue_unknown_sender_errors(pool, &runtime_spool_dir).await?;
                 println!("Requeued {count} files from unknown_sender logs");
             }
             "report" => {
@@ -168,7 +270,18 @@ async fn main() -> Result<()> {
 
     info!("Starting AI Mail Butler...");
 
-    let config = config::Config::load();
+    let mut config = config::Config::load();
+
+    if args.readonly_mode {
+        config.readonly_mode_enabled = true;
+    }
+    if let Some(base) = args.readonly_base.clone() {
+        config.readonly_base = Some(base);
+    }
+    if let Some(overlay) = args.overlay_dir.clone() {
+        config.overlay_dir = Some(overlay);
+    }
+    prepare_readonly_overlay_db(&mut config).await?;
 
     // 1. Initialize Database
     let pool = db::connect(&config.database_url).await?;
@@ -188,6 +301,9 @@ async fn main() -> Result<()> {
             return Ok(());
         }
 
+        let runtime_spool_dir = resolve_runtime_dir(&config_arc, &args.spool_dir);
+        let runtime_processed_dir = format!("{}/processed", runtime_spool_dir);
+
         if args.watch {
             let process_options = mail::CliProcessOptions {
                 keep_files: args.keep_files,
@@ -201,8 +317,8 @@ async fn main() -> Result<()> {
                 pool,
                 ai_client,
                 config_arc,
-                &args.spool_dir,
-                &format!("{}/processed", args.spool_dir),
+                &runtime_spool_dir,
+                &runtime_processed_dir,
                 process_options,
             )
             .await;
@@ -224,8 +340,8 @@ async fn main() -> Result<()> {
                 &pool,
                 &ai_client,
                 config_arc,
-                &args.spool_dir,
-                &format!("{}/processed", args.spool_dir),
+                &runtime_spool_dir,
+                &runtime_processed_dir,
                 single_path,
                 &process_options,
             )
@@ -244,8 +360,8 @@ async fn main() -> Result<()> {
             &pool,
             &ai_client,
             config_arc,
-            &args.spool_dir,
-            &format!("{}/processed", args.spool_dir),
+            &runtime_spool_dir,
+            &runtime_processed_dir,
             &process_options,
         )
         .await;

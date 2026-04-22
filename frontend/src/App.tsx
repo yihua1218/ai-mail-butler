@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
-import { Button, ConfigProvider, Dropdown, Input, Layout, Menu, Spin, Typography, message } from 'antd';
+import { Alert, Button, ConfigProvider, Dropdown, Input, Layout, Menu, Spin, Typography, message } from 'antd';
 import { GlobalOutlined, LoginOutlined, LogoutOutlined } from '@ant-design/icons';
+import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
@@ -47,6 +48,7 @@ const App: React.FC = () => {
   const location = useLocation();
   const [loginEmail, setLoginEmail] = useState('');
   const [isLinkSent, setIsLinkSent] = useState(false);
+  const [readonlyInfo, setReadonlyInfo] = useState<{ enabled: boolean; overlayDir?: string; readonlyBase?: string }>({ enabled: false });
 
   // Derive active menu key from current URL path
   const activeMenu = PATH_TO_KEY[location.pathname] ?? '1';
@@ -87,6 +89,20 @@ const App: React.FC = () => {
     };
     document.title = `${titles[activeMenu] ?? 'AI Mail Butler'} | AI Mail Butler`;
   }, [activeMenu, t]);
+
+  useEffect(() => {
+    axios.get('/api/about')
+      .then((res) => {
+        setReadonlyInfo({
+          enabled: !!res.data?.readonly_mode_enabled,
+          overlayDir: res.data?.overlay_dir || undefined,
+          readonlyBase: res.data?.readonly_base || undefined,
+        });
+      })
+      .catch(() => {
+        setReadonlyInfo({ enabled: false });
+      });
+  }, []);
 
   const handleMenuSelect = (key: string) => {
     navigate(KEY_TO_PATH[key] ?? '/dashboard');
@@ -251,6 +267,17 @@ const App: React.FC = () => {
             width: '100%',
           }}
         >
+          {readonlyInfo.enabled && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={i18n.language === 'zh-TW' ? '唯讀 Overlay 模式啟用中' : 'Read-only Overlay Mode Enabled'}
+              description={i18n.language === 'zh-TW'
+                ? `系統會阻擋所有寫入 API。Overlay: ${readonlyInfo.overlayDir || '-'}；Base: ${readonlyInfo.readonlyBase || '-'}`
+                : `All write APIs are blocked. Overlay: ${readonlyInfo.overlayDir || '-'}; Base: ${readonlyInfo.readonlyBase || '-'}.`}
+            />
+          )}
           <Suspense fallback={pageFallback}>
             {renderPage()}
           </Suspense>

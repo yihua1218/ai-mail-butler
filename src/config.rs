@@ -9,9 +9,22 @@ pub struct Config {
     pub smtp_relay_pass: Option<String>,
     pub assistant_email: String,
     pub docs_whitelist: Vec<String>,
+    pub readonly_mode_enabled: bool,
+    pub readonly_base: Option<String>,
+    pub overlay_dir: Option<String>,
 }
 
 impl Config {
+    fn parse_bool_env(name: &str) -> bool {
+        match std::env::var(name) {
+            Ok(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
+        }
+    }
+
     pub fn load() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/data.sqlite".to_string()),
@@ -29,6 +42,9 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            readonly_mode_enabled: Self::parse_bool_env("READONLY_MODE"),
+            readonly_base: std::env::var("READONLY_BASE").ok().filter(|s| !s.trim().is_empty()),
+            overlay_dir: std::env::var("OVERLAY_DIR").ok().filter(|s| !s.trim().is_empty()),
         }
     }
 }
