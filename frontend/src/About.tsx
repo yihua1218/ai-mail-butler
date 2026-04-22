@@ -114,7 +114,7 @@ export const About: React.FC = () => {
         <Descriptions
           title={text.scopeTitle}
           bordered
-          column={{ xxl: 1, xl: 1, lg: 1, md: 1, sm: 1, xs: 1 }}
+          column={{ xxl: 4, xl: 4, lg: 4, md: 2, sm: 1, xs: 1 }}
         >
           <Descriptions.Item label={text.mailbox}>
             <Space size={4}>

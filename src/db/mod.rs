@@ -284,6 +284,82 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
 
+    // Consent audit trail for legal proof (GDPR/CCPA compliance)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS consent_audit_trail (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            consent_type TEXT NOT NULL,
+            consent_granted BOOLEAN NOT NULL,
+            consent_source TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Data subject access request (DSAR) tracking
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dsar_requests (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            request_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            admin_notes TEXT,
+            completed_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Data retention policy settings
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS data_retention_policies (
+            id TEXT PRIMARY KEY NOT NULL,
+            data_type TEXT NOT NULL UNIQUE,
+            retention_days INTEGER NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Privacy settings per user (Do Not Sell/Share, cross-border preferences)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user_privacy_settings (
+            user_id TEXT PRIMARY KEY NOT NULL,
+            do_not_sell_share BOOLEAN NOT NULL DEFAULT 0,
+            cross_border_disclosure_given BOOLEAN NOT NULL DEFAULT 0,
+            data_location_preference TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
+    // Minor data handling (COPPA-like)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user_age_verification (
+            user_id TEXT PRIMARY KEY NOT NULL,
+            is_minor BOOLEAN NOT NULL DEFAULT 0,
+            guardian_consent_given BOOLEAN NOT NULL DEFAULT 0,
+            guardian_email TEXT,
+            age_verified_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );"
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 

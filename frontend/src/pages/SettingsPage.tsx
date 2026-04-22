@@ -103,7 +103,7 @@ const SettingsPage: React.FC = () => {
   };
 
   return (
-    <Card title={t('system_settings')} bordered={false} style={{ maxWidth: 650, margin: '0 auto' }}>
+    <Card title={t('system_settings')} bordered={false} style={{ margin: '0 auto' }}>
       {!user && (
         <Alert
           message="Guest Mode"

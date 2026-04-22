@@ -575,6 +575,72 @@ mod tests {
             .iter()
             .any(|p| p.ctype.mimetype.eq_ignore_ascii_case("text/html")));
     }
+
+    #[test]
+    fn all_email_addresses_parses_multiple() {
+        let emails = all_email_addresses("Alice <alice@example.com>, Bob <bob@example.com>");
+        assert_eq!(emails.len(), 2);
+        assert!(emails.contains(&"alice@example.com".to_string()));
+        assert!(emails.contains(&"bob@example.com".to_string()));
+    }
+
+    #[test]
+    fn all_email_addresses_handles_raw_list() {
+        let emails = all_email_addresses("foo@bar.com, baz@qux.com");
+        assert_eq!(emails.len(), 2);
+    }
+
+    #[test]
+    fn extract_pure_email_handles_angle_brackets() {
+        assert_eq!(extract_pure_email("Test <test@example.com>"), "test@example.com");
+    }
+
+    #[test]
+    fn extract_pure_email_passes_through_plain() {
+        assert_eq!(extract_pure_email("test@example.com"), "test@example.com");
+    }
+
+    #[test]
+    fn normalize_finance_category_maps_bill() {
+        assert_eq!(normalize_finance_category(Some("帳單")), "bill");
+        assert_eq!(normalize_finance_category(Some("bill")), "bill");
+    }
+
+    #[test]
+    fn normalize_finance_category_maps_deposit() {
+        assert_eq!(normalize_finance_category(Some("deposit")), "deposit");
+        assert_eq!(normalize_finance_category(Some("存入")), "deposit");
+    }
+
+    #[test]
+    fn normalize_finance_category_default_expense() {
+        assert_eq!(normalize_finance_category(None), "expense");
+        assert_eq!(normalize_finance_category(Some("random")), "expense");
+    }
+
+    #[test]
+    fn normalize_finance_direction_income() {
+        assert_eq!(normalize_finance_direction(Some("income"), "expense"), "income");
+        assert_eq!(normalize_finance_direction(Some("存入"), "expense"), "income");
+    }
+
+    #[test]
+    fn normalize_finance_direction_expense() {
+        assert_eq!(normalize_finance_direction(Some("expense"), "expense"), "expense");
+        assert_eq!(normalize_finance_direction(Some("支出"), "expense"), "expense");
+    }
+
+    #[test]
+    fn parse_mx_records_extracts_priority() {
+        let output = "10 mx1.example.com.\n20 mx2.example.com.\n5 mx0.example.com.";
+        let mx = parse_mx_records(output);
+        assert_eq!(mx, Some("mx0.example.com".to_string()));
+    }
+
+    #[test]
+    fn parse_mx_records_handles_empty() {
+        assert_eq!(parse_mx_records(""), None);
+    }
 }
 
 async fn log_mail_event(

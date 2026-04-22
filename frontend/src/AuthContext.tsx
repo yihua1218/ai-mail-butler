@@ -31,6 +31,7 @@ interface AuthContextType {
   refreshUser: () => Promise<void>;
   logout: () => void;
   loading: boolean;
+  api: string;
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
@@ -93,7 +94,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider value={{ user, requestMagicLink, verifyToken, refreshUser, logout, loading }}>
+    <AuthContext.Provider value={{ user, requestMagicLink, verifyToken, refreshUser, logout, loading, api: '/api' }}>
       {children}
     </AuthContext.Provider>
   );

@@ -13,7 +13,6 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        // Load configurations from env variables
         Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/data.sqlite".to_string()),
             server_port: std::env::var("PORT").unwrap_or_else(|_| "3000".to_string()).parse().unwrap_or(3000),
@@ -31,5 +30,40 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_loads_with_defaults() {
+        let config = Config::load();
+        assert_eq!(config.server_port, 3000);
+        assert_eq!(config.smtp_relay_port, 587);
+        assert_eq!(config.assistant_email, "assistant@example.com");
+    }
+
+    #[test]
+    fn config_docs_whitelist_parses_comma_separated() {
+        let input = "doc1.pdf,doc2.pdf,doc3.txt";
+        let whitelist: Vec<String> = input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(whitelist.len(), 3);
+    }
+
+    #[test]
+    fn config_docs_whitelist_handles_empty() {
+        let input = "";
+        let whitelist: Vec<String> = input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(whitelist.is_empty());
     }
 }

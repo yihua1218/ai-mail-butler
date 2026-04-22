@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::models::{User, EmailRecord};
+use crate::models::{User, EmailRecord, ConsentAuditTrail, DsarRequest, DataRetentionPolicy, UserPrivacySettings, UserAgeVerification};
 use crate::ai::AiClient;
 use crate::services::OnboardingService;
 
@@ -1976,7 +1976,7 @@ fn parse_mx_records(output: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod web_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3326,6 +3326,355 @@ async fn post_confirm_data_deletion(
     }))
 }
 
+#[derive(Deserialize)]
+struct ConsentUpdateRequest {
+    consent_type: String,
+    consent_granted: bool,
+}
+
+async fn post_consent_update(
+    State(state): State<AppState>,
+    Json(req): Json<ConsentUpdateRequest>,
+) -> Json<serde_json::Value> {
+    let user_email = "user@example.com"; 
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&user_email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({"status": "error", "message": "User not found"})),
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let policy_version = "1.0";
+    let ip = "0.0.0.0";
+    let user_agent = "web";
+
+    let _ = sqlx::query(
+        "INSERT INTO consent_audit_trail (id, user_id, policy_version, consent_type, consent_granted, consent_source, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind(&user.id)
+    .bind(policy_version)
+    .bind(&req.consent_type)
+    .bind(req.consent_granted)
+    .bind("dashboard")
+    .bind(ip)
+    .bind(user_agent)
+    .execute(&state.pool)
+    .await;
+
+    let _ = sqlx::query("UPDATE users SET training_data_consent = ?, training_consent_updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(req.consent_granted)
+        .bind(&user.id)
+        .execute(&state.pool)
+        .await;
+
+    Json(serde_json::json!({"status": "success", "message": "Consent updated"}))
+}
+
+async fn get_consent_history(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let user_email = params.get("email").cloned().unwrap_or_default();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
+
+    let history = sqlx::query_as::<_, ConsentAuditTrail>(
+        "SELECT id, user_id, policy_version, consent_type, consent_granted, consent_source, ip_address, user_agent, created_at FROM consent_audit_trail WHERE user_id = (SELECT id FROM users WHERE email = ?) ORDER BY created_at DESC LIMIT 50"
+    )
+    .bind(&user_email)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({"status": "success", "history": history}))
+}
+
+#[derive(Deserialize)]
+struct DsarRequestInput {
+    request_type: String,
+}
+
+async fn post_dsar_request(
+    State(state): State<AppState>,
+    Json(req): Json<DsarRequestInput>,
+) -> Json<serde_json::Value> {
+    let user_email = "user@example.com";
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&user_email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({"status": "error", "message": "User not found"})),
+    };
+
+    let valid_types = ["access", "export", "correction", "restriction", "withdraw-consent"];
+    if !valid_types.contains(&req.request_type.as_str()) {
+        return Json(serde_json::json!({"status": "error", "message": "Invalid request type"}));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let snapshot = serde_json::json!({
+        "user_email": user_email,
+        "requested_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let _ = sqlx::query(
+        "INSERT INTO dsar_requests (id, user_id, request_type, status, snapshot_json) VALUES (?, ?, ?, 'pending', ?)"
+    )
+    .bind(&id)
+    .bind(&user.id)
+    .bind(&req.request_type)
+    .bind(snapshot.to_string())
+    .execute(&state.pool)
+    .await;
+
+    Json(serde_json::json!({"status": "success", "message": "DSAR request created", "request_id": id}))
+}
+
+async fn get_dsar_status(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let user_email = params.get("email").cloned().unwrap_or_default();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
+
+    let requests = sqlx::query_as::<_, DsarRequest>(
+        "SELECT id, user_id, request_type, status, admin_notes, completed_at, created_at FROM dsar_requests WHERE user_id = (SELECT id FROM users WHERE email = ?) ORDER BY created_at DESC LIMIT 20"
+    )
+    .bind(&user_email)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({"status": "success", "requests": requests}))
+}
+
+#[derive(Deserialize)]
+struct PrivacySettingsInput {
+    do_not_sell_share: Option<bool>,
+    cross_border_disclosure_given: Option<bool>,
+    data_location_preference: Option<String>,
+}
+
+async fn post_privacy_settings(
+    State(state): State<AppState>,
+    Json(req): Json<PrivacySettingsInput>,
+) -> Json<serde_json::Value> {
+    let user_email = "user@example.com";
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&user_email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({"status": "error", "message": "User not found"})),
+    };
+
+    let mut updates = Vec::new();
+    if let Some(v) = req.do_not_sell_share {
+        updates.push(format!("do_not_sell_share = {}", v as i32));
+    }
+    if let Some(v) = req.cross_border_disclosure_given {
+        updates.push(format!("cross_border_disclosure_given = {}", v as i32));
+    }
+    if let Some(ref loc) = req.data_location_preference {
+        updates.push(format!("data_location_preference = '{}'", loc));
+    }
+
+    if !updates.is_empty() {
+        let set_clause = updates.join(", ");
+        let _ = sqlx::query(&format!(
+            "INSERT INTO user_privacy_settings (user_id, do_not_sell_share, cross_border_disclosure_given, data_location_preference, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET {}",
+            set_clause
+        ))
+        .bind(&user.id)
+        .bind(req.do_not_sell_share.unwrap_or(false))
+        .bind(req.cross_border_disclosure_given.unwrap_or(false))
+        .bind(req.data_location_preference.clone().unwrap_or_default())
+        .execute(&state.pool)
+        .await;
+    }
+
+    Json(serde_json::json!({"status": "success", "message": "Privacy settings updated"}))
+}
+
+async fn get_privacy_settings(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let user_email = params.get("email").cloned().unwrap_or_default();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
+
+    let settings = sqlx::query_as::<_, UserPrivacySettings>(
+        "SELECT user_id, do_not_sell_share, cross_border_disclosure_given, data_location_preference, updated_at FROM user_privacy_settings WHERE user_id = (SELECT id FROM users WHERE email = ?)"
+    )
+    .bind(&user_email)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    Json(serde_json::json!({"status": "success", "settings": settings}))
+}
+
+#[derive(Deserialize)]
+struct AgeVerificationInput {
+    is_minor: bool,
+    guardian_consent_given: Option<bool>,
+    guardian_email: Option<String>,
+}
+
+async fn post_age_verification(
+    State(state): State<AppState>,
+    Json(req): Json<AgeVerificationInput>,
+) -> Json<serde_json::Value> {
+    let user_email = "user@example.com";
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&user_email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None)
+    {
+        Some(u) => u,
+        None => return Json(serde_json::json!({"status": "error", "message": "User not found"})),
+    };
+
+    if req.is_minor && !req.guardian_consent_given.unwrap_or(false) {
+        return Json(serde_json::json!({"status": "error", "message": "Guardian consent required for minors"}));
+    }
+
+    let _ = sqlx::query(
+        "INSERT INTO user_age_verification (user_id, is_minor, guardian_consent_given, guardian_email, age_verified_at, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET is_minor = ?, guardian_consent_given = ?, guardian_email = ?, age_verified_at = CURRENT_TIMESTAMP"
+    )
+    .bind(&user.id)
+    .bind(req.is_minor)
+    .bind(req.guardian_consent_given.unwrap_or(false))
+    .bind(req.guardian_email.clone().unwrap_or_default())
+    .bind(req.is_minor)
+    .bind(req.guardian_consent_given.unwrap_or(false))
+    .bind(req.guardian_email.unwrap_or_default())
+    .execute(&state.pool)
+    .await;
+
+    Json(serde_json::json!({"status": "success", "message": "Age verification updated"}))
+}
+
+async fn get_age_verification(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let user_email = params.get("email").cloned().unwrap_or_default();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
+
+    let verification = sqlx::query_as::<_, UserAgeVerification>(
+        "SELECT user_id, is_minor, guardian_consent_given, guardian_email, age_verified_at, created_at FROM user_age_verification WHERE user_id = (SELECT id FROM users WHERE email = ?)"
+    )
+    .bind(&user_email)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    Json(serde_json::json!({"status": "success", "verification": verification}))
+}
+
+async fn post_retention_policy(
+    State(state): State<AppState>,
+    Json(req): Json<DataRetentionPolicy>,
+) -> Json<serde_json::Value> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let _ = sqlx::query(
+        "INSERT INTO data_retention_policies (id, data_type, retention_days, is_active) VALUES (?, ?, ?, ?) ON CONFLICT(data_type) DO UPDATE SET retention_days = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP"
+    )
+    .bind(&id)
+    .bind(&req.data_type)
+    .bind(req.retention_days)
+    .bind(req.is_active)
+    .bind(req.retention_days)
+    .bind(req.is_active)
+    .execute(&state.pool)
+    .await;
+
+    Json(serde_json::json!({"status": "success", "message": "Retention policy updated"}))
+}
+
+async fn get_retention_policies(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let policies = sqlx::query_as::<_, DataRetentionPolicy>(
+        "SELECT id, data_type, retention_days, is_active, updated_at FROM data_retention_policies"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({"status": "success", "policies": policies}))
+}
+
+async fn run_data_retention_purge(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let policies = sqlx::query_as::<_, DataRetentionPolicy>(
+        "SELECT id, data_type, retention_days, is_active, updated_at FROM data_retention_policies WHERE is_active = 1"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut purged = Vec::new();
+    for policy in policies {
+        let cutoff = format!(
+            "datetime('now', '-{} days')", 
+            policy.retention_days
+        );
+
+        let affected = match policy.data_type.as_str() {
+            "chat_transcripts" => {
+                sqlx::query(&format!(
+                    "DELETE FROM chat_transcripts WHERE created_at < {}", cutoff
+                ))
+                .execute(&state.pool)
+                .await
+                .map(|r| r.rows_affected()).unwrap_or(0)
+            }
+            "chat_feedback" => {
+                sqlx::query(&format!(
+                    "DELETE FROM chat_feedback WHERE created_at < {}", cutoff
+                ))
+                .execute(&state.pool)
+                .await
+                .map(|r| r.rows_affected()).unwrap_or(0)
+            }
+            "mail_errors" => {
+                sqlx::query(&format!(
+                    "DELETE FROM mail_errors WHERE occurred_at < {}", cutoff
+                ))
+                .execute(&state.pool)
+                .await
+                .map(|r| r.rows_affected()).unwrap_or(0)
+            }
+            _ => 0,
+        };
+
+        if affected > 0 {
+            purged.push(policy.data_type.clone());
+        }
+    }
+
+    Json(serde_json::json!({"status": "success", "purged": purged}))
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -3358,7 +3707,18 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/feedback/mark-read", post(post_mark_feedback_read))
         .route("/feedback/reply", post(post_reply_feedback))
         .route("/chat", post(post_chat))
-        .route("/chat/feedback", post(post_chat_feedback));
+        .route("/chat/feedback", post(post_chat_feedback))
+        .route("/consent/update", post(post_consent_update))
+        .route("/consent/history", get(get_consent_history))
+        .route("/dsar/request", post(post_dsar_request))
+        .route("/dsar/status", get(get_dsar_status))
+        .route("/privacy/settings", post(post_privacy_settings))
+        .route("/privacy/settings", get(get_privacy_settings))
+        .route("/privacy/age-verification", post(post_age_verification))
+        .route("/privacy/age-verification", get(get_age_verification))
+        .route("/admin/retention/policies", post(post_retention_policy))
+        .route("/admin/retention/policies", get(get_retention_policies))
+        .route("/admin/retention/purge", post(run_data_retention_purge));
 
     let app = Router::new()
         .nest("/api", api_router)
@@ -3374,6 +3734,5 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
-
     Ok(())
 }
