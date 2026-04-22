@@ -182,3 +182,7 @@
     border-right-color: var(--border);
   }
 }
+
+.finance-linked-row > td {
+  background: #e6f4ff !important;
+}

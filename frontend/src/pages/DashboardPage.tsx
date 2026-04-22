@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -19,6 +19,7 @@ import {
 import { MailOutlined, MessageOutlined, RobotOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { GUEST_NAME_KEY } from '../Chat';
 
@@ -27,6 +28,8 @@ const { Title, Paragraph } = Typography;
 const DashboardPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const isPrivileged = user?.role === 'admin' || user?.role === 'developer';
 
   const formatDateTimeLocal = (date: Date) => {
@@ -73,6 +76,11 @@ const DashboardPage: React.FC = () => {
   const [replyingFeedback, setReplyingFeedback] = useState<any | null>(null);
   const [replyText, setReplyText] = useState<string>('');
   const [replying, setReplying] = useState(false);
+  const [selectedEmailRowKeys, setSelectedEmailRowKeys] = useState<React.Key[]>([]);
+  const [processingSelected, setProcessingSelected] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [resultsModalVisible, setResultsModalVisible] = useState(false);
+  const [resultsData, setResultsData] = useState<any>(null);
 
   const loadFeedback = async () => {
     if (!user?.email) return;
@@ -119,13 +127,8 @@ const DashboardPage: React.FC = () => {
   };
 
   useEffect(() => {
-    const url = user ? `/api/dashboard?email=${user.email}` : '/api/dashboard';
-    axios.get(url).then((res) => {
-      setGlobalStats(res.data.global_stats);
-      if (res.data.type === 'admin' || res.data.type === 'personal') {
-        setPersonalEmails(res.data.personal_emails);
-        setPersonalStats(res.data.personal_stats);
-      }
+    reloadDashboard().catch(() => {
+      setPersonalEmails([]);
     });
 
     if (isPrivileged && user?.email) {
@@ -140,6 +143,25 @@ const DashboardPage: React.FC = () => {
 
     loadFeedback();
   }, [user, isPrivileged]);
+
+  const emailIdFromQuery = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get('emailId') || '';
+  }, [location.search]);
+
+  const reloadDashboard = async () => {
+    const url = user ? `/api/dashboard?email=${user.email}` : '/api/dashboard';
+    const res = await axios.get(url);
+    setGlobalStats(res.data.global_stats);
+    if (res.data.type === 'admin' || res.data.type === 'personal') {
+      setPersonalEmails(res.data.personal_emails || []);
+      setPersonalStats(res.data.personal_stats);
+    }
+  };
+
+  const filteredEmails = statusFilter === 'all'
+    ? personalEmails
+    : personalEmails.filter((e: any) => e.status === statusFilter);
 
   const columns = [
     { title: 'Subject', dataIndex: 'subject', key: 'subject' },
@@ -169,6 +191,16 @@ const DashboardPage: React.FC = () => {
       dataIndex: 'received_at',
       key: 'received_at',
       render: (value: string) => formatInUserTimezone(value),
+    },
+    {
+      title: 'Action',
+      key: 'action',
+      width: 180,
+      render: (_: unknown, record: any) => (
+        <Button size="small" onClick={() => navigate(`/finance?emailId=${encodeURIComponent(record.id)}`)}>
+          {t('view_finance')}
+        </Button>
+      ),
     },
   ];
 
@@ -303,6 +335,26 @@ const DashboardPage: React.FC = () => {
     }] : []),
   ];
 
+  const processSelectedEmails = async () => {
+    if (!user?.email || selectedEmailRowKeys.length === 0) return;
+    setProcessingSelected(true);
+    try {
+      const emailIds = selectedEmailRowKeys.map((id) => String(id));
+      const res = await axios.post('/api/emails/process-manual', {
+        email: user.email,
+        email_ids: emailIds,
+      });
+      setResultsData(res.data);
+      setResultsModalVisible(true);
+      setSelectedEmailRowKeys([]);
+      await reloadDashboard();
+    } catch {
+      message.error(t('process_selected_failed'));
+    } finally {
+      setProcessingSelected(false);
+    }
+  };
+
   const LogFilterBar = () => (
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
@@ -409,6 +461,119 @@ const DashboardPage: React.FC = () => {
     ) : null
   );
 
+  const ResultsModal = () => {
+    if (!resultsData) return null;
+    const { processed, skipped, failed, results } = resultsData;
+    return (
+      <Modal
+        title={t('process_results')}
+        open={resultsModalVisible}
+        onCancel={() => setResultsModalVisible(false)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setResultsModalVisible(false)}>
+            {t('close')}
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
+            <Card bordered={false} hoverable>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#34c759' }}>{processed}</div>
+                <div style={{ color: '#86868b', fontSize: '12px' }}>{t('processed_count')}</div>
+              </div>
+            </Card>
+            <Card bordered={false} hoverable>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ff9500' }}>{skipped}</div>
+                <div style={{ color: '#86868b', fontSize: '12px' }}>{t('skipped_count')}</div>
+              </div>
+            </Card>
+            <Card bordered={false} hoverable>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ff3b30' }}>{failed}</div>
+                <div style={{ color: '#86868b', fontSize: '12px' }}>{t('failed_count')}</div>
+              </div>
+            </Card>
+          </div>
+          <div>
+            <Title level={5}>{t('details')}</Title>
+            <Table
+              dataSource={results || []}
+              columns={[
+                { title: t('email_id'), dataIndex: 'email_id', key: 'email_id', width: '50%', render: (v) => <code style={{ fontSize: '11px' }}>{v?.substring(0, 8)}...</code> },
+                { title: t('result'), dataIndex: 'result', key: 'result', width: '25%', render: (v) => <Tag color={v === 'processed' ? 'green' : v === 'skipped' ? 'gold' : 'red'}>{v}</Tag> },
+                { title: t('reason'), dataIndex: 'reason', key: 'reason', width: '25%', render: (v) => v || '-' },
+              ]}
+              pagination={false}
+              size="small"
+            />
+          </div>
+        </Space>
+      </Modal>
+    );
+  };
+
+  const EmailTableWithFilter = () => (
+    <Card bordered={false} title={t('your_emails')}>
+      <Space direction="vertical" style={{ width: '100%', marginBottom: 12 }}>
+        <Space wrap>
+          <Button
+            type={statusFilter === 'all' ? 'primary' : 'default'}
+            onClick={() => setStatusFilter('all')}
+          >
+            {t('filter_all')}
+          </Button>
+          <Button
+            type={statusFilter === 'pending' ? 'primary' : 'default'}
+            onClick={() => setStatusFilter('pending')}
+          >
+            {t('filter_pending')}
+          </Button>
+          <Button
+            type={statusFilter === 'drafted' ? 'primary' : 'default'}
+            onClick={() => setStatusFilter('drafted')}
+          >
+            {t('filter_drafted')}
+          </Button>
+          <Button
+            type={statusFilter === 'replied' ? 'primary' : 'default'}
+            onClick={() => setStatusFilter('replied')}
+          >
+            {t('filter_replied')}
+          </Button>
+        </Space>
+        <Space>
+          <Button
+            type="primary"
+            disabled={selectedEmailRowKeys.length === 0}
+            loading={processingSelected}
+            onClick={processSelectedEmails}
+          >
+            {t('process_with_ai')}
+          </Button>
+          <span style={{ color: '#86868b' }}>
+            {t('process_selected')}: {selectedEmailRowKeys.length}
+          </span>
+        </Space>
+      </Space>
+      <Table
+        dataSource={filteredEmails}
+        rowKey="id"
+        columns={columns}
+        pagination={{ pageSize: 5 }}
+        rowSelection={{
+          selectedRowKeys: selectedEmailRowKeys,
+          onChange: (keys) => setSelectedEmailRowKeys(keys),
+          getCheckboxProps: (record: any) => ({
+            disabled: record.status !== 'pending',
+          }),
+        }}
+        rowClassName={(record: any) => (emailIdFromQuery && record.id === emailIdFromQuery ? 'finance-linked-row' : '')}
+      />
+    </Card>
+  );
+
   if (isPrivileged) {
     return (
       <div>
@@ -419,9 +584,7 @@ const DashboardPage: React.FC = () => {
         <PersonalStatsDisplay />
         <Row gutter={[24, 24]}>
           <Col xs={24}>
-            <Card bordered={false} title="Your Emails">
-              <Table dataSource={personalEmails} rowKey="id" columns={columns} pagination={{ pageSize: 5 }} />
-            </Card>
+            <EmailTableWithFilter />
           </Col>
           <Col xs={24}>
             <Card
@@ -464,6 +627,8 @@ const DashboardPage: React.FC = () => {
             placeholder="Type reply that will be emailed to the user from AI assistant mailbox"
           />
         </Modal>
+
+        <ResultsModal />
       </div>
     );
   }
@@ -476,9 +641,7 @@ const DashboardPage: React.FC = () => {
         </div>
         <GlobalStatsDisplay />
         <PersonalStatsDisplay />
-        <Card bordered={false} title="Your Emails">
-          <Table dataSource={personalEmails} rowKey="id" columns={columns} />
-        </Card>
+        <EmailTableWithFilter />
         <Card bordered={false} title="Your Mail Server Logs" style={{ marginTop: 24 }}>
           <LogFilterBar />
           {mailErrors.length === 0
@@ -490,6 +653,8 @@ const DashboardPage: React.FC = () => {
             ? <Alert message="No feedback submitted yet." type="info" showIcon />
             : <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} pagination={{ pageSize: 8 }} size="small" />}
         </Card>
+
+        <ResultsModal />
       </div>
     );
   }

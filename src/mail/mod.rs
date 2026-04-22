@@ -352,7 +352,7 @@ fn extract_json_segment(raw: &str) -> String {
     raw.trim().to_string()
 }
 
-async fn analyze_and_store_financial_records(
+pub(crate) async fn analyze_and_store_financial_records(
     pool: &SqlitePool,
     ai_client: &AiClient,
     user: &User,
@@ -920,11 +920,17 @@ impl MailService {
                                     .await
                                     .unwrap_or_default();
 
-                                    let financial_source_text = if pdf_texts.is_empty() {
+                                    let stored_content = if pdf_texts.is_empty() {
                                         body.clone()
                                     } else {
                                         format!("{}\n\n[PDF Extracted]\n{}", body, pdf_texts.join("\n---\n"))
                                     };
+
+                                    let _ = sqlx::query("UPDATE emails SET stored_content = ? WHERE id = ?")
+                                        .bind(&stored_content)
+                                        .bind(&id)
+                                        .execute(&pool)
+                                        .await;
 
                                     analyze_and_store_financial_records(
                                         &pool,
@@ -932,7 +938,7 @@ impl MailService {
                                         &u,
                                         &id,
                                         &subject,
-                                        &financial_source_text,
+                                        &stored_content,
                                     )
                                     .await;
 

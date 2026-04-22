@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Card, Descriptions, Typography, Spin, Alert, Tag } from 'antd';
+import { Card, Descriptions, Typography, Spin, Alert, Tag, Button, Space, Tooltip } from 'antd';
+import { CheckOutlined, CopyOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 
@@ -24,6 +25,7 @@ export const About: React.FC = () => {
   const [info, setInfo] = useState<BuildInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     axios.get('/api/about')
@@ -42,6 +44,18 @@ export const About: React.FC = () => {
 
   const profileColor = info?.profile === 'release' ? 'green' : 'orange';
   const isZh = i18n.language === 'zh-TW';
+
+  const handleCopy = async () => {
+    const email = info?.assistant_email;
+    if (!email) return;
+    try {
+      await navigator.clipboard.writeText(email);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   const text = isZh
     ? {
@@ -103,9 +117,19 @@ export const About: React.FC = () => {
           column={{ xxl: 1, xl: 1, lg: 1, md: 1, sm: 1, xs: 1 }}
         >
           <Descriptions.Item label={text.mailbox}>
-            <code style={{ fontFamily: 'monospace', background: '#f5f5f7', padding: '2px 8px', borderRadius: 4 }}>
-              {info?.assistant_email}
-            </code>
+            <Space size={4}>
+              <code style={{ fontFamily: 'monospace', background: '#f5f5f7', padding: '2px 8px', borderRadius: 4 }}>
+                {info?.assistant_email}
+              </code>
+              <Tooltip title={copied ? (isZh ? '已複製' : 'Copied') : (isZh ? '複製信箱' : 'Copy mailbox')}>
+                <Button
+                  type="text"
+                  aria-label={isZh ? '複製助理信箱' : 'Copy assistant mailbox'}
+                  icon={copied ? <CheckOutlined /> : <CopyOutlined />}
+                  onClick={handleCopy}
+                />
+              </Tooltip>
+            </Space>
           </Descriptions.Item>
           <Descriptions.Item label={isZh ? '功能範圍' : 'Scope'}>{text.scope}</Descriptions.Item>
           <Descriptions.Item label={isZh ? '使用限制' : 'Limitations'}>{text.limits}</Descriptions.Item>

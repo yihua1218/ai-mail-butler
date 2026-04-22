@@ -1,11 +1,13 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Card, Space, Table, Tag } from 'antd';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Card, Space, Table, Tag } from 'antd';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 
 type FinanceRecord = {
   id: string;
+  email_id: string;
   subject?: string;
   reason: string;
   category: string;
@@ -14,6 +16,12 @@ type FinanceRecord = {
   currency: string;
   month_key: string;
   month_total_after: number;
+  finance_type?: string;
+  due_date?: string;
+  statement_amount?: number;
+  issuing_bank?: string;
+  card_last4?: string;
+  transaction_month_key?: string;
   created_at: string;
 };
 
@@ -26,7 +34,9 @@ type MonthlyFinance = {
 
 const FinanceAnalysisPage: React.FC = () => {
   const { user } = useAuth();
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [records, setRecords] = useState<FinanceRecord[]>([]);
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
 
@@ -47,6 +57,11 @@ const FinanceAnalysisPage: React.FC = () => {
       hour12: false,
     }).format(date);
   };
+
+  const emailIdFromQuery = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get('emailId') || '';
+  }, [location.search]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -74,16 +89,36 @@ const FinanceAnalysisPage: React.FC = () => {
     { title: 'Updated At', dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => formatInUserTimezone(v) },
   ];
 
+  const filteredRecords = emailIdFromQuery
+    ? records.filter((row) => row.email_id === emailIdFromQuery)
+    : records;
+
   const recordColumns = [
     { title: 'Time', dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => formatInUserTimezone(v) },
     { title: 'Subject', dataIndex: 'subject', key: 'subject', ellipsis: true },
     { title: 'Reason', dataIndex: 'reason', key: 'reason', ellipsis: true },
+    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 120, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{v}</Tag> : '-' },
     { title: 'Category', dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{v}</Tag> },
     { title: 'Direction', dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{v}</Tag> },
     { title: 'Amount', dataIndex: 'amount', key: 'amount', width: 130, render: (v: number) => v?.toLocaleString() ?? '0' },
+    { title: t('statement_amount'), dataIndex: 'statement_amount', key: 'statement_amount', width: 150, render: (v?: number) => (typeof v === 'number' ? v.toLocaleString() : '-') },
+    { title: t('due_date'), dataIndex: 'due_date', key: 'due_date', width: 130, render: (v?: string) => v || '-' },
+    { title: t('issuing_bank'), dataIndex: 'issuing_bank', key: 'issuing_bank', width: 140, render: (v?: string) => v || '-' },
+    { title: t('card_last4'), dataIndex: 'card_last4', key: 'card_last4', width: 120, render: (v?: string) => v || '-' },
     { title: 'Currency', dataIndex: 'currency', key: 'currency', width: 100 },
     { title: 'Month', dataIndex: 'month_key', key: 'month_key', width: 100 },
+    { title: t('transaction_month_key'), dataIndex: 'transaction_month_key', key: 'transaction_month_key', width: 120, render: (v?: string) => v || '-' },
     { title: 'Month Running Total', dataIndex: 'month_total_after', key: 'month_total_after', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
+    {
+      title: 'Action',
+      key: 'action',
+      width: 120,
+      render: (_: unknown, row: FinanceRecord) => (
+        <Button size="small" onClick={() => navigate(`/dashboard?emailId=${encodeURIComponent(row.email_id)}`)}>
+          {t('view_email')}
+        </Button>
+      ),
+    },
   ];
 
   return (
@@ -91,8 +126,14 @@ const FinanceAnalysisPage: React.FC = () => {
       <Card bordered={false} title="Monthly Amount Summary">
         <Table rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`} columns={monthlyColumns as any} dataSource={monthly} pagination={{ pageSize: 12 }} />
       </Card>
-      <Card bordered={false} title="Email Financial Analysis Records">
-        <Table rowKey="id" columns={recordColumns as any} dataSource={records} pagination={{ pageSize: 10 }} />
+      <Card bordered={false} title={emailIdFromQuery ? `Email Financial Analysis Records (Filtered by ${emailIdFromQuery})` : 'Email Financial Analysis Records'}>
+        <Table
+          rowKey="id"
+          columns={recordColumns as any}
+          dataSource={filteredRecords}
+          pagination={{ pageSize: 10 }}
+          rowClassName={(record: FinanceRecord) => (emailIdFromQuery && record.email_id === emailIdFromQuery ? 'finance-linked-row' : '')}
+        />
       </Card>
     </Space>
   );

@@ -84,6 +84,12 @@ struct FinanceRecordRow {
     currency: String,
     month_key: String,
     month_total_after: f64,
+    finance_type: Option<String>,
+    due_date: Option<String>,
+    statement_amount: Option<f64>,
+    issuing_bank: Option<String>,
+    card_last4: Option<String>,
+    transaction_month_key: Option<String>,
     created_at: String,
 }
 
@@ -901,6 +907,13 @@ fn role_for_email(state: &AppState, email: &str) -> String {
 #[derive(Deserialize)]
 struct AuthQuery {
     email: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ManualProcessRequest {
+    email: String,
+    email_ids: Vec<String>,
+    force_reextract: Option<bool>,
 }
 
 async fn get_me(
@@ -1783,6 +1796,97 @@ fn parse_mx_records(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn find_header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| i + 4)
+    }
+
+    async fn start_mock_ai_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ai listener");
+        let addr = listener.local_addr().expect("mock ai local addr");
+
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept mock ai conn");
+
+            let mut buf = Vec::new();
+            let mut tmp = [0_u8; 1024];
+            let mut header_end = None;
+            let mut content_len = 0_usize;
+
+            loop {
+                let n = socket.read(&mut tmp).await.expect("read mock ai request");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+
+                if header_end.is_none() {
+                    if let Some(h) = find_header_end(&buf) {
+                        header_end = Some(h);
+                        let headers = String::from_utf8_lossy(&buf[..h]);
+                        for line in headers.lines() {
+                            if let Some((name, val)) = line.split_once(':') {
+                                if name.trim().eq_ignore_ascii_case("content-length") {
+                                    content_len = val.trim().parse::<usize>().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(h) = header_end {
+                    if buf.len() >= h + content_len {
+                        break;
+                    }
+                }
+            }
+
+            let h = header_end.expect("request header end");
+            let body_bytes = &buf[h..h + content_len];
+            let body = String::from_utf8_lossy(body_bytes);
+            let from_stored = body.contains("STORED_MARKER_ONLY");
+
+            let reason = if from_stored {
+                "from_stored"
+            } else {
+                "from_preview"
+            };
+
+            let ai_content = format!(
+                "[{{\"reason\":\"{}\",\"amount\":12.5,\"category\":\"expense\",\"direction\":\"expense\",\"currency\":\"TWD\"}}]",
+                reason
+            );
+            let payload = serde_json::json!({
+                "choices": [{
+                    "message": {"content": ai_content},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "total_tokens": 1,
+                    "completion_tokens": 1,
+                    "prompt_tokens": 1
+                }
+            })
+            .to_string();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write mock ai response");
+        });
+
+        (format!("http://{}", addr), handle)
+    }
 
     #[test]
     fn looks_like_email_rule_detects_common_intents() {
@@ -1927,6 +2031,85 @@ mod tests {
             .await
             .expect("count rows");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn manual_process_emails_prefers_stored_content_over_preview() {
+        let (mock_ai_url, mock_ai_task) = start_mock_ai_server().await;
+        let old_ai_base = std::env::var("AI_API_BASE_URL").ok();
+        std::env::set_var("AI_API_BASE_URL", &mock_ai_url);
+
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email_id = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query("INSERT INTO users (id, email, is_onboarded, role) VALUES (?, ?, 1, 'user')")
+            .bind(&user_id)
+            .bind("test@example.com")
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        sqlx::query("INSERT INTO emails (id, user_id, subject, preview, stored_content, status) VALUES (?, ?, ?, ?, ?, 'pending')")
+            .bind(&email_id)
+            .bind(&user_id)
+            .bind("Statement")
+            .bind("PREVIEW_MARKER_ONLY")
+            .bind("STORED_MARKER_ONLY")
+            .execute(&pool)
+            .await
+            .expect("insert email");
+
+        let config = crate::config::Config {
+            database_url: "sqlite::memory:".to_string(),
+            server_port: 3000,
+            ai_api_key: String::new(),
+            developer_email: None,
+            smtp_relay_host: None,
+            smtp_relay_port: 587,
+            smtp_relay_user: None,
+            smtp_relay_pass: None,
+            assistant_email: "assistant@example.com".to_string(),
+            docs_whitelist: vec![],
+        };
+
+        let state = AppState {
+            pool: pool.clone(),
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+
+        let payload = ManualProcessRequest {
+            email: "test@example.com".to_string(),
+            email_ids: vec![email_id.clone()],
+            force_reextract: Some(true),
+        };
+
+        let Json(resp) = post_manual_process_emails(State(state), Json(payload)).await;
+        assert_eq!(resp["status"], "success");
+        assert_eq!(resp["processed"], 1);
+
+        let reason: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM email_financial_records WHERE user_id = ? AND email_id = ? ORDER BY created_at DESC LIMIT 1"
+        )
+        .bind(&user_id)
+        .bind(&email_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("query extracted reason");
+        assert_eq!(reason.as_deref(), Some("from_stored"));
+
+        mock_ai_task.await.expect("mock ai task done");
+
+        match old_ai_base {
+            Some(v) => std::env::set_var("AI_API_BASE_URL", v),
+            None => std::env::remove_var("AI_API_BASE_URL"),
+        }
     }
 }
 
@@ -2186,6 +2369,93 @@ async fn get_rules(
     Json(serde_json::json!({ "status": "success", "rules": rules }))
 }
 
+async fn post_manual_process_emails(
+    State(state): State<AppState>,
+    Json(payload): Json<ManualProcessRequest>,
+) -> Json<serde_json::Value> {
+    if payload.email.trim().is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    }
+    if payload.email_ids.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "No email ids provided" }));
+    }
+
+    let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&payload.email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None) else {
+            return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+        };
+
+    let force_reextract = payload.force_reextract.unwrap_or(false);
+    let mut processed = 0_i64;
+    let mut skipped = 0_i64;
+    let mut failed = 0_i64;
+    let mut results = Vec::new();
+
+    for email_id in payload.email_ids {
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, String)>(
+            "SELECT id, subject, preview, stored_content, status FROM emails WHERE id = ? AND user_id = ?"
+        )
+        .bind(&email_id)
+        .bind(&user.id)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+
+        let Some((id, subject, preview, stored_content, status)) = row else {
+            failed += 1;
+            results.push(serde_json::json!({ "email_id": email_id, "result": "failed", "reason": "Email not found" }));
+            continue;
+        };
+
+        if status != "pending" && !force_reextract {
+            skipped += 1;
+            results.push(serde_json::json!({ "email_id": id, "result": "skipped", "reason": "Status is not pending" }));
+            continue;
+        }
+
+        if force_reextract {
+            let _ = sqlx::query("DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?")
+                .bind(&user.id)
+                .bind(&id)
+                .execute(&state.pool)
+                .await;
+        }
+
+        let source_text = stored_content
+            .filter(|s| !s.trim().is_empty())
+            .or(preview)
+            .unwrap_or_default();
+        crate::mail::analyze_and_store_financial_records(
+            &state.pool,
+            &state.ai_client,
+            &user,
+            &id,
+            subject.as_deref().unwrap_or("(no subject)"),
+            &source_text,
+        )
+        .await;
+
+        let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+            .bind(&id)
+            .execute(&state.pool)
+            .await;
+
+        processed += 1;
+        results.push(serde_json::json!({ "email_id": id, "result": "processed" }));
+    }
+
+    Json(serde_json::json!({
+        "status": "success",
+        "processed": processed,
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+    }))
+}
+
 async fn get_finance_records(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
@@ -2199,7 +2469,7 @@ async fn get_finance_records(
     };
 
     let rows = sqlx::query_as::<_, FinanceRecordRow>(
-        "SELECT id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after, CAST(created_at AS TEXT) as created_at \
+        "SELECT id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after, finance_type, due_date, statement_amount, issuing_bank, card_last4, transaction_month_key, CAST(created_at AS TEXT) as created_at \
          FROM email_financial_records WHERE user_id = ? ORDER BY created_at DESC LIMIT 500"
     )
     .bind(&user_id)
@@ -2745,6 +3015,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/rules/delete", post(post_delete_rule))
         .route("/finance/records", get(get_finance_records))
         .route("/finance/monthly", get(get_finance_monthly))
+        .route("/emails/process-manual", post(post_manual_process_emails))
         .route("/auto-replies", get(get_auto_replies))
         .route("/auto-replies/send", post(post_send_auto_reply))
         .route("/auto-replies/delete", post(post_delete_auto_reply))

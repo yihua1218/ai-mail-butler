@@ -79,6 +79,10 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN stored_content TEXT").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_emails_user_received ON emails(user_id, received_at DESC)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_emails_user_status_received ON emails(user_id, status, received_at DESC)").execute(&pool).await;
+
     // User-defined and chat-captured email processing rules.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS email_rules (
@@ -236,6 +240,12 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             currency TEXT NOT NULL DEFAULT 'TWD',
             month_key TEXT NOT NULL,
             month_total_after REAL NOT NULL DEFAULT 0,
+            finance_type TEXT,
+            due_date TEXT,
+            statement_amount REAL,
+            issuing_bank TEXT,
+            card_last4 TEXT,
+            transaction_month_key TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id),
             FOREIGN KEY(email_id) REFERENCES emails(id)
@@ -261,6 +271,15 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
 
     let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN month_total_after REAL NOT NULL DEFAULT 0").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN currency TEXT NOT NULL DEFAULT 'TWD'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN finance_type TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN due_date TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN statement_amount REAL").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN issuing_bank TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN card_last4 TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN transaction_month_key TEXT").execute(&pool).await;
+
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
 
     Ok(pool)
 }
