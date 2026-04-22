@@ -11,29 +11,29 @@ Increase unit-test coverage for core backend behavior first, then expand to comp
 Measurement command:
 `LLVM_COV=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-cov LLVM_PROFDATA=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-profdata cargo llvm-cov --summary-only`
 
-| Metric | Current Value |
-|---|---:|
-| Date | 2026-04-22 |
-| Backend line coverage | 15.41% |
-| Backend function coverage | 23.20% |
-| Backend region coverage | 15.80% |
-| Frontend coverage | Not measured yet |
+| Metric                    |    Current Value |
+| ------------------------- | ---------------: |
+| Date                      |       2026-04-22 |
+| Backend line coverage     |           15.41% |
+| Backend function coverage |           23.20% |
+| Backend region coverage   |           15.80% |
+| Frontend coverage         | Not measured yet |
 
 ### Coverage Scope Status
-| Test Scope | Status | Notes |
-|---|---|---|
-| `first_email_address` parser logic | Covered | `mail` helper unit test exists |
-| MIME attachment and inline text part collection | Covered | `mail` helper unit test exists |
-| Rule intent detection and dedup insertion | Covered | `web` unit tests exist |
-| MX parsing helper behavior | Covered | `web` unit tests exist |
-| Training consent answer parsing | Covered | `web` unit tests exist |
-| Training de-identification regex masking | Covered | `web` unit tests exist |
-| Onboarding question progression | Covered | `services` unit test exists |
-| Settings persistence for consent timestamps | Not Covered | Needs DB-level tests |
-| Consent-gated training export endpoint auth | Not Covered | Needs API authorization tests |
-| Transcript write on successful chat response | Not Covered | Needs API flow tests |
-| GDPR deletion cleanup for `chat_transcripts` | Not Covered | Needs transaction/cleanup tests |
-| Frontend settings consent switch behavior | Not Covered | Needs Vitest/RTL tests |
+| Test Scope                                      | Status      | Notes                           |
+| ----------------------------------------------- | ----------- | ------------------------------- |
+| `first_email_address` parser logic              | Covered     | `mail` helper unit test exists  |
+| MIME attachment and inline text part collection | Covered     | `mail` helper unit test exists  |
+| Rule intent detection and dedup insertion       | Covered     | `web` unit tests exist          |
+| MX parsing helper behavior                      | Covered     | `web` unit tests exist          |
+| Training consent answer parsing                 | Covered     | `web` unit tests exist          |
+| Training de-identification regex masking        | Covered     | `web` unit tests exist          |
+| Onboarding question progression                 | Covered     | `services` unit test exists     |
+| Settings persistence for consent timestamps     | Not Covered | Needs DB-level tests            |
+| Consent-gated training export endpoint auth     | Not Covered | Needs API authorization tests   |
+| Transcript write on successful chat response    | Not Covered | Needs API flow tests            |
+| GDPR deletion cleanup for `chat_transcripts`    | Not Covered | Needs transaction/cleanup tests |
+| Frontend settings consent switch behavior       | Not Covered | Needs Vitest/RTL tests          |
 
 ## Phase 1 (Immediate)
 Target: strengthen core safety and correctness paths.
