@@ -334,16 +334,14 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
 pub async fn cleanup_expired_data(pool: &SqlitePool) -> Result<u64> {
     let mut total_deleted: u64 = 0;
 
+    // Use correlated subquery with explicit table alias to avoid ambiguity
     let rows_deleted = sqlx::query(
         "DELETE FROM chat_transcripts
-         WHERE user_id IN (
-             SELECT id FROM users
-             WHERE julianday('now') - julianday(COALESCE(created_at, '1970-01-01')) > data_retention_days
-         )
-         OR (created_at IS NOT NULL AND julianday('now') - julianday(created_at) > (
-             SELECT COALESCE(u.data_retention_days, 365)
-             FROM users u WHERE u.id = chat_transcripts.user_id
-         ))"
+         WHERE created_at IS NOT NULL
+           AND julianday('now') - julianday(created_at) > (
+               SELECT COALESCE(u.data_retention_days, 365)
+               FROM users u WHERE u.id = chat_transcripts.user_id
+           )"
     )
     .execute(pool)
     .await

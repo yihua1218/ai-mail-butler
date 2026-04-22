@@ -108,7 +108,7 @@ const AnalyticsPage: React.FC = () => {
         <Col xs={12} sm={6}>
           <Card>
             {loadingDash ? <Spin /> : (
-              <Statistic title="AI Replies" value={dashStats.global_stats?.ai_replies ?? 0} />
+              <Statistic title="AI Replies" value={dashStats.personal_stats ? (stats?.emails_replied ?? 0) : (dashStats.global_stats?.ai_replies ?? 0)} />
             )}
           </Card>
         </Col>

@@ -1213,8 +1213,8 @@ async fn get_training_export(
         "records": sanitized,
         "note": "Only consented users are exported and all records are de-identified.",
         "export_metadata": {
-            "export_destinations": state.config.ai_available_models,
-            "data_location": "Determined by deployment configuration. Check /api/privacy/data-location for per-user details.",
+            "note": "Check /api/privacy/data-location for per-user data location and export destination details.",
+            "data_location_api": "/api/privacy/data-location",
         },
     }))
 }
