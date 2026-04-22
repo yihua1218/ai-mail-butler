@@ -163,6 +163,13 @@ docker-compose up --build -d
 
 系統支援嚴格的角色權限與資料隔離。關於如何設定管理員，以及每種角色所能看見的資料範圍，請詳閱 [角色存取控制 (RBAC) 說明文件](docs/RBAC.zh-TW.md)。
 
+## 功能介紹與許願牆
+
+關於信件轉寄流程說明、目前支援的 AI 處理功能，以及社群功能許願牆（投票決定下一步開發項目）的完整說明，請參閱：
+
+- [AI Mail Butler 運作說明 (繁體中文)](docs/HOW-IT-WORKS.zh-TW.md)
+- [How AI Mail Butler Works (英文)](docs/HOW-IT-WORKS.md)
+
 ## 授權條款 (License)
 
 本軟體使用 The Unlicense 或 CC0 1.0 Universal 發布，詳細內容請參閱 `LICENSE` 檔案。

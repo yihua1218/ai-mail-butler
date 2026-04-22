@@ -164,6 +164,13 @@ Run AI Mail Butler against an existing data snapshot without modifying it. All w
 
 The system supports strict role-based data isolation. For details on configuring an administrator and the permissions for each role, please read the [RBAC Documentation](docs/RBAC.md).
 
+## How It Works — Feature Guide
+
+For a full explanation of the email forwarding workflow, currently supported AI processing capabilities, and the community Feature Wish Wall (vote on what gets built next), see:
+
+- [How AI Mail Butler Works (English)](docs/HOW-IT-WORKS.md)
+- [AI Mail Butler 運作說明 (繁體中文)](docs/HOW-IT-WORKS.zh-TW.md)
+
 ## License
 
 This software is released under The Unlicense or CC0 1.0 Universal. See the `LICENSE` file for details.
