@@ -124,13 +124,20 @@ const FinanceAnalysisPage: React.FC = () => {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card bordered={false} title="Monthly Amount Summary">
-        <Table rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`} columns={monthlyColumns as any} dataSource={monthly} pagination={{ pageSize: 12 }} />
+        <Table
+          rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`}
+          columns={monthlyColumns as any}
+          dataSource={monthly}
+          scroll={{ x: 'max-content' }}
+          pagination={{ pageSize: 12 }}
+        />
       </Card>
       <Card bordered={false} title={emailIdFromQuery ? `Email Financial Analysis Records (Filtered by ${emailIdFromQuery})` : 'Email Financial Analysis Records'}>
         <Table
           rowKey="id"
           columns={recordColumns as any}
           dataSource={filteredRecords}
+          scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 10 }}
           rowClassName={(record: FinanceRecord) => (emailIdFromQuery && record.email_id === emailIdFromQuery ? 'finance-linked-row' : '')}
         />

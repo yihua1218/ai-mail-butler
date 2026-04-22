@@ -17,6 +17,30 @@ type EmailRule = {
   updated_at?: string;
 };
 
+const deriveRuleName = (rule: EmailRule) => {
+  const rawLabel = (rule.rule_label || '').trim();
+  const strippedLabel = rawLabel.replace(/^RULE-/i, '').trim();
+  if (strippedLabel) {
+    return strippedLabel.slice(0, 18);
+  }
+
+  const text = (rule.rule_text || '').trim();
+  if (!text) return 'RULE';
+
+  const cjkChars = text.match(/[\u3400-\u9FFF]/g);
+  if (cjkChars && cjkChars.length > 0) {
+    return cjkChars.join('').slice(0, 8);
+  }
+
+  const words = text
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\w-]/g, ''))
+    .filter(Boolean)
+    .slice(0, 3);
+
+  return words.join(' ').slice(0, 24) || 'RULE';
+};
+
 const RulesManagerPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
@@ -101,16 +125,27 @@ const RulesManagerPage: React.FC = () => {
   const columns = [
     {
       title: t('rules_rule'),
-      dataIndex: 'rule_text',
-      key: 'rule_text',
-      render: (v: string) => <span>{v}</span>,
-    },
-    {
-      title: 'Label',
       dataIndex: 'rule_label',
       key: 'rule_label',
-      width: 150,
-      render: (v: string) => <Tag color="blue">{v || 'RULE'}</Tag>,
+      width: 180,
+      render: (_: string, record: EmailRule) => {
+        const name = deriveRuleName(record);
+        return <Tag color="blue">{name}</Tag>;
+      },
+    },
+    {
+      title: 'Details',
+      dataIndex: 'rule_text',
+      key: 'rule_text',
+      ellipsis: true,
+      render: (v: string) => (
+        <Paragraph
+          style={{ marginBottom: 0 }}
+          ellipsis={{ rows: 2, expandable: false, tooltip: v }}
+        >
+          {v}
+        </Paragraph>
+      ),
     },
     {
       title: t('rules_source'),
@@ -219,7 +254,7 @@ const RulesManagerPage: React.FC = () => {
         </Button>
       </Space.Compact>
 
-      <Table rowKey="id" dataSource={rules} columns={columns} pagination={{ pageSize: 8 }} />
+      <Table rowKey="id" dataSource={rules} columns={columns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} />
 
       <Modal
         title={t('rules_edit')}

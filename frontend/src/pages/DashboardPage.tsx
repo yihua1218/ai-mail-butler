@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Col,
+  Grid,
   Input,
   Modal,
   Row,
@@ -31,6 +32,8 @@ const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const isPrivileged = user?.role === 'admin' || user?.role === 'developer';
+  const screens = Grid.useBreakpoint();
+  const isUltraWide = !!screens.xxl;
 
   const formatDateTimeLocal = (date: Date) => {
     const year = date.getFullYear();
@@ -82,6 +85,13 @@ const DashboardPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [resultsModalVisible, setResultsModalVisible] = useState(false);
   const [resultsData, setResultsData] = useState<any>(null);
+  const [draftRepliesByEmailId, setDraftRepliesByEmailId] = useState<Record<string, { id: string; body: string; from: string; subject: string }>>({});
+  const [editingDraft, setEditingDraft] = useState<{ id: string; emailId: string; body: string; from: string; subject: string } | null>(null);
+  const [draftEditorText, setDraftEditorText] = useState<string>('');
+  const [draftEditorOpen, setDraftEditorOpen] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [sendingDraft, setSendingDraft] = useState(false);
+  const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
 
   const loadFeedback = async () => {
     if (!user?.email) return;
@@ -90,6 +100,26 @@ const DashboardPage: React.FC = () => {
       setFeedbackRows(res.data.feedback || []);
     } catch {
       setFeedbackRows([]);
+    }
+  };
+
+  const loadDraftReplies = async () => {
+    if (!user?.email) {
+      setDraftRepliesByEmailId({});
+      return;
+    }
+    try {
+      const res = await axios.get('/api/auto-replies', { params: { email: user.email } });
+      const replies = (res.data?.replies || []) as Array<{ id: string; source_email_id?: string; body: string; from: string; subject: string }>;
+      const mapped: Record<string, { id: string; body: string; from: string; subject: string }> = {};
+      for (const r of replies) {
+        if (r.source_email_id) {
+          mapped[r.source_email_id] = { id: r.id, body: r.body, from: r.from, subject: r.subject };
+        }
+      }
+      setDraftRepliesByEmailId(mapped);
+    } catch {
+      setDraftRepliesByEmailId({});
     }
   };
 
@@ -143,6 +173,7 @@ const DashboardPage: React.FC = () => {
     }
 
     loadFeedback();
+    loadDraftReplies();
   }, [user, isPrivileged]);
 
   const emailIdFromQuery = useMemo(() => {
@@ -196,11 +227,25 @@ const DashboardPage: React.FC = () => {
     {
       title: 'Action',
       key: 'action',
-      width: 180,
+      width: 320,
       render: (_: unknown, record: any) => (
-        <Button size="small" onClick={() => navigate(`/finance?emailId=${encodeURIComponent(record.id)}`)}>
-          {t('view_finance')}
-        </Button>
+        <Space wrap>
+          <Button size="small" onClick={() => navigate(`/finance?emailId=${encodeURIComponent(record.id)}`)}>
+            {t('view_finance')}
+          </Button>
+          <Button
+            size="small"
+            loading={reprocessingEmailId === record.id}
+            onClick={() => reprocessSingleEmail(record.id)}
+          >
+            Reprocess
+          </Button>
+          {record.status === 'drafted' && (
+            <Button size="small" type="primary" onClick={() => openDraftEditor(record.id)}>
+              View/Edit Draft
+            </Button>
+          )}
+        </Space>
       ),
     },
   ];
@@ -258,7 +303,7 @@ const DashboardPage: React.FC = () => {
                   error_id: record.id,
                 });
                 if (res.data?.status === 'success') {
-                  message.success('Queued for retry. The spool worker will reprocess it shortly.');
+                  message.success(res.data?.message || 'Queued for retry. The spool worker will reprocess it shortly.');
                 } else {
                   message.error(res.data?.message || 'Retry failed.');
                 }
@@ -275,7 +320,7 @@ const DashboardPage: React.FC = () => {
               }
             }}
           >
-            Retry
+            Recheck Delivered-To
           </Button>
         );
       },
@@ -391,10 +436,89 @@ const DashboardPage: React.FC = () => {
       setResultsModalVisible(true);
       setSelectedEmailRowKeys([]);
       await reloadDashboard();
+      await loadDraftReplies();
     } catch {
       message.error(t('process_selected_failed'));
     } finally {
       setProcessingSelected(false);
+    }
+  };
+
+  const reprocessSingleEmail = async (emailId: string) => {
+    if (!user?.email) return;
+    setReprocessingEmailId(emailId);
+    try {
+      const res = await axios.post('/api/emails/process-manual', {
+        email: user.email,
+        email_ids: [emailId],
+        force_reextract: true,
+      });
+      const result = res.data?.results?.[0];
+      if (result?.result === 'processed') {
+        message.success('Reprocessed successfully.');
+      } else {
+        message.info(result?.reason || 'Reprocess queued.');
+      }
+      await reloadDashboard();
+      await loadDraftReplies();
+    } catch {
+      message.error('Failed to reprocess this email.');
+    } finally {
+      setReprocessingEmailId(null);
+    }
+  };
+
+  const openDraftEditor = (emailId: string) => {
+    const draft = draftRepliesByEmailId[emailId];
+    if (!draft) {
+      message.warning('No draft found for this email yet.');
+      return;
+    }
+    setEditingDraft({ id: draft.id, emailId, body: draft.body, from: draft.from, subject: draft.subject });
+    setDraftEditorText(draft.body || '');
+    setDraftEditorOpen(true);
+  };
+
+  const saveDraftChanges = async () => {
+    if (!user?.email || !editingDraft) return false;
+    setSavingDraft(true);
+    try {
+      await axios.post('/api/auto-replies/update', {
+        email: user.email,
+        reply_id: editingDraft.id,
+        reply_body: draftEditorText,
+      });
+      message.success('Draft saved.');
+      await loadDraftReplies();
+      return true;
+    } catch {
+      message.error('Failed to save draft.');
+      return false;
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
+  const sendDraftNow = async () => {
+    if (!user?.email || !editingDraft) return;
+    setSendingDraft(true);
+    try {
+      const saved = await saveDraftChanges();
+      if (!saved) return;
+      await axios.post('/api/auto-replies/send', {
+        email: user.email,
+        reply_id: editingDraft.id,
+      });
+      message.success('Draft sent.');
+      setDraftEditorOpen(false);
+      setEditingDraft(null);
+      setDraftEditorText('');
+      await reloadDashboard();
+      await loadDraftReplies();
+    } catch {
+      message.error('Failed to send draft.');
+    } finally {
+      setSendingDraft(false);
     }
   };
 
@@ -456,7 +580,7 @@ const DashboardPage: React.FC = () => {
 
   const GlobalStatsDisplay = () => (
     globalStats ? (
-      <div style={{ marginBottom: 32 }}>
+      <div style={{ marginBottom: isUltraWide ? 0 : 32 }}>
         <Title level={4}>System Overview</Title>
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={8} md={6}>
@@ -486,7 +610,7 @@ const DashboardPage: React.FC = () => {
 
   const PersonalStatsDisplay = () => (
     personalStats ? (
-      <div style={{ marginBottom: 32 }}>
+      <div style={{ marginBottom: isUltraWide ? 0 : 32 }}>
         <Title level={4}>Your Processing Status</Title>
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={8} md={6}>
@@ -557,6 +681,40 @@ const DashboardPage: React.FC = () => {
     );
   };
 
+  const DraftEditorModal = () => (
+    <Modal
+      title={editingDraft ? `Draft Reply - ${editingDraft.subject || '(no subject)'}` : 'Draft Reply'}
+      open={draftEditorOpen}
+      onCancel={() => {
+        setDraftEditorOpen(false);
+        setEditingDraft(null);
+        setDraftEditorText('');
+      }}
+      footer={[
+        <Button key="cancel" onClick={() => {
+          setDraftEditorOpen(false);
+          setEditingDraft(null);
+          setDraftEditorText('');
+        }}>
+          Cancel
+        </Button>,
+        <Button key="save" onClick={saveDraftChanges} loading={savingDraft}>
+          Save Draft
+        </Button>,
+        <Button key="send" type="primary" onClick={sendDraftNow} loading={sendingDraft}>
+          Send Now
+        </Button>,
+      ]}
+    >
+      {editingDraft && (
+        <>
+          <Paragraph style={{ marginBottom: 8, color: '#86868b' }}>To: {editingDraft.from}</Paragraph>
+          <Input.TextArea rows={10} value={draftEditorText} onChange={(e) => setDraftEditorText(e.target.value)} />
+        </>
+      )}
+    </Modal>
+  );
+
   const EmailTableWithFilter = () => (
     <Card bordered={false} title={t('your_emails')}>
       <Space direction="vertical" style={{ width: '100%', marginBottom: 12 }}>
@@ -604,6 +762,7 @@ const DashboardPage: React.FC = () => {
         dataSource={filteredEmails}
         rowKey="id"
         columns={columns}
+        scroll={{ x: 'max-content' }}
         pagination={{ pageSize: 5 }}
         rowSelection={{
           selectedRowKeys: selectedEmailRowKeys,
@@ -623,33 +782,39 @@ const DashboardPage: React.FC = () => {
         <div style={{ marginBottom: 32 }}>
           <Title level={2}>{t('welcome')}, {user?.role === 'developer' ? 'Developer' : 'Admin'} ({user?.display_name || user?.email})</Title>
         </div>
-        <GlobalStatsDisplay />
-        <PersonalStatsDisplay />
+        <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
+          <Col xs={24} xxl={12}>
+            <GlobalStatsDisplay />
+          </Col>
+          <Col xs={24} xxl={12}>
+            <PersonalStatsDisplay />
+          </Col>
+        </Row>
         <Row gutter={[24, 24]}>
-          <Col xs={24}>
+          <Col xs={24} xxl={14}>
             <EmailTableWithFilter />
           </Col>
-          <Col xs={24}>
-            <Card
-              bordered={false}
-              title={
-                <span>
-                  <WarningOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
-                  Mail Server Logs (Error + Warn)
-                  {mailErrors.length > 0 && <Badge count={filteredMailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
-                </span>
-              }
-            >
-              <LogFilterBar />
-              {mailErrors.length === 0
-                ? <Alert message="No logs recorded." type="success" showIcon />
-                : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 10 }} size="small" />}
-            </Card>
-          </Col>
-          <Col xs={24}>
-            <Card bordered={false} title="User Feedback Suggestions">
-              <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} pagination={{ pageSize: 8 }} size="small" />
-            </Card>
+          <Col xs={24} xxl={10}>
+            <Space direction="vertical" size={24} style={{ width: '100%' }}>
+              <Card
+                bordered={false}
+                title={
+                  <span>
+                    <WarningOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
+                    Mail Server Logs (Error + Warn)
+                    {mailErrors.length > 0 && <Badge count={filteredMailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
+                  </span>
+                }
+              >
+                <LogFilterBar />
+                {mailErrors.length === 0
+                  ? <Alert message="No logs recorded." type="success" showIcon />
+                  : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 10 }} size="small" />}
+              </Card>
+              <Card bordered={false} title="User Feedback Suggestions">
+                <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />
+              </Card>
+            </Space>
           </Col>
         </Row>
 
@@ -672,6 +837,7 @@ const DashboardPage: React.FC = () => {
         </Modal>
 
         <ResultsModal />
+        <DraftEditorModal />
       </div>
     );
   }
@@ -682,22 +848,37 @@ const DashboardPage: React.FC = () => {
         <div style={{ marginBottom: 32 }}>
           <Title level={2}>{t('welcome')}, {user.display_name || user.email}</Title>
         </div>
-        <GlobalStatsDisplay />
-        <PersonalStatsDisplay />
-        <EmailTableWithFilter />
-        <Card bordered={false} title="Your Mail Server Logs" style={{ marginTop: 24 }}>
-          <LogFilterBar />
-          {mailErrors.length === 0
-            ? <Alert message="No logs related to your account." type="success" showIcon />
-            : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} pagination={{ pageSize: 8 }} size="small" />}
-        </Card>
-        <Card bordered={false} title="Your Feedback Suggestions" style={{ marginTop: 24 }}>
-          {feedbackRows.length === 0
-            ? <Alert message="No feedback submitted yet." type="info" showIcon />
-            : <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} pagination={{ pageSize: 8 }} size="small" />}
-        </Card>
+        <Row gutter={[24, 24]} style={{ marginBottom: 24 }}>
+          <Col xs={24} xxl={12}>
+            <GlobalStatsDisplay />
+          </Col>
+          <Col xs={24} xxl={12}>
+            <PersonalStatsDisplay />
+          </Col>
+        </Row>
+        <Row gutter={[24, 24]}>
+          <Col xs={24} xxl={14}>
+            <EmailTableWithFilter />
+          </Col>
+          <Col xs={24} xxl={10}>
+            <Space direction="vertical" size={24} style={{ width: '100%' }}>
+              <Card bordered={false} title="Your Mail Server Logs">
+                <LogFilterBar />
+                {mailErrors.length === 0
+                  ? <Alert message="No logs related to your account." type="success" showIcon />
+                  : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />}
+              </Card>
+              <Card bordered={false} title="Your Feedback Suggestions">
+                {feedbackRows.length === 0
+                  ? <Alert message="No feedback submitted yet." type="info" showIcon />
+                  : <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />}
+              </Card>
+            </Space>
+          </Col>
+        </Row>
 
         <ResultsModal />
+        <DraftEditorModal />
       </div>
     );
   }

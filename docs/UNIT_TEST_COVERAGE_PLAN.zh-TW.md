@@ -11,29 +11,29 @@
 量測指令：
 `LLVM_COV=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-cov LLVM_PROFDATA=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-profdata cargo llvm-cov --summary-only`
 
-| 指標 | 目前數值 |
-|---|---:|
-| 日期 | 2026-04-22 |
-| 後端 line coverage | 15.41% |
-| 後端 function coverage | 23.20% |
-| 後端 region coverage | 15.80% |
-| 前端 coverage | 尚未量測 |
+| 指標                   |   目前數值 |
+| ---------------------- | ---------: |
+| 日期                   | 2026-04-22 |
+| 後端 line coverage     |     15.41% |
+| 後端 function coverage |     23.20% |
+| 後端 region coverage   |     15.80% |
+| 前端 coverage          |   尚未量測 |
 
 ### 測試涵蓋範圍狀態
-| 測試範圍 | 狀態 | 說明 |
-|---|---|---|
-| `first_email_address` 解析邏輯 | 已涵蓋 | 已有 `mail` helper 單元測試 |
-| MIME 附件與 inline 文字分離 | 已涵蓋 | 已有 `mail` helper 單元測試 |
-| 規則意圖判斷與去重插入 | 已涵蓋 | 已有 `web` 單元測試 |
-| MX 解析 helper 行為 | 已涵蓋 | 已有 `web` 單元測試 |
-| 訓練授權回答解析 | 已涵蓋 | 已有 `web` 單元測試 |
-| 訓練資料脫敏 regex 遮罩 | 已涵蓋 | 已有 `web` 單元測試 |
-| Onboarding 問題遞進 | 已涵蓋 | 已有 `services` 單元測試 |
-| consent 設定寫入與時間戳更新 | 未涵蓋 | 需補 DB 層測試 |
-| 訓練匯出 API 授權邊界 | 未涵蓋 | 需補 API 權限測試 |
-| 聊天成功後 transcript 寫入 | 未涵蓋 | 需補 API 流程測試 |
-| GDPR 刪除時清除 `chat_transcripts` | 未涵蓋 | 需補交易刪除測試 |
-| 前端 consent 開關互動與送出 | 未涵蓋 | 需補 Vitest/RTL 測試 |
+| 測試範圍                           | 狀態   | 說明                        |
+| ---------------------------------- | ------ | --------------------------- |
+| `first_email_address` 解析邏輯     | 已涵蓋 | 已有 `mail` helper 單元測試 |
+| MIME 附件與 inline 文字分離        | 已涵蓋 | 已有 `mail` helper 單元測試 |
+| 規則意圖判斷與去重插入             | 已涵蓋 | 已有 `web` 單元測試         |
+| MX 解析 helper 行為                | 已涵蓋 | 已有 `web` 單元測試         |
+| 訓練授權回答解析                   | 已涵蓋 | 已有 `web` 單元測試         |
+| 訓練資料脫敏 regex 遮罩            | 已涵蓋 | 已有 `web` 單元測試         |
+| Onboarding 問題遞進                | 已涵蓋 | 已有 `services` 單元測試    |
+| consent 設定寫入與時間戳更新       | 未涵蓋 | 需補 DB 層測試              |
+| 訓練匯出 API 授權邊界              | 未涵蓋 | 需補 API 權限測試           |
+| 聊天成功後 transcript 寫入         | 未涵蓋 | 需補 API 流程測試           |
+| GDPR 刪除時清除 `chat_transcripts` | 未涵蓋 | 需補交易刪除測試            |
+| 前端 consent 開關互動與送出        | 未涵蓋 | 需補 Vitest/RTL 測試        |
 
 ## 第一階段（立即）
 目標：先強化安全與正確性關鍵路徑。

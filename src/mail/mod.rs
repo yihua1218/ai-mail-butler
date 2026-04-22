@@ -1168,6 +1168,7 @@ impl MailService {
                                                 match crate::services::EmailReplyService::store_auto_reply(
                                                     &pool,
                                                     &u.id,
+                                                    Some(&id),
                                                     matched_rule_id,
                                                     &from_clean,
                                                     &subject,

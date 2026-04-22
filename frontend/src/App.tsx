@@ -236,7 +236,14 @@ const App: React.FC = () => {
             </Dropdown>
           </div>
         </Header>
-        <Content style={{ padding: '40px 50px', maxWidth: '1200px', margin: '0 auto', width: '100%' }}>
+        <Content
+          style={{
+            padding: '32px clamp(16px, 3vw, 52px)',
+            maxWidth: '1800px',
+            margin: '0 auto',
+            width: '100%',
+          }}
+        >
           <Suspense fallback={pageFallback}>
             {renderPage()}
           </Suspense>

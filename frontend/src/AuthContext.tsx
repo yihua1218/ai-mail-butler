@@ -21,6 +21,7 @@ export interface User {
   preferred_language: string | null;
   training_data_consent: boolean;
   training_consent_updated_at: string | null;
+  rule_label_mode: 'ai_first' | 'deterministic_only';
 }
 
 interface AuthContextType {

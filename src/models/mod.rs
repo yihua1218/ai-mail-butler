@@ -33,6 +33,8 @@ pub struct User {
     pub training_consent_updated_at: Option<String>,
     #[serde(default = "default_mail_send_method")]
     pub mail_send_method: String,
+    #[serde(default = "default_rule_label_mode")]
+    pub rule_label_mode: String,
 }
 
 fn default_both() -> String { "both".to_string() }
@@ -44,6 +46,8 @@ fn default_utc() -> String { "UTC".to_string() }
 fn default_language() -> String { "en".to_string() }
 
 fn default_mail_send_method() -> String { "direct_mx".to_string() }
+
+fn default_rule_label_mode() -> String { "ai_first".to_string() }
 
 #[derive(Serialize, FromRow)]
 pub struct EmailRecord {

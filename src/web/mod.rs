@@ -139,16 +139,166 @@ fn redact_training_text(input: &str) -> String {
 }
 
 fn generate_rule_label(rule_text: &str) -> String {
-    let seed: String = rule_text
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .take(10)
-        .collect();
+    fn is_cjk(c: char) -> bool {
+        matches!(
+            c as u32,
+            0x4E00..=0x9FFF    // CJK Unified Ideographs
+                | 0x3400..=0x4DBF // CJK Extension A
+                | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        )
+    }
 
-    if seed.is_empty() {
-        "RULE".to_string()
+    let trimmed = rule_text.trim();
+    if trimmed.is_empty() {
+        return "RULE".to_string();
+    }
+
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_alphanumeric() || is_cjk(ch) {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(current.clone());
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    let zh_stop = ["如果", "請", "先", "再", "和", "或", "的", "與", "就", "並", "把", "將", "為", "是"];
+    let en_stop = ["the", "a", "an", "and", "or", "if", "then", "for", "to", "of", "on", "in", "with"];
+
+    let mut picked: Vec<String> = Vec::new();
+    for token in tokens {
+        let lower = token.to_lowercase();
+        if en_stop.contains(&lower.as_str()) || zh_stop.contains(&token.as_str()) {
+            continue;
+        }
+
+        let clipped = if token.chars().any(is_cjk) {
+            token.chars().take(4).collect::<String>()
+        } else {
+            lower.chars().take(12).collect::<String>()
+        };
+
+        if !clipped.is_empty() {
+            picked.push(clipped);
+        }
+        if picked.len() >= 3 {
+            break;
+        }
+    }
+
+    let mut core = if picked.is_empty() {
+        trimmed
+            .chars()
+            .filter(|c| c.is_alphanumeric() || is_cjk(*c))
+            .take(8)
+            .collect::<String>()
+    } else if picked.iter().any(|t| t.chars().any(is_cjk)) {
+        picked.join("")
     } else {
-        format!("RULE-{}", seed.to_uppercase())
+        picked.join("-")
+    };
+
+    if core.is_empty() {
+        core = "RULE".to_string();
+    }
+
+    let core: String = core.chars().take(18).collect();
+    format!("RULE-{}", core)
+}
+
+fn ai_rule_label_enabled() -> bool {
+    match std::env::var("RULE_LABEL_USE_AI") {
+        Ok(v) => {
+            let normalized = v.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        }
+        Err(_) => true,
+    }
+}
+
+fn sanitize_ai_rule_label(raw: &str) -> Option<String> {
+    fn is_cjk(c: char) -> bool {
+        matches!(
+            c as u32,
+            0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF
+        )
+    }
+
+    let mut first = raw.lines().next().unwrap_or_default().trim().to_string();
+    if first.is_empty() {
+        return None;
+    }
+
+    if let Some((_, right)) = first.split_once(':') {
+        if first.to_ascii_lowercase().starts_with("name") || first.to_ascii_lowercase().starts_with("label") {
+            first = right.trim().to_string();
+        }
+    }
+
+    first = first
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches('\'')
+        .to_string();
+
+    if first.to_ascii_lowercase().starts_with("rule-") {
+        first = first[5..].trim().to_string();
+    }
+
+    let has_cjk = first.chars().any(is_cjk);
+    let mut normalized = String::new();
+    let mut prev_dash = false;
+    for ch in first.chars() {
+        if ch.is_alphanumeric() || is_cjk(ch) || ch == '_' || ch == '-' {
+            normalized.push(ch);
+            prev_dash = false;
+        } else if ch.is_whitespace() && !has_cjk && !prev_dash && !normalized.is_empty() {
+            normalized.push('-');
+            prev_dash = true;
+        }
+    }
+
+    let normalized = normalized.trim_matches('-').trim().to_string();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let core: String = normalized.chars().take(18).collect();
+    if core.is_empty() {
+        None
+    } else {
+        Some(format!("RULE-{}", core))
+    }
+}
+
+async fn generate_rule_label_with_ai(ai_client: Option<&AiClient>, rule_text: &str, rule_label_mode: Option<&str>) -> String {
+    let fallback = generate_rule_label(rule_text);
+    let use_ai = matches!(rule_label_mode.unwrap_or("ai_first"), "ai_first") && ai_rule_label_enabled();
+    if !use_ai {
+        return fallback;
+    }
+
+    let Some(client) = ai_client else {
+        return fallback;
+    };
+
+    let system_prompt = "You create very short rule names for email automation. Output only one concise label core without prefix. Rules: 1) 2-8 Chinese chars OR 1-3 English words. 2) No punctuation except hyphen/underscore. 3) Avoid generic words like rule, email, message. 4) Keep it specific to intent.";
+    let user_prompt = format!(
+        "Rule description:\n{}\n\nReturn only the label core (without RULE- prefix).",
+        rule_text
+    );
+
+    match client.chat(system_prompt, &user_prompt).await {
+        Ok(res) => sanitize_ai_rule_label(&res.content).unwrap_or(fallback),
+        Err(e) => {
+            tracing::warn!("AI rule label generation failed, fallback to algorithm: {}", e);
+            fallback
+        }
     }
 }
 
@@ -166,9 +316,9 @@ fn extract_first_rule_id(message: &str) -> Option<i64> {
 
 fn extract_rule_label_token(message: &str) -> Option<String> {
     static RULE_LABEL_RE: OnceLock<Regex> = OnceLock::new();
-    let re = RULE_LABEL_RE.get_or_init(|| Regex::new(r"(?i)\b(rule-[a-z0-9]+)\b").expect("rule label regex"));
+    let re = RULE_LABEL_RE.get_or_init(|| Regex::new(r"(?iu)\b(rule-[\p{L}\p{N}_-]+)\b").expect("rule label regex"));
     let cap = re.captures(message)?;
-    Some(cap.get(1)?.as_str().to_ascii_uppercase())
+    Some(cap.get(1)?.as_str().to_string())
 }
 
 fn extract_text_after_delimiter(message: &str) -> Option<String> {
@@ -221,7 +371,7 @@ fn is_rule_delete_intent(lower: &str) -> bool {
     ["刪除規則", "delete rule", "remove rule"].iter().any(|k| lower.contains(k))
 }
 
-async fn handle_rule_chat_command(pool: &SqlitePool, user: &User, message: &str) -> Option<String> {
+async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user: &User, message: &str) -> Option<String> {
     let trimmed = message.trim();
     if trimmed.is_empty() {
         return None;
@@ -313,11 +463,12 @@ async fn handle_rule_chat_command(pool: &SqlitePool, user: &User, message: &str)
             });
         };
 
+        let generated_label = generate_rule_label_with_ai(Some(ai_client), &new_text, Some(&user.rule_label_mode)).await;
         let result = sqlx::query(
             "UPDATE email_rules SET rule_text = ?, rule_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
         )
         .bind(&new_text)
-        .bind(generate_rule_label(&new_text))
+        .bind(generated_label)
         .bind(rule_id)
         .bind(&user.id)
         .execute(pool)
@@ -365,7 +516,7 @@ async fn handle_rule_chat_command(pool: &SqlitePool, user: &User, message: &str)
         let mut rule_id = extract_first_rule_id(trimmed);
         if rule_id.is_none() {
             if let Some(label) = extract_rule_label_token(trimmed) {
-                let found: Option<i64> = sqlx::query_scalar("SELECT id FROM email_rules WHERE user_id = ? AND upper(rule_label) = ? LIMIT 1")
+                let found: Option<i64> = sqlx::query_scalar("SELECT id FROM email_rules WHERE user_id = ? AND lower(rule_label) = lower(?) LIMIT 1")
                     .bind(&user.id)
                     .bind(label)
                     .fetch_optional(pool)
@@ -717,7 +868,13 @@ fn rule_capture_notice(preferred_language: &str, outcome: &RuleCaptureOutcome) -
     }
 }
 
-async fn capture_rule_from_chat(pool: &SqlitePool, user_id: &str, message: &str) -> RuleCaptureOutcome {
+async fn capture_rule_from_chat(
+    pool: &SqlitePool,
+    ai_client: Option<&AiClient>,
+    user_id: &str,
+    message: &str,
+    rule_label_mode: Option<&str>,
+) -> RuleCaptureOutcome {
     let Some(cleaned) = extract_rule_from_message(message) else {
         return RuleCaptureOutcome::None;
     };
@@ -736,12 +893,13 @@ async fn capture_rule_from_chat(pool: &SqlitePool, user_id: &str, message: &str)
         return RuleCaptureOutcome::Duplicate(cleaned);
     }
 
+    let generated_label = generate_rule_label_with_ai(ai_client, &cleaned, rule_label_mode).await;
     let insert_result = sqlx::query(
         "INSERT INTO email_rules (user_id, rule_text, rule_label, source, is_enabled) VALUES (?, ?, ?, 'chat', 1)"
     )
     .bind(user_id)
     .bind(&cleaned)
-    .bind(generate_rule_label(&cleaned))
+    .bind(generated_label)
     .execute(pool)
     .await;
 
@@ -1076,7 +1234,7 @@ async fn post_chat(
                 }
             }
 
-            if let Some(command_reply) = handle_rule_chat_command(pool, &user, &message).await {
+            if let Some(command_reply) = handle_rule_chat_command(pool, &state.ai_client, &user, &message).await {
                 let _ = sqlx::query(
                     "INSERT INTO chat_transcripts (user_id, user_email, user_message, ai_reply) VALUES (?, ?, ?, ?)"
                 )
@@ -1132,7 +1290,7 @@ async fn post_chat(
                 let _ = OnboardingService::log_activity(pool, &user.id, "ask_forwarding_info").await;
             }
 
-            let rule_capture = capture_rule_from_chat(pool, &user.id, &message).await;
+            let rule_capture = capture_rule_from_chat(pool, Some(&state.ai_client), &user.id, &message, Some(&user.rule_label_mode)).await;
             if let Some(notice) = rule_capture_notice(&user.preferred_language, &rule_capture) {
                 res.content = format!("{}\n\n{}", res.content, notice);
             }
@@ -2013,8 +2171,8 @@ mod tests {
 
         let user_id = "u1";
         let msg = "forward invoices to me and remind me";
-        let first = capture_rule_from_chat(&pool, user_id, msg).await;
-        let second = capture_rule_from_chat(&pool, user_id, msg).await;
+        let first = capture_rule_from_chat(&pool, None, user_id, msg, Some("deterministic_only")).await;
+        let second = capture_rule_from_chat(&pool, None, user_id, msg, Some("deterministic_only")).await;
 
         assert!(matches!(first, RuleCaptureOutcome::Created(_)));
         assert!(matches!(second, RuleCaptureOutcome::Duplicate(_)));
@@ -2047,7 +2205,7 @@ mod tests {
         .await
         .expect("create email_rules");
 
-        let outcome = capture_rule_from_chat(&pool, "u1", "hello there").await;
+        let outcome = capture_rule_from_chat(&pool, None, "u1", "hello there", Some("deterministic_only")).await;
         assert!(matches!(outcome, RuleCaptureOutcome::None));
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules")
@@ -2200,6 +2358,7 @@ struct SettingsRequest {
     dry_run: bool,
     email_format: String,
     mail_send_method: Option<String>,
+    rule_label_mode: Option<String>,
     training_data_consent: bool,
     timezone: Option<String>,
     preferred_language: Option<String>,
@@ -2279,14 +2438,22 @@ async fn post_settings(
         .filter(|v| *v == "direct_mx" || *v == "relay")
         .unwrap_or("direct_mx")
         .to_string();
+    let rule_label_mode = payload
+        .rule_label_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| *v == "ai_first" || *v == "deterministic_only")
+        .unwrap_or("ai_first")
+        .to_string();
     
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, training_data_consent = ?, \
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, rule_label_mode = ?, training_data_consent = ?, \
                               training_consent_updated_at = CASE WHEN training_data_consent != ? THEN CURRENT_TIMESTAMP ELSE training_consent_updated_at END, \
                               timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
         .bind(&mail_send_method)
+        .bind(&rule_label_mode)
         .bind(payload.training_data_consent)
         .bind(payload.training_data_consent)
         .bind(&timezone)
@@ -2440,6 +2607,7 @@ async fn post_retry_mail_error(
 
     Json(serde_json::json!({
         "status": "success",
+        "message": "Retry queued. The spool worker will re-check Delivered-To / X-Original-To and candidate owner headers.",
         "queued_path": retry_path.to_string_lossy(),
     }))
 }
@@ -2517,6 +2685,11 @@ async fn post_manual_process_emails(
 
         if force_reextract {
             let _ = sqlx::query("DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?")
+                .bind(&user.id)
+                .bind(&id)
+                .execute(&state.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM auto_replies WHERE user_id = ? AND source_email_id = ? AND reply_status = 'draft'")
                 .bind(&user.id)
                 .bind(&id)
                 .execute(&state.pool)
@@ -2607,7 +2780,11 @@ async fn post_create_rule(
     State(state): State<AppState>,
     Json(payload): Json<CreateRuleRequest>,
 ) -> Json<serde_json::Value> {
-    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+    let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&payload.email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None) else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
@@ -2616,12 +2793,13 @@ async fn post_create_rule(
         return Json(serde_json::json!({ "status": "error", "message": "Rule cannot be empty" }));
     }
 
+    let generated_label = generate_rule_label_with_ai(Some(&state.ai_client), rule_text, Some(&user.rule_label_mode)).await;
     let result = sqlx::query(
         "INSERT INTO email_rules (user_id, rule_text, rule_label, source, is_enabled) VALUES (?, ?, ?, 'manual', 1)"
     )
-    .bind(&user_id)
+    .bind(&user.id)
     .bind(rule_text)
-    .bind(generate_rule_label(rule_text))
+    .bind(generated_label)
     .execute(&state.pool)
     .await;
 
@@ -2638,7 +2816,11 @@ async fn post_update_rule(
     State(state): State<AppState>,
     Json(payload): Json<UpdateRuleRequest>,
 ) -> Json<serde_json::Value> {
-    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+    let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&payload.email)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None) else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
@@ -2647,13 +2829,14 @@ async fn post_update_rule(
         return Json(serde_json::json!({ "status": "error", "message": "Rule cannot be empty" }));
     }
 
+    let generated_label = generate_rule_label_with_ai(Some(&state.ai_client), rule_text, Some(&user.rule_label_mode)).await;
     let result = sqlx::query(
         "UPDATE email_rules SET rule_text = ?, rule_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
     )
     .bind(rule_text)
-    .bind(generate_rule_label(rule_text))
+    .bind(generated_label)
     .bind(payload.id)
-    .bind(&user_id)
+    .bind(&user.id)
     .execute(&state.pool)
     .await;
 
@@ -2716,14 +2899,10 @@ async fn post_delete_rule(
     }
 }
 
-#[derive(Deserialize)]
-struct GetAutoRepliesRequest {
-    email: String,
-}
-
 #[derive(Serialize)]
 struct AutoReplyResponse {
     id: String,
+    source_email_id: Option<String>,
     from: String,
     subject: String,
     body: String,
@@ -2731,9 +2910,13 @@ struct AutoReplyResponse {
 
 async fn get_auto_replies(
     State(state): State<AppState>,
-    Json(payload): Json<GetAutoRepliesRequest>,
+    Query(query): Query<AuthQuery>,
 ) -> Json<serde_json::Value> {
-    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+    let Some(email) = query.email else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+
+    let Some(user_id) = get_user_id_by_email(&state.pool, &email).await else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
@@ -2741,8 +2924,9 @@ async fn get_auto_replies(
         Ok(drafts) => {
             let replies: Vec<AutoReplyResponse> = drafts
                 .into_iter()
-                .map(|(id, from, subject, body)| AutoReplyResponse {
+                .map(|(id, source_email_id, from, subject, body)| AutoReplyResponse {
                     id,
+                    source_email_id,
                     from,
                     subject,
                     body,
@@ -2763,6 +2947,45 @@ struct SendAutoReplyRequest {
     reply_id: String,
 }
 
+#[derive(Deserialize)]
+struct UpdateAutoReplyRequest {
+    email: String,
+    reply_id: String,
+    reply_body: String,
+}
+
+async fn post_update_auto_reply(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateAutoReplyRequest>,
+) -> Json<serde_json::Value> {
+    let Some(user_id) = get_user_id_by_email(&state.pool, &payload.email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+
+    let body = payload.reply_body.trim();
+    if body.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Reply body cannot be empty" }));
+    }
+
+    let result = sqlx::query(
+        "UPDATE auto_replies SET reply_body = ? WHERE id = ? AND user_id = ? AND reply_status = 'draft'"
+    )
+    .bind(body)
+    .bind(&payload.reply_id)
+    .bind(&user_id)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => Json(serde_json::json!({ "status": "success" })),
+        Ok(_) => Json(serde_json::json!({ "status": "error", "message": "Draft not found" })),
+        Err(e) => {
+            tracing::error!("Failed to update auto-reply draft: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": "Update failed" }))
+        }
+    }
+}
+
 async fn post_send_auto_reply(
     State(state): State<AppState>,
     Json(payload): Json<SendAutoReplyRequest>,
@@ -2772,8 +2995,8 @@ async fn post_send_auto_reply(
     };
 
     // Fetch draft reply
-    let draft: Option<(String, String)> = sqlx::query_as(
-        "SELECT reply_body, original_from FROM auto_replies WHERE id = ? AND user_id = ? AND reply_status = 'draft'"
+    let draft: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT reply_body, original_from, source_email_id FROM auto_replies WHERE id = ? AND user_id = ? AND reply_status = 'draft'"
     )
     .bind(&payload.reply_id)
     .bind(&user_id)
@@ -2781,7 +3004,7 @@ async fn post_send_auto_reply(
     .await
     .unwrap_or(None);
 
-    let Some((reply_body, recipient)) = draft else {
+    let Some((reply_body, recipient, source_email_id)) = draft else {
         return Json(serde_json::json!({ "status": "error", "message": "Draft not found" }));
     };
 
@@ -2809,6 +3032,13 @@ async fn post_send_auto_reply(
                 .bind(&payload.reply_id)
                 .execute(&state.pool)
                 .await;
+            if let Some(email_id) = source_email_id {
+                let _ = sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ? AND user_id = ?")
+                    .bind(email_id)
+                    .bind(&user_id)
+                    .execute(&state.pool)
+                    .await;
+            }
             Json(serde_json::json!({ "status": "success", "message": "Reply sent" }))
         }
         Err(e) => {
@@ -3116,6 +3346,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/finance/monthly", get(get_finance_monthly))
         .route("/emails/process-manual", post(post_manual_process_emails))
         .route("/auto-replies", get(get_auto_replies))
+        .route("/auto-replies/update", post(post_update_auto_reply))
         .route("/auto-replies/send", post(post_send_auto_reply))
         .route("/auto-replies/delete", post(post_delete_auto_reply))
         .route("/dashboard", get(get_dashboard))

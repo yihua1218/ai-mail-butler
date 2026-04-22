@@ -51,6 +51,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_data_consent BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_consent_updated_at DATETIME").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN mail_send_method TEXT NOT NULL DEFAULT 'direct_mx'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN rule_label_mode TEXT NOT NULL DEFAULT 'ai_first'").execute(&pool).await;
 
     // Table for tracking repetitive behaviors/questions for analytics
     sqlx::query(
@@ -210,6 +211,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         "CREATE TABLE IF NOT EXISTS auto_replies (
             id TEXT PRIMARY KEY NOT NULL,
             user_id TEXT NOT NULL,
+            source_email_id TEXT,
             email_rule_id INTEGER NOT NULL,
             original_from TEXT NOT NULL,
             original_subject TEXT NOT NULL,
@@ -225,6 +227,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    let _ = sqlx::query("ALTER TABLE auto_replies ADD COLUMN source_email_id TEXT").execute(&pool).await;
 
     // AI-extracted financial entries from decoded emails.
     sqlx::query(

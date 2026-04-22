@@ -258,6 +258,7 @@ impl EmailReplyService {
     pub async fn store_auto_reply(
         pool: &sqlx::SqlitePool,
         user_id: &str,
+        source_email_id: Option<&str>,
         rule_id: i64,
         original_from: &str,
         original_subject: &str,
@@ -267,11 +268,12 @@ impl EmailReplyService {
         let id = uuid::Uuid::new_v4().to_string();
 
         sqlx::query(
-            "INSERT INTO auto_replies (id, user_id, email_rule_id, original_from, original_subject, reply_body, reply_status, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
+              "INSERT INTO auto_replies (id, user_id, source_email_id, email_rule_id, original_from, original_subject, reply_body, reply_status, created_at) \
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
         )
         .bind(&id)
         .bind(user_id)
+           .bind(source_email_id)
         .bind(rule_id)
         .bind(original_from)
         .bind(original_subject)
@@ -284,9 +286,9 @@ impl EmailReplyService {
     }
 
     /// Get all draft replies for a user (not yet sent)
-    pub async fn get_draft_replies(pool: &sqlx::SqlitePool, user_id: &str) -> Result<Vec<(String, String, String, String)>> {
-        let drafts: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT id, original_from, original_subject, reply_body FROM auto_replies WHERE user_id = ? AND reply_status = 'draft' ORDER BY created_at DESC"
+    pub async fn get_draft_replies(pool: &sqlx::SqlitePool, user_id: &str) -> Result<Vec<(String, Option<String>, String, String, String)>> {
+        let drafts: Vec<(String, Option<String>, String, String, String)> = sqlx::query_as(
+            "SELECT id, source_email_id, original_from, original_subject, reply_body FROM auto_replies WHERE user_id = ? AND reply_status = 'draft' ORDER BY created_at DESC"
         )
         .bind(user_id)
         .fetch_all(pool)
@@ -332,6 +334,7 @@ mod tests {
             preferred_language: "zh-TW".to_string(),
             training_data_consent: false,
             training_consent_updated_at: None,
+            rule_label_mode: "ai_first".to_string(),
         };
 
         assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
