@@ -2,8 +2,8 @@
 
 ## Build & Test Status
 ✅ **Build**: `cargo build` - Success
-✅ **Tests**: `cargo test` - All 33 tests passed
-✅ **Frontend Build**: `npm run build` - Success (419ms)
+✅ **Tests**: `cargo test` - All 33 tests passed (fixed 2 test struct initializers missing `time_format`/`date_format` and `readonly_mode_enabled`/`readonly_base`/`overlay_dir`)
+✅ **Frontend Build**: `npm run build` - Success (461ms)
 
 ## Security & Sensitive Data Review
 
@@ -57,19 +57,21 @@
 - Configuration files: 15+
 - No sensitive files tracked
 
-### 9. Recent Changes Review
+### 9. Recent Changes Review (This Session)
 ✅ **Modified files**:
-- `frontend/src/About.tsx` - Column layout adjustment (xxl: 1→4)
-- `frontend/src/App.tsx` - Flex layout improvements for menu
-- `src/db/mod.rs` - Added GDPR/compliance tables (no secrets)
-- `src/config.rs` - Added unit tests (no secrets)
-- `src/mail/mod.rs` - Added unit tests (no secrets)
-- `TODO.md` - Documentation updates
+- `frontend/src/i18n.ts` - Full i18n coverage for Finance, Settings, Rules pages + time/date format keys (EN + zh-TW)
+- `frontend/src/App.tsx` - Finance tab i18n, login/logout i18n, removed 1800px max-width lock
+- `frontend/src/AuthContext.tsx` - Added `time_format` / `date_format` to `User` interface
+- `frontend/src/pages/FinanceAnalysisPage.tsx` - All labels i18n, time/date format rendering
+- `frontend/src/pages/SettingsPage.tsx` - All labels i18n, new time/date format form fields
+- `frontend/src/pages/RulesManagerPage.tsx` - All labels i18n, time/date format rendering
+- `src/models/mod.rs` - Added `time_format` / `date_format` fields with serde defaults
+- `src/db/mod.rs` - Added idempotent `ALTER TABLE` migrations for new columns
+- `src/web/mod.rs` - `SettingsRequest` + `post_settings()` support for new fields; fixed test Config initializer
+- `src/services/mod.rs` - Fixed test `User` struct initializer (missing new fields)
+- `TODO.md` / `TODO.zh-TW.md` - Added completed items for this session's features; fixed zh-TW duplicate line
 
-✅ **New files**:
-- `frontend/src/pages/PrivacyPage.tsx` - Privacy/GDPR compliance page (no secrets)
-
-**No sensitive data detected in diffs.**
+**No sensitive data detected in any modified files.**
 
 ---
 
@@ -78,13 +80,15 @@
 **✅ PROJECT IS READY FOR GIT COMMIT**
 
 **Summary**:
-- ✅ All builds successful
-- ✅ All tests passing
+- ✅ All 33 tests passing (2 test initializers fixed)
+- ✅ Frontend builds cleanly
 - ✅ Zero sensitive data exposure
-- ✅ All configuration files safe for public repository
-- ✅ Documentation properly translated
-- ✅ License file present
-- ✅ Recent changes verified clean
+- ✅ All configuration files use English comments and placeholder credentials
+- ✅ All `.agents/workflows/` files are in English
+- ✅ LICENSE file present (Unlicense / CC0 1.0)
+- ✅ README.zh-TW.md and TODO.zh-TW.md synchronized with EN counterparts
+
+**Sanitizations performed**: None required — no sensitive data found.
 
 **Recommendations**:
 1. Keep `.env.example` synchronized if new env vars are added
@@ -92,5 +96,4 @@
 3. Continue using placeholder credentials in docs
 
 ---
-*Report generated: $(date)*
 *Pre-commit workflow: All checks passed*

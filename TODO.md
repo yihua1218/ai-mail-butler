@@ -28,6 +28,9 @@
 - [x] Publish and enforce NY SHIELD-aligned baseline controls (at-rest encryption, access controls, incident response runbook).
 - [x] Add prohibited-use guardrail + policy notice for NYC AEDT-sensitive scenarios (e.g., employment decision support).
 - [x] Add minor-data handling controls (age gate + guardian consent policy hooks) for COPPA-like risk reduction.
+- [x] Full UI i18n coverage: Finance, Settings, Rules pages and nav buttons all use translation keys (EN + zh-TW).
+- [x] Add user time format (24h/12h) and date format (auto/iso/us/eu/tw) preferences, persisted to backend.
+- [x] Remove 1800px max-width lock on main content area so tables expand to full window width.
 
 ## Low Priority
 - [ ] Support switching between multiple AI models via UI.

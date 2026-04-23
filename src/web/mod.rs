@@ -2346,6 +2346,9 @@ mod web_tests {
             smtp_relay_pass: None,
             assistant_email: "assistant@example.com".to_string(),
             docs_whitelist: vec![],
+            readonly_mode_enabled: false,
+            readonly_base: None,
+            overlay_dir: None,
         };
 
         let state = AppState {

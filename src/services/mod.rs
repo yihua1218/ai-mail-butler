@@ -335,6 +335,8 @@ mod tests {
             training_data_consent: false,
             training_consent_updated_at: None,
             rule_label_mode: "ai_first".to_string(),
+            time_format: "24h".to_string(),
+            date_format: "auto".to_string(),
         };
 
         assert!(OnboardingService::get_next_onboarding_question(&user).await.is_some());
