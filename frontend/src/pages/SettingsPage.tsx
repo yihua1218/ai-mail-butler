@@ -53,6 +53,8 @@ const SettingsPage: React.FC = () => {
         training_data_consent: !!user.training_data_consent,
         timezone: user.timezone || 'UTC',
         preferred_language: user.preferred_language || 'en',
+        time_format: user.time_format || '24h',
+        date_format: user.date_format || 'auto',
         assistant_name_zh: user.assistant_name_zh,
         assistant_name_en: user.assistant_name_en,
         assistant_tone_zh: user.assistant_tone_zh,
@@ -69,17 +71,17 @@ const SettingsPage: React.FC = () => {
   const onFinish = async (values: any) => {
     if (!user) {
       localStorage.setItem(GUEST_NAME_KEY, values.display_name || '');
-      message.success('Guest settings saved locally!');
+      message.success(t('guest_settings_saved'));
       return;
     }
 
     setLoading(true);
     try {
       await axios.post('/api/settings', { email: user.email, ...values });
-      message.success('Settings saved successfully!');
+      message.success(t('settings_saved'));
       refreshUser();
     } catch {
-      message.error('Failed to save settings.');
+      message.error(t('settings_save_failed'));
     } finally {
       setLoading(false);
     }
@@ -91,12 +93,12 @@ const SettingsPage: React.FC = () => {
     try {
       const res = await axios.post('/api/data-deletion/request', { email: user.email });
       if (res.data?.status === 'success') {
-        message.success('Deletion request submitted. Please check your email for the confirmation link.');
+        message.success(t('deletion_requested'));
       } else {
-        message.error(res.data?.message || 'Failed to request data deletion.');
+        message.error(res.data?.message || t('deletion_request_failed'));
       }
     } catch {
-      message.error('Failed to request data deletion.');
+      message.error(t('deletion_request_failed'));
     } finally {
       setDeleting(false);
     }
@@ -106,17 +108,17 @@ const SettingsPage: React.FC = () => {
     <Card title={t('system_settings')} bordered={false} style={{ margin: '0 auto' }}>
       {!user && (
         <Alert
-          message="Guest Mode"
-          description="You are currently not logged in. Settings like your nickname will be stored only in this browser."
+          message={t('guest_mode_title')}
+          description={t('guest_mode_desc')}
           type="info"
           showIcon
           style={{ marginBottom: 20 }}
         />
       )}
       <Form form={form} layout="vertical" onFinish={onFinish}>
-        <Title level={5} style={{ marginBottom: 16 }}>Personal Info</Title>
-        <Form.Item name="display_name" label="Your Display Name (顯示名稱)" tooltip="How the AI assistant and system should call you.">
-          <Input placeholder="e.g. Yihua, Master, etc." />
+        <Title level={5} style={{ marginBottom: 16 }}>{t('personal_info')}</Title>
+        <Form.Item name="display_name" label={t('display_name_label')} tooltip={t('display_name_tooltip')}>
+          <Input placeholder={t('display_name_placeholder')} />
         </Form.Item>
 
         {user && (
@@ -137,25 +139,25 @@ const SettingsPage: React.FC = () => {
             </Row>
             <Row gutter={16}>
               <Col span={12}>
-                <Form.Item name="assistant_tone_zh" label={t('assistant_tone_zh')} tooltip="設定中文回覆時的語氣，例如：專業、親切、簡短、幽默。">
+                <Form.Item name="assistant_tone_zh" label={t('assistant_tone_zh')} tooltip={t('assistant_tone_zh_tooltip')}>
                   <Input placeholder="e.g. 專業且快速" />
                 </Form.Item>
               </Col>
               <Col span={12}>
-                <Form.Item name="assistant_tone_en" label={t('assistant_tone_en')} tooltip="Set the tone for English replies, e.g. professional, friendly, concise, witty.">
+                <Form.Item name="assistant_tone_en" label={t('assistant_tone_en')} tooltip={t('assistant_tone_en_tooltip')}>
                   <Input placeholder="e.g. witty and brief" />
                 </Form.Item>
               </Col>
             </Row>
 
             <Title level={5} style={{ margin: '24px 0 16px' }}>{t('processing_preferences')}</Title>
-            <Form.Item name="dry_run" label="Dry Run Mode (試運行模式)" valuePropName="checked" tooltip="When enabled, AI replies are drafted and sent to your own email for review. When disabled, they are sent directly to the original sender.">
+            <Form.Item name="dry_run" label={t('dry_run_label')} valuePropName="checked" tooltip={t('dry_run_tooltip')}>
               <Switch />
             </Form.Item>
-            <Form.Item name="auto_reply" label="Auto Reply (自動回覆)" valuePropName="checked" tooltip="Automatically send the AI-generated reply. If Dry Run is off, this will send it to the external sender.">
+            <Form.Item name="auto_reply" label={t('auto_reply_label')} valuePropName="checked" tooltip={t('auto_reply_tooltip')}>
               <Switch />
             </Form.Item>
-            <Form.Item name="email_format" label={t('email_format')} tooltip="Choose how magic links and notifications are sent to you.">
+            <Form.Item name="email_format" label={t('email_format')} tooltip={t('email_format_tooltip')}>
               <Radio.Group>
                 <Radio value="both">{t('format_both')}</Radio>
                 <Radio value="html">{t('format_html')}</Radio>
@@ -165,9 +167,9 @@ const SettingsPage: React.FC = () => {
 
             <Form.Item
               name="mail_send_method"
-              label="Mail Send Method"
-              tooltip="Preferred delivery method for outgoing emails. The system will automatically fall back to the other method if delivery fails."
-              rules={[{ required: true, message: 'Please select a mail send method' }]}
+              label={t('mail_send_method_label')}
+              tooltip={t('mail_send_method_tooltip')}
+              rules={[{ required: true, message: t('mail_send_method_required') }]}
             >
               <Radio.Group>
                 <Radio value="direct_mx">Direct MX (default)</Radio>
@@ -177,13 +179,13 @@ const SettingsPage: React.FC = () => {
 
             <Form.Item
               name="rule_label_mode"
-              label="Rule Label Mode"
-              tooltip="Choose whether rule names are generated by AI first or by deterministic algorithm only."
-              rules={[{ required: true, message: 'Please select a rule label mode' }]}
+              label={t('rule_label_mode_label')}
+              tooltip={t('rule_label_mode_tooltip')}
+              rules={[{ required: true, message: t('rule_label_mode_required') }]}
             >
               <Radio.Group>
-                <Radio value="ai_first">AI first</Radio>
-                <Radio value="deterministic_only">Deterministic only</Radio>
+                <Radio value="ai_first">{t('rule_label_mode_ai_first')}</Radio>
+                <Radio value="deterministic_only">{t('rule_label_mode_deterministic')}</Radio>
               </Radio.Group>
             </Form.Item>
 
@@ -202,8 +204,8 @@ const SettingsPage: React.FC = () => {
             <Form.Item
               name="preferred_language"
               label={t('preferred_language')}
-              tooltip="Language used for system-generated emails sent to you."
-              rules={[{ required: true, message: 'Please select a language' }]}
+              tooltip={t('preferred_language_tooltip')}
+              rules={[{ required: true, message: t('preferred_language_required') }]}
             >
               <Select
                 options={[
@@ -215,9 +217,9 @@ const SettingsPage: React.FC = () => {
 
             <Form.Item
               name="timezone"
-              label="Timezone"
-              tooltip="Used to display local times in Dashboard."
-              rules={[{ required: true, message: 'Please select a timezone' }]}
+              label={t('timezone_label')}
+              tooltip={t('timezone_tooltip')}
+              rules={[{ required: true, message: t('timezone_required') }]}
             >
               <Select
                 showSearch
@@ -235,9 +237,36 @@ const SettingsPage: React.FC = () => {
               />
             </Form.Item>
 
-            <Title level={5} style={{ margin: '24px 0 16px' }}>PDF Passwords</Title>
+            <Form.Item
+              name="time_format"
+              label={t('time_format_label')}
+              tooltip={t('time_format_tooltip')}
+            >
+              <Radio.Group>
+                <Radio value="24h">{t('time_format_24h')}</Radio>
+                <Radio value="12h">{t('time_format_12h')}</Radio>
+              </Radio.Group>
+            </Form.Item>
+
+            <Form.Item
+              name="date_format"
+              label={t('date_format_label')}
+              tooltip={t('date_format_tooltip')}
+            >
+              <Select
+                options={[
+                  { value: 'auto', label: t('date_format_auto') },
+                  { value: 'tw', label: t('date_format_tw') },
+                  { value: 'iso', label: t('date_format_iso') },
+                  { value: 'us', label: t('date_format_us') },
+                  { value: 'eu', label: t('date_format_eu') },
+                ]}
+              />
+            </Form.Item>
+
+            <Title level={5} style={{ margin: '24px 0 16px' }}>{t('pdf_passwords_title')}</Title>
             <Typography.Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 16 }}>
-              If some PDF attachments are encrypted, add the passwords here so the system can decode and convert them into Markdown.
+              {t('pdf_passwords_desc')}
             </Typography.Paragraph>
             <Form.List name="pdf_passwords">
               {(fields, { add, remove }) => (
@@ -247,18 +276,18 @@ const SettingsPage: React.FC = () => {
                       <Form.Item
                         {...field}
                         style={{ marginBottom: 0, minWidth: 340 }}
-                        rules={[{ required: true, message: 'Password cannot be empty' }]}
+                        rules={[{ required: true, message: t('pdf_password_required') }]}
                       >
-                        <Input.Password placeholder="PDF password" />
+                        <Input.Password placeholder={t('pdf_password_placeholder')} />
                       </Form.Item>
                       <Button onClick={() => remove(field.name)} danger>
-                        Remove
+                        {t('pdf_remove_password')}
                       </Button>
                     </Space>
                   ))}
                   <Form.Item>
                     <Button type="dashed" onClick={() => add()} icon={<PlusOutlined />}>
-                      Add PDF Password
+                      {t('pdf_add_password')}
                     </Button>
                   </Form.Item>
                 </>
@@ -269,17 +298,17 @@ const SettingsPage: React.FC = () => {
 
         <Form.Item style={{ marginTop: 32 }}>
           <Button type="primary" htmlType="submit" loading={loading} icon={<SettingOutlined />} block>
-            Save Settings
+            {t('save_settings')}
           </Button>
         </Form.Item>
 
         {user && (
-          <Card size="small" title="GDPR / Data Deletion" style={{ marginTop: 12, borderColor: '#ffd8bf' }}>
+          <Card size="small" title={t('gdpr_title')} style={{ marginTop: 12, borderColor: '#ffd8bf' }}>
             <Typography.Paragraph style={{ marginBottom: 12, color: '#8c8c8c' }}>
-              You can request deletion of all your data. The system will email you a confirmation link with a data summary report. After opening the link, you must confirm again before final deletion.
+              {t('gdpr_desc')}
             </Typography.Paragraph>
             <Button danger loading={deleting} onClick={requestDataDeletion}>
-              Request Deletion of All My Data
+              {t('gdpr_button')}
             </Button>
           </Card>
         )}

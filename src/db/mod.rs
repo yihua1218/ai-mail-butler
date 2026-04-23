@@ -52,6 +52,8 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_consent_updated_at DATETIME").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN mail_send_method TEXT NOT NULL DEFAULT 'direct_mx'").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN rule_label_mode TEXT NOT NULL DEFAULT 'ai_first'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN time_format TEXT NOT NULL DEFAULT '24h'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT 'auto'").execute(&pool).await;
 
     // Table for tracking repetitive behaviors/questions for analytics
     sqlx::query(

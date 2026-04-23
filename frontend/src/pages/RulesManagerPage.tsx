@@ -115,10 +115,10 @@ const RulesManagerPage: React.FC = () => {
     try {
       await axios.post('/api/rules/delete', { email: user.email, id });
       setConfirmDeleteId(null);
-      message.success('Rule deleted');
+      message.success(t('rules_deleted'));
       loadRules();
     } catch {
-      message.error('Failed to delete rule');
+      message.error(t('rules_delete_failed'));
     }
   };
 
@@ -134,7 +134,7 @@ const RulesManagerPage: React.FC = () => {
       },
     },
     {
-      title: 'Details',
+      title: t('rules_details'),
       dataIndex: 'rule_text',
       key: 'rule_text',
       ellipsis: true,
@@ -152,10 +152,10 @@ const RulesManagerPage: React.FC = () => {
       dataIndex: 'source',
       key: 'source',
       width: 120,
-      render: (v: string) => <Tag color={v === 'chat' ? 'cyan' : 'default'}>{v}</Tag>,
+      render: (v: string) => <Tag color={v === 'chat' ? 'cyan' : 'default'}>{v === 'chat' ? t('rules_source_chat') : t('rules_source_manual')}</Tag>,
     },
     {
-      title: 'Matched',
+      title: t('rules_matched'),
       dataIndex: 'matched_count',
       key: 'matched_count',
       width: 110,
@@ -178,10 +178,20 @@ const RulesManagerPage: React.FC = () => {
       render: (value: string) => {
         if (!value) return '-';
         const timezone = user?.timezone || 'UTC';
+        const timeFormat = user?.time_format || '24h';
+        const dateFormat = user?.date_format || 'auto';
         const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
         const date = new Date(iso);
         if (Number.isNaN(date.getTime())) return value;
-        return new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+        const localeMap: Record<string, string> = {
+          iso: 'en-CA',
+          us: 'en-US',
+          eu: 'fr-FR',
+          tw: 'zh-TW',
+          auto: i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US',
+        };
+        const locale = localeMap[dateFormat] ?? (i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US');
+        return new Intl.DateTimeFormat(locale, {
           timeZone: timezone,
           year: 'numeric',
           month: '2-digit',
@@ -189,7 +199,7 @@ const RulesManagerPage: React.FC = () => {
           hour: '2-digit',
           minute: '2-digit',
           second: '2-digit',
-          hour12: false,
+          hour12: timeFormat === '12h',
         }).format(date);
       },
     },
@@ -210,13 +220,13 @@ const RulesManagerPage: React.FC = () => {
           </Button>
           {confirmDeleteId === record.id ? (
             <Space>
-              <span style={{ color: '#cf1322', fontSize: 13 }}>確定刪除?</span>
-              <Button size="small" danger onClick={() => deleteRule(record.id)}>確定</Button>
-              <Button size="small" onClick={() => setConfirmDeleteId(null)}>取消</Button>
+              <span style={{ color: '#cf1322', fontSize: 13 }}>{t('rules_confirm_delete')}</span>
+              <Button size="small" danger onClick={() => deleteRule(record.id)}>{t('rules_confirm_yes')}</Button>
+              <Button size="small" onClick={() => setConfirmDeleteId(null)}>{t('rules_confirm_cancel')}</Button>
             </Space>
           ) : (
             <Button danger icon={<DeleteOutlined />} onClick={() => setConfirmDeleteId(record.id)}>
-              Delete
+              {t('rules_delete')}
             </Button>
           )}
         </Space>
@@ -230,8 +240,8 @@ const RulesManagerPage: React.FC = () => {
         <Alert
           type="info"
           showIcon
-          message="Please login first"
-          description="Rule management is available for logged-in users only."
+          message={t('rules_login_required')}
+          description={t('rules_login_desc')}
         />
       </Card>
     );

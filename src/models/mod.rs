@@ -35,6 +35,10 @@ pub struct User {
     pub mail_send_method: String,
     #[serde(default = "default_rule_label_mode")]
     pub rule_label_mode: String,
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+    #[serde(default = "default_date_format")]
+    pub date_format: String,
 }
 
 fn default_both() -> String { "both".to_string() }
@@ -48,6 +52,10 @@ fn default_language() -> String { "en".to_string() }
 fn default_mail_send_method() -> String { "direct_mx".to_string() }
 
 fn default_rule_label_mode() -> String { "ai_first".to_string() }
+
+fn default_time_format() -> String { "24h".to_string() }
+
+fn default_date_format() -> String { "auto".to_string() }
 
 #[cfg(test)]
 mod tests {

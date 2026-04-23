@@ -2458,6 +2458,8 @@ struct SettingsRequest {
     assistant_tone_zh: Option<String>,
     assistant_tone_en: Option<String>,
     pdf_passwords: Option<Vec<String>>,
+    time_format: Option<String>,
+    date_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2535,10 +2537,24 @@ async fn post_settings(
         .filter(|v| *v == "ai_first" || *v == "deterministic_only")
         .unwrap_or("ai_first")
         .to_string();
-    
+    let time_format = payload
+        .time_format
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| *v == "24h" || *v == "12h")
+        .unwrap_or("24h")
+        .to_string();
+    let date_format = payload
+        .date_format
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| matches!(*v, "auto" | "iso" | "us" | "eu" | "tw"))
+        .unwrap_or("auto")
+        .to_string();
+
     let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, rule_label_mode = ?, training_data_consent = ?, \
                               training_consent_updated_at = CASE WHEN training_data_consent != ? THEN CURRENT_TIMESTAMP ELSE training_consent_updated_at END, \
-                              timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ? WHERE email = ?")
+                              timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ?, time_format = ?, date_format = ? WHERE email = ?")
         .bind(payload.auto_reply)
         .bind(payload.dry_run)
         .bind(&payload.email_format)
@@ -2554,6 +2570,8 @@ async fn post_settings(
         .bind(&payload.assistant_tone_zh)
         .bind(&payload.assistant_tone_en)
         .bind(pdf_passwords_json)
+        .bind(&time_format)
+        .bind(&date_format)
         .bind(&payload.email)
         .execute(&state.pool).await;
 

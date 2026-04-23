@@ -87,7 +87,7 @@ const App: React.FC = () => {
       '3': t('settings'),
       '4': t('about'),
       '5': t('rules'),
-      '6': 'Finance',
+      '6': t('finance'),
       '7': t('privacy.title'),
       '8': t('how_it_works'),
     };
@@ -229,7 +229,7 @@ const App: React.FC = () => {
                 { key: '2', label: t('ai_chat') },
                 { key: '3', label: t('settings') },
                 { key: '5', label: t('rules') },
-                { key: '6', label: 'Finance' },
+                { key: '6', label: t('finance') },
                 { key: '7', label: t('privacy.title') },
                 { key: '8', label: t('how_it_works') },
                 { key: '4', label: t('about') },
@@ -240,12 +240,12 @@ const App: React.FC = () => {
             {user ? (
               <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                 <span style={{ color: '#1d1d1f', fontWeight: 500 }}>{user.display_name || user.email}</span>
-                <Button size="small" onClick={logout} icon={<LogoutOutlined />}>Logout</Button>
+                <Button size="small" onClick={logout} icon={<LogoutOutlined />}>{t('logout')}</Button>
               </div>
             ) : (
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {isLinkSent ? (
-                  <span style={{ color: '#34c759', fontSize: '14px' }}>Magic Link Sent! Check console.</span>
+                  <span style={{ color: '#34c759', fontSize: '14px' }}>{t('magic_link_sent')}</span>
                 ) : (
                   <>
                     <Input
@@ -256,7 +256,7 @@ const App: React.FC = () => {
                       onPressEnter={handleLogin}
                       style={{ width: 200 }}
                     />
-                    <Button size="small" type="primary" onClick={handleLogin} icon={<LoginOutlined />}>Login</Button>
+                    <Button size="small" type="primary" onClick={handleLogin} icon={<LoginOutlined />}>{t('login')}</Button>
                   </>
                 )}
               </div>
@@ -269,8 +269,6 @@ const App: React.FC = () => {
         <Content
           style={{
             padding: '32px clamp(16px, 3vw, 52px)',
-            maxWidth: '1800px',
-            margin: '0 auto',
             width: '100%',
           }}
         >
