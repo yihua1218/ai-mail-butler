@@ -196,16 +196,16 @@ const DashboardPage: React.FC = () => {
     : personalEmails.filter((e: any) => e.status === statusFilter);
 
   const columns = [
-    { title: 'Subject', dataIndex: 'subject', key: 'subject' },
+    { title: t('col_subject'), dataIndex: 'subject', key: 'subject' },
     {
-      title: 'Rule Label',
+      title: t('col_rule_label'),
       dataIndex: 'matched_rule_label',
       key: 'matched_rule_label',
       width: 140,
       render: (value?: string) => value ? <Tag color="blue">{value}</Tag> : '-',
     },
     {
-      title: 'Status',
+      title: t('col_status', { defaultValue: 'Status' }),
       dataIndex: 'status',
       key: 'status',
       render: (value: string) => {
@@ -219,13 +219,13 @@ const DashboardPage: React.FC = () => {
       },
     },
     {
-      title: 'Received At',
+      title: t('col_received_at'),
       dataIndex: 'received_at',
       key: 'received_at',
       render: (value: string) => formatInUserTimezone(value),
     },
     {
-      title: 'Action',
+      title: t('col_action'),
       key: 'action',
       width: 320,
       render: (_: unknown, record: any) => (
@@ -238,11 +238,11 @@ const DashboardPage: React.FC = () => {
             loading={reprocessingEmailId === record.id}
             onClick={() => reprocessSingleEmail(record.id)}
           >
-            Reprocess
+            {t('btn_reprocess')}
           </Button>
           {record.status === 'drafted' && (
             <Button size="small" type="primary" onClick={() => openDraftEditor(record.id)}>
-              View/Edit Draft
+              {t('btn_view_edit_draft')}
             </Button>
           )}
         </Space>
@@ -260,31 +260,31 @@ const DashboardPage: React.FC = () => {
 
   const errorColumns = [
     {
-      title: 'Level',
+      title: t('col_level'),
       dataIndex: 'level',
       key: 'level',
       width: 90,
       render: (v: string) => <Tag color={v === 'WARN' ? 'gold' : 'red'}>{v}</Tag>,
     },
     {
-      title: 'Type',
+      title: t('col_type'),
       dataIndex: 'error_type',
       key: 'error_type',
       width: 120,
       render: (v: string) => <Tag color={errorTypeColor[v] || 'default'}>{v}</Tag>,
     },
-    { title: 'User', dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' },
-    { title: 'Message', dataIndex: 'message', key: 'message', ellipsis: true },
-    { title: 'Context', dataIndex: 'context', key: 'context', width: 180, ellipsis: true },
+    { title: t('col_user'), dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' },
+    { title: t('col_message'), dataIndex: 'message', key: 'message', ellipsis: true },
+    { title: t('col_context'), dataIndex: 'context', key: 'context', width: 180, ellipsis: true },
     {
-      title: 'Time',
+      title: t('col_time'),
       dataIndex: 'occurred_at',
       key: 'occurred_at',
       width: 190,
       render: (value: string) => formatInUserTimezone(value),
     },
     {
-      title: 'Action',
+      title: t('col_action'),
       key: 'action',
       width: 120,
       render: (_: unknown, record: any) => {
@@ -364,48 +364,48 @@ const DashboardPage: React.FC = () => {
   });
 
   const feedbackColumns = [
-    ...(isPrivileged ? [{ title: 'User', dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' }] : []),
+    ...(isPrivileged ? [{ title: t('col_user'), dataIndex: 'user_email', key: 'user_email', width: 220, render: (v: string) => v || '-' }] : []),
     {
-      title: 'Rating',
+      title: t('col_rating'),
       dataIndex: 'rating',
       key: 'rating',
       width: 90,
       render: (v: string) => <Tag color={v === 'up' ? 'green' : 'volcano'}>{v === 'up' ? '👍' : '👎'}</Tag>,
     },
     {
-      title: 'Suggestion',
+      title: t('col_suggestion'),
       dataIndex: 'suggestion',
       key: 'suggestion',
       render: (v: string) => v || '-',
     },
     {
-      title: 'Read',
+      title: t('col_read'),
       dataIndex: 'is_read',
       key: 'is_read',
       width: 100,
-      render: (v: boolean) => <Tag color={v ? 'green' : 'orange'}>{v ? 'Read' : 'Unread'}</Tag>,
+      render: (v: boolean) => <Tag color={v ? 'green' : 'orange'}>{v ? t('col_read') : t('col_unread', { defaultValue: 'Unread' })}</Tag>,
     },
     {
-      title: 'AI Reply',
+      title: t('col_ai_reply'),
       dataIndex: 'admin_reply',
       key: 'admin_reply',
       render: (v: string) => v || '-',
     },
     {
-      title: 'Time',
+      title: t('col_time'),
       dataIndex: 'created_at',
       key: 'created_at',
       width: 170,
       render: (value: string) => formatInUserTimezone(value),
     },
     ...(isPrivileged ? [{
-      title: 'Action',
+      title: t('col_action'),
       key: 'action',
       width: 260,
       render: (_: unknown, record: any) => (
         <Space>
           <Button size="small" onClick={() => markFeedbackRead(record.id, !record.is_read)}>
-            {record.is_read ? 'Mark Unread' : 'Mark Read'}
+            {record.is_read ? t('btn_mark_unread') : t('btn_mark_read')}
           </Button>
           <Button
             size="small"
@@ -416,7 +416,7 @@ const DashboardPage: React.FC = () => {
               setReplyText(record.admin_reply || '');
             }}
           >
-            Reply as AI
+            {t('btn_reply_as_ai')}
           </Button>
         </Space>
       ),
@@ -535,7 +535,7 @@ const DashboardPage: React.FC = () => {
           style={{ width: 130 }}
           onChange={setLogLevelFilter}
           options={[
-            { value: 'all', label: 'All Levels' },
+            { value: 'all', label: t('log_all_levels') },
             { value: 'ERROR', label: 'ERROR' },
             { value: 'WARN', label: 'WARN' },
           ]}
@@ -545,7 +545,7 @@ const DashboardPage: React.FC = () => {
           style={{ width: 180 }}
           onChange={setLogTypeFilter}
           options={[
-            { value: 'all', label: 'All Types' },
+            { value: 'all', label: t('log_all_types') },
             ...logTypeOptions.map((v) => ({ value: v, label: v })),
           ]}
         />
@@ -554,12 +554,12 @@ const DashboardPage: React.FC = () => {
           style={{ width: 220 }}
           onChange={setLogUserFilter}
           options={[
-            { value: 'all', label: 'All Users' },
-            { value: '__unassigned__', label: 'Unassigned' },
+            { value: 'all', label: t('log_all_users') },
+            { value: '__unassigned__', label: t('log_unassigned') },
             ...logUserOptions.map((v) => ({ value: v, label: v })),
           ]}
         />
-        <Input placeholder="Search message/type/context" value={logKeyword} onChange={(e) => setLogKeyword(e.target.value)} style={{ width: 260 }} />
+        <Input placeholder={t('log_search_placeholder')} value={logKeyword} onChange={(e) => setLogKeyword(e.target.value)} style={{ width: 260 }} />
         <Input type="datetime-local" value={logTimeFrom} onChange={(e) => setLogTimeFrom(e.target.value)} style={{ width: 210 }} />
         <Input type="datetime-local" value={logTimeTo} onChange={(e) => setLogTimeTo(e.target.value)} style={{ width: 210 }} />
         <Button
@@ -572,7 +572,7 @@ const DashboardPage: React.FC = () => {
             setLogTimeTo(defaultNowLocal());
           }}
         >
-          Reset
+          {t('log_reset')}
         </Button>
       </Space>
     </div>
@@ -581,7 +581,7 @@ const DashboardPage: React.FC = () => {
   const GlobalStatsDisplay = () => (
     globalStats ? (
       <div style={{ marginBottom: isUltraWide ? 0 : 32 }}>
-        <Title level={4}>System Overview</Title>
+        <Title level={4}>{t('dashboard_system_overview')}</Title>
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={8} md={6}>
             <Card bordered={false} hoverable styles={{ body: { padding: '16px' } }}>
@@ -611,16 +611,16 @@ const DashboardPage: React.FC = () => {
   const PersonalStatsDisplay = () => (
     personalStats ? (
       <div style={{ marginBottom: isUltraWide ? 0 : 32 }}>
-        <Title level={4}>Your Processing Status</Title>
+        <Title level={4}>{t('dashboard_your_processing')}</Title>
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={8} md={6}>
             <Card bordered={false} hoverable styles={{ body: { padding: '16px' } }}>
-              <Statistic title="Your Received" value={personalStats.emails_received} prefix={<MailOutlined style={{ color: '#34c759' }} />} />
+              <Statistic title={t('col_your_received')} value={personalStats.emails_received} prefix={<MailOutlined style={{ color: '#34c759' }} />} />
             </Card>
           </Col>
           <Col xs={12} sm={8} md={6}>
             <Card bordered={false} hoverable styles={{ body: { padding: '16px' } }}>
-              <Statistic title="Your Replied" value={personalStats.emails_replied} prefix={<MessageOutlined style={{ color: '#ff9500' }} />} />
+              <Statistic title={t('col_your_replied')} value={personalStats.emails_replied} prefix={<MessageOutlined style={{ color: '#ff9500' }} />} />
             </Card>
           </Col>
         </Row>
@@ -683,7 +683,7 @@ const DashboardPage: React.FC = () => {
 
   const DraftEditorModal = () => (
     <Modal
-      title={editingDraft ? `Draft Reply - ${editingDraft.subject || '(no subject)'}` : 'Draft Reply'}
+      title={editingDraft ? `${t('draft_modal_title')} - ${editingDraft.subject || '(no subject)'}` : t('draft_modal_title')}
       open={draftEditorOpen}
       onCancel={() => {
         setDraftEditorOpen(false);
@@ -696,13 +696,13 @@ const DashboardPage: React.FC = () => {
           setEditingDraft(null);
           setDraftEditorText('');
         }}>
-          Cancel
+          {t('btn_cancel')}
         </Button>,
         <Button key="save" onClick={saveDraftChanges} loading={savingDraft}>
-          Save Draft
+          {t('btn_save_draft')}
         </Button>,
         <Button key="send" type="primary" onClick={sendDraftNow} loading={sendingDraft}>
-          Send Now
+          {t('btn_send_now')}
         </Button>,
       ]}
     >
@@ -801,17 +801,17 @@ const DashboardPage: React.FC = () => {
                 title={
                   <span>
                     <WarningOutlined style={{ color: '#ff4d4f', marginRight: 8 }} />
-                    Mail Server Logs (Error + Warn)
+                    {t('dashboard_mail_logs_admin')}
                     {mailErrors.length > 0 && <Badge count={filteredMailErrors.length} style={{ marginLeft: 8, backgroundColor: '#ff4d4f' }} />}
                   </span>
                 }
               >
                 <LogFilterBar />
                 {mailErrors.length === 0
-                  ? <Alert message="No logs recorded." type="success" showIcon />
+                  ? <Alert message={t('dashboard_no_logs')} type="success" showIcon />
                   : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 10 }} size="small" />}
               </Card>
-              <Card bordered={false} title="User Feedback Suggestions">
+              <Card bordered={false} title={t('dashboard_feedback_admin')}>
                 <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />
               </Card>
             </Space>
@@ -819,7 +819,7 @@ const DashboardPage: React.FC = () => {
         </Row>
 
         <Modal
-          title="Reply to Feedback (sent as AI assistant)"
+          title={t('feedback_reply_modal_title')}
           open={!!replyingFeedback}
           onCancel={() => {
             setReplyingFeedback(null);
@@ -832,7 +832,7 @@ const DashboardPage: React.FC = () => {
             rows={5}
             value={replyText}
             onChange={(e) => setReplyText(e.target.value)}
-            placeholder="Type reply that will be emailed to the user from AI assistant mailbox"
+            placeholder={t('feedback_reply_placeholder')}
           />
         </Modal>
 
@@ -862,15 +862,15 @@ const DashboardPage: React.FC = () => {
           </Col>
           <Col xs={24} xxl={10}>
             <Space direction="vertical" size={24} style={{ width: '100%' }}>
-              <Card bordered={false} title="Your Mail Server Logs">
+              <Card bordered={false} title={t('dashboard_mail_logs_user')}>
                 <LogFilterBar />
                 {mailErrors.length === 0
-                  ? <Alert message="No logs related to your account." type="success" showIcon />
+                  ? <Alert message={t('dashboard_no_logs_user')} type="success" showIcon />
                   : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />}
               </Card>
-              <Card bordered={false} title="Your Feedback Suggestions">
+              <Card bordered={false} title={t('dashboard_feedback_user')}>
                 {feedbackRows.length === 0
-                  ? <Alert message="No feedback submitted yet." type="info" showIcon />
+                  ? <Alert message={t('dashboard_no_feedback')} type="info" showIcon />
                   : <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />}
               </Card>
             </Space>
@@ -888,11 +888,11 @@ const DashboardPage: React.FC = () => {
     <div>
       <div style={{ marginBottom: 32 }}>
         <Title level={2}>{t('welcome')}{guestName ? `, ${guestName}` : ''}</Title>
-        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>Your intelligent email assistant is processing emails across the network.</Paragraph>
+        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>{t('dashboard_guest_desc')}</Paragraph>
       </div>
       <GlobalStatsDisplay />
       <div style={{ textAlign: 'center', marginTop: 60 }}>
-        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>Please login to access your personal dashboard and processing status.</Paragraph>
+        <Paragraph style={{ color: '#86868b', fontSize: '16px' }}>{t('dashboard_login_prompt')}</Paragraph>
       </div>
     </div>
   );

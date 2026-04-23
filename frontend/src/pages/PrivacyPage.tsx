@@ -110,14 +110,14 @@ const PrivacyPage: React.FC = () => {
       const res = await fetch(`${api}/consent/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ consent_type: consentType, consent_granted: granted }),
+        body: JSON.stringify({ email: user?.email, consent_type: consentType, consent_granted: granted }),
       });
       const data = await res.json();
       if (data.status === 'success') {
         message.success(t('privacy.consent_updated'));
         fetchData();
       } else {
-        message.error(data.message || t('common.error'));
+        message.error(data.message === 'User not found' ? t('privacy.user_not_found') : (data.message || t('common.error')));
       }
     } catch {
       message.error(t('common.error'));
@@ -129,14 +129,14 @@ const PrivacyPage: React.FC = () => {
       const res = await fetch(`${api}/dsar/request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_type: requestType }),
+        body: JSON.stringify({ email: user?.email, request_type: requestType }),
       });
       const data = await res.json();
       if (data.status === 'success') {
         message.success(t('privacy.dsar_requested'));
         fetchData();
       } else {
-        message.error(data.message || t('common.error'));
+        message.error(data.message === 'User not found' ? t('privacy.user_not_found') : (data.message || t('common.error')));
       }
     } catch {
       message.error(t('common.error'));
@@ -149,6 +149,7 @@ const PrivacyPage: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          email: user?.email,
           do_not_sell_share: settings.do_not_sell_share,
           cross_border_disclosure_given: settings.cross_border_disclosure_given,
           data_location_preference: settings.data_location_preference,
@@ -159,7 +160,7 @@ const PrivacyPage: React.FC = () => {
         message.success(t('privacy.settings_updated'));
         fetchData();
       } else {
-        message.error(data.message || t('common.error'));
+        message.error(data.message === 'User not found' ? t('privacy.user_not_found') : (data.message || t('common.error')));
       }
     } catch {
       message.error(t('common.error'));
@@ -172,6 +173,7 @@ const PrivacyPage: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          email: user?.email,
           is_minor: isMinor,
           guardian_consent_given: isMinor,
           guardian_email: guardianEmail,
@@ -182,7 +184,7 @@ const PrivacyPage: React.FC = () => {
         message.success(t('privacy.age_verified'));
         fetchData();
       } else {
-        message.error(data.message || t('common.error'));
+        message.error(data.message === 'User not found' ? t('privacy.user_not_found') : (data.message || t('common.error')));
       }
     } catch {
       message.error(t('common.error'));
@@ -347,13 +349,13 @@ const PrivacyPage: React.FC = () => {
                       {
                         title: t('privacy.do_not_sell_share'),
                         description: t('privacy.do_not_sell_share_desc'),
-                        checked: privacySettings?.do_not_sell_share || false,
+                      checked: privacySettings?.do_not_sell_share ?? true,
                         onChange: (v: boolean) => handlePrivacySettings({ do_not_sell_share: v }),
                       },
                       {
                         title: t('privacy.cross_border'),
                         description: t('privacy.cross_border_desc'),
-                        checked: privacySettings?.cross_border_disclosure_given || false,
+                      checked: privacySettings?.cross_border_disclosure_given ?? false,
                         onChange: (v: boolean) => handlePrivacySettings({ cross_border_disclosure_given: v }),
                       },
                     ]}

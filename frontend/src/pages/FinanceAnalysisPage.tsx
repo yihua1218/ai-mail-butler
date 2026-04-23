@@ -94,9 +94,9 @@ const FinanceAnalysisPage: React.FC = () => {
 
   const monthlyColumns = [
     { title: t('finance_month_col'), dataIndex: 'month_key', key: 'month_key', width: 120 },
-    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color="blue">{v}</Tag> },
+    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color="blue">{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
     { title: t('finance_total_amount_col'), dataIndex: 'total_amount', key: 'total_amount', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
-    { title: t('finance_updated_at_col'), dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => formatInUserTimezone(v) },
+    { title: t('finance_updated_at_col'), dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
   ];
 
   const filteredRecords = emailIdFromQuery
@@ -104,12 +104,12 @@ const FinanceAnalysisPage: React.FC = () => {
     : records;
 
   const recordColumns = [
-    { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => formatInUserTimezone(v) },
+    { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
     { title: t('finance_subject_col'), dataIndex: 'subject', key: 'subject', ellipsis: true },
     { title: t('finance_reason_col'), dataIndex: 'reason', key: 'reason', ellipsis: true },
-    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 120, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{v}</Tag> : '-' },
-    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{v}</Tag> },
-    { title: t('finance_direction_col'), dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{v}</Tag> },
+    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 120, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> : '-' },
+    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
+    { title: t('finance_direction_col'), dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{t(`finance_dir_${v}`, { defaultValue: v })}</Tag> },
     { title: t('finance_amount_col'), dataIndex: 'amount', key: 'amount', width: 130, render: (v: number) => v?.toLocaleString() ?? '0' },
     { title: t('statement_amount'), dataIndex: 'statement_amount', key: 'statement_amount', width: 150, render: (v?: number) => (typeof v === 'number' ? v.toLocaleString() : '-') },
     { title: t('due_date'), dataIndex: 'due_date', key: 'due_date', width: 130, render: (v?: string) => v || '-' },

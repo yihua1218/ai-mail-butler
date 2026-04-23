@@ -3448,6 +3448,7 @@ async fn post_confirm_data_deletion(
 
 #[derive(Deserialize)]
 struct ConsentUpdateRequest {
+    email: String,
     consent_type: String,
     consent_granted: bool,
 }
@@ -3456,7 +3457,10 @@ async fn post_consent_update(
     State(state): State<AppState>,
     Json(req): Json<ConsentUpdateRequest>,
 ) -> Json<serde_json::Value> {
-    let user_email = "user@example.com"; 
+    let user_email = req.email.trim().to_lowercase();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
         .bind(&user_email)
         .fetch_optional(&state.pool)
@@ -3517,6 +3521,7 @@ async fn get_consent_history(
 
 #[derive(Deserialize)]
 struct DsarRequestInput {
+    email: String,
     request_type: String,
 }
 
@@ -3524,7 +3529,10 @@ async fn post_dsar_request(
     State(state): State<AppState>,
     Json(req): Json<DsarRequestInput>,
 ) -> Json<serde_json::Value> {
-    let user_email = "user@example.com";
+    let user_email = req.email.trim().to_lowercase();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
         .bind(&user_email)
         .fetch_optional(&state.pool)
@@ -3542,7 +3550,7 @@ async fn post_dsar_request(
 
     let id = uuid::Uuid::new_v4().to_string();
     let snapshot = serde_json::json!({
-        "user_email": user_email,
+        "user_email": &user_email,
         "requested_at": chrono::Utc::now().to_rfc3339(),
     });
 
@@ -3581,6 +3589,7 @@ async fn get_dsar_status(
 
 #[derive(Deserialize)]
 struct PrivacySettingsInput {
+    email: String,
     do_not_sell_share: Option<bool>,
     cross_border_disclosure_given: Option<bool>,
     data_location_preference: Option<String>,
@@ -3590,7 +3599,10 @@ async fn post_privacy_settings(
     State(state): State<AppState>,
     Json(req): Json<PrivacySettingsInput>,
 ) -> Json<serde_json::Value> {
-    let user_email = "user@example.com";
+    let user_email = req.email.trim().to_lowercase();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
         .bind(&user_email)
         .fetch_optional(&state.pool)
@@ -3651,6 +3663,7 @@ async fn get_privacy_settings(
 
 #[derive(Deserialize)]
 struct AgeVerificationInput {
+    email: String,
     is_minor: bool,
     guardian_consent_given: Option<bool>,
     guardian_email: Option<String>,
@@ -3660,7 +3673,10 @@ async fn post_age_verification(
     State(state): State<AppState>,
     Json(req): Json<AgeVerificationInput>,
 ) -> Json<serde_json::Value> {
-    let user_email = "user@example.com";
+    let user_email = req.email.trim().to_lowercase();
+    if user_email.is_empty() {
+        return Json(serde_json::json!({"status": "error", "message": "Email required"}));
+    }
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
         .bind(&user_email)
         .fetch_optional(&state.pool)
