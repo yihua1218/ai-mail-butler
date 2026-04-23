@@ -2,6 +2,13 @@
 
 AI Mail Butler is a self-hosted email processing assistant platform. It consists of a dedicated Mail Server and a Web-based GUI. Users forward selected emails from their own mail servers to the assistant's mailbox. The assistant intelligently identifies the forwarding user, onboards new users via email inquiry, performs AI-driven actions (e.g., translation, auto-reply), and provides a transparent web dashboard for monitoring all processed emails and actions.
 
+## About the Author and Project Intent
+
+For background on the creator, project motivation, and open collaboration notes:
+
+- [About (English)](About.md)
+- [About (Traditional Chinese)](About.zh-TW.md)
+
 ## System Architecture
 
 - **Backend**: Rust (`tokio`, `axum`)

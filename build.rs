@@ -16,7 +16,13 @@ fn main() {
     let host = env::var("HOST").unwrap_or_else(|_| "unknown".to_string());
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
 
-    let git_commit = run("git", &["rev-parse", "--short", "HEAD"]);
+    // Prefer GITHUB_SHA injected by CI (first 7 hex chars); fall back to local git.
+    let git_commit = env::var("GITHUB_SHA")
+        .ok()
+        .filter(|s| s.len() >= 7)
+        .map(|s| s[..7].to_string())
+        .unwrap_or_else(|| run("git", &["rev-parse", "--short", "HEAD"]));
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     let build_date = run("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
 
     // -----------------------------------------------------------------------
