@@ -92,9 +92,15 @@ const FinanceAnalysisPage: React.FC = () => {
     );
   }
 
+  const monthlyCategoryColor = (category: string) => {
+    if (category === 'deposit' || category === 'income') return 'green';
+    if (category === 'expense') return 'volcano';
+    return 'blue';
+  };
+
   const monthlyColumns = [
     { title: t('finance_month_col'), dataIndex: 'month_key', key: 'month_key', width: 120 },
-    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color="blue">{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
+    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color={monthlyCategoryColor(v)}>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
     { title: t('finance_total_amount_col'), dataIndex: 'total_amount', key: 'total_amount', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
     { title: t('finance_updated_at_col'), dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
   ];
