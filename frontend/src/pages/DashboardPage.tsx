@@ -17,7 +17,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { MailOutlined, MessageOutlined, RobotOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
+import { CloudServerOutlined, MailOutlined, MessageOutlined, RobotOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -92,6 +92,7 @@ const DashboardPage: React.FC = () => {
   const [savingDraft, setSavingDraft] = useState(false);
   const [sendingDraft, setSendingDraft] = useState(false);
   const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
+  const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
 
   const loadFeedback = async () => {
     if (!user?.email) return;
@@ -166,6 +167,9 @@ const DashboardPage: React.FC = () => {
       axios.get(`/api/admin/errors?email=${user.email}`).then((res) => {
         setMailErrors(res.data.errors || []);
       }).catch(() => {});
+      axios.get('/api/about').then((res) => {
+        setRuntimeInfo(res.data || null);
+      }).catch(() => setRuntimeInfo(null));
     } else if (user?.role === 'user' && user.email) {
       axios.get(`/api/errors?email=${user.email}`).then((res) => {
         setMailErrors(res.data.errors || []);
@@ -628,6 +632,41 @@ const DashboardPage: React.FC = () => {
     ) : null
   );
 
+  const RemoteDebugDisplay = () => {
+    if (!runtimeInfo) return null;
+    const enabled = !!runtimeInfo.remote_debug_sshfs_enabled;
+    const mode = runtimeInfo.remote_debug_mode || 'readonly';
+    const isOverlay = mode === 'overlay';
+    return (
+      <Card
+        bordered={false}
+        title={
+          <span>
+            <CloudServerOutlined style={{ color: '#1677ff', marginRight: 8 }} />
+            {t('remote_debug_title')}
+          </span>
+        }
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Space wrap>
+            <Tag color={enabled ? 'green' : 'default'}>{enabled ? t('remote_debug_enabled') : t('remote_debug_disabled')}</Tag>
+            <Tag color={isOverlay ? 'blue' : 'gold'}>{isOverlay ? t('remote_debug_overlay') : t('remote_debug_readonly')}</Tag>
+            {runtimeInfo.readonly_mode_enabled && <Tag color="orange">{t('remote_debug_app_readonly')}</Tag>}
+          </Space>
+          <div style={{ color: '#86868b' }}>{t('remote_debug_desc')}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', rowGap: 8, columnGap: 12 }}>
+            <span>{t('remote_debug_remote')}</span>
+            <code>{runtimeInfo.remote_debug_remote || '-'}</code>
+            <span>{t('remote_debug_mount')}</span>
+            <code>{runtimeInfo.remote_debug_mount_point || '-'}</code>
+            <span>{t('remote_debug_overlay_dir')}</span>
+            <code>{runtimeInfo.remote_debug_overlay_dir || runtimeInfo.overlay_dir || '-'}</code>
+          </div>
+        </Space>
+      </Card>
+    );
+  };
+
   const ResultsModal = () => {
     if (!resultsData) return null;
     const { processed, skipped, failed, results } = resultsData;
@@ -814,6 +853,7 @@ const DashboardPage: React.FC = () => {
               <Card bordered={false} title={t('dashboard_feedback_admin')}>
                 <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />
               </Card>
+              <RemoteDebugDisplay />
             </Space>
           </Col>
         </Row>

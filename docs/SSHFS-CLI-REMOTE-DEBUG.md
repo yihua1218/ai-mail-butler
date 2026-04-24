@@ -33,6 +33,20 @@ Mount only what you need, usually the spool path:
 
 This reduces risk and improves performance.
 
+## Dashboard Environment Indicators
+
+Admin Dashboard can display the intended remote-debug posture from environment variables. The web app only reports these values; it does not run `sshfs`, `mount`, or `umount`.
+
+```bash
+REMOTE_DEBUG_SSHFS_ENABLED=true
+REMOTE_DEBUG_MODE=readonly
+REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data/mail_spool
+REMOTE_DEBUG_MOUNT_POINT=~/mnt/ai-mail-spool
+REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
+```
+
+Use `REMOTE_DEBUG_MODE=readonly` for inspection-only mounts. Use `REMOTE_DEBUG_MODE=overlay` together with `READONLY_MODE=true`, `READONLY_BASE=<mounted-data-root>`, and `OVERLAY_DIR=<local-overlay-dir>` when you want writes to stay local while reads fall back to the mounted remote snapshot.
+
 ## 1. Create Local Mount Point
 
 ```bash

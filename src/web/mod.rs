@@ -1,30 +1,33 @@
+use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{State, Query},
+    extract::{Query, State},
     http::{Method, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use tower_http::services::{ServeDir, ServeFile};
-use tower_http::cors::CorsLayer;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tracing::info;
-use anyhow::Result;
 use tokio::fs;
+use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
+use tracing::info;
 
-use sqlx::SqlitePool;
-use serde::{Deserialize, Serialize};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::models::{User, EmailRecord, ConsentAuditTrail, DsarRequest, DataRetentionPolicy, UserPrivacySettings, UserAgeVerification};
 use crate::ai::AiClient;
+use crate::models::{
+    ConsentAuditTrail, DataRetentionPolicy, DsarRequest, EmailRecord, User, UserAgeVerification,
+    UserPrivacySettings,
+};
 use crate::services::OnboardingService;
 
 #[derive(sqlx::FromRow, Serialize)]
@@ -108,12 +111,19 @@ struct MonthlyFinanceSummaryRow {
 fn parse_training_consent_answer(message: &str) -> Option<bool> {
     let m = message.trim().to_lowercase();
     let yes_markers = [
-        "yes", "agree", "i agree", "consent", "allow", "ok",
-        "同意", "願意", "可以", "好", "是",
+        "yes", "agree", "i agree", "consent", "allow", "ok", "同意", "願意", "可以", "好", "是",
     ];
     let no_markers = [
-        "no", "disagree", "do not", "don't", "deny",
-        "不同意", "不願意", "不要", "否", "不行",
+        "no",
+        "disagree",
+        "do not",
+        "don't",
+        "deny",
+        "不同意",
+        "不願意",
+        "不要",
+        "否",
+        "不行",
     ];
 
     if no_markers.iter().any(|k| m.contains(k)) {
@@ -131,15 +141,29 @@ fn redact_training_text(input: &str) -> String {
     static TW_PHONE_RE: OnceLock<Regex> = OnceLock::new();
     static LONG_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
 
-    let email_re = EMAIL_RE.get_or_init(|| Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").expect("email regex"));
-    let us_phone_re = US_PHONE_RE.get_or_init(|| Regex::new(r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}").expect("us phone regex"));
-    let tw_phone_re = TW_PHONE_RE.get_or_init(|| Regex::new(r"(?:\+886[-.\s]?)?0?9\d{2}[-.\s]?\d{3}[-.\s]?\d{3}").expect("tw phone regex"));
-    let long_token_re = LONG_TOKEN_RE.get_or_init(|| Regex::new(r"\b[A-Za-z0-9_-]{24,}\b").expect("token regex"));
+    let email_re = EMAIL_RE.get_or_init(|| {
+        Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").expect("email regex")
+    });
+    let us_phone_re = US_PHONE_RE.get_or_init(|| {
+        Regex::new(r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}")
+            .expect("us phone regex")
+    });
+    let tw_phone_re = TW_PHONE_RE.get_or_init(|| {
+        Regex::new(r"(?:\+886[-.\s]?)?0?9\d{2}[-.\s]?\d{3}[-.\s]?\d{3}").expect("tw phone regex")
+    });
+    let long_token_re =
+        LONG_TOKEN_RE.get_or_init(|| Regex::new(r"\b[A-Za-z0-9_-]{24,}\b").expect("token regex"));
 
     let out = email_re.replace_all(input, "[REDACTED_EMAIL]").to_string();
-    let out = us_phone_re.replace_all(&out, "[REDACTED_PHONE]").to_string();
-    let out = tw_phone_re.replace_all(&out, "[REDACTED_PHONE]").to_string();
-    long_token_re.replace_all(&out, "[REDACTED_TOKEN]").to_string()
+    let out = us_phone_re
+        .replace_all(&out, "[REDACTED_PHONE]")
+        .to_string();
+    let out = tw_phone_re
+        .replace_all(&out, "[REDACTED_PHONE]")
+        .to_string();
+    long_token_re
+        .replace_all(&out, "[REDACTED_TOKEN]")
+        .to_string()
 }
 
 fn generate_rule_label(rule_text: &str) -> String {
@@ -171,8 +195,12 @@ fn generate_rule_label(rule_text: &str) -> String {
         tokens.push(current);
     }
 
-    let zh_stop = ["如果", "請", "先", "再", "和", "或", "的", "與", "就", "並", "把", "將", "為", "是"];
-    let en_stop = ["the", "a", "an", "and", "or", "if", "then", "for", "to", "of", "on", "in", "with"];
+    let zh_stop = [
+        "如果", "請", "先", "再", "和", "或", "的", "與", "就", "並", "把", "將", "為", "是",
+    ];
+    let en_stop = [
+        "the", "a", "an", "and", "or", "if", "then", "for", "to", "of", "on", "in", "with",
+    ];
 
     let mut picked: Vec<String> = Vec::new();
     for token in tokens {
@@ -239,7 +267,9 @@ fn sanitize_ai_rule_label(raw: &str) -> Option<String> {
     }
 
     if let Some((_, right)) = first.split_once(':') {
-        if first.to_ascii_lowercase().starts_with("name") || first.to_ascii_lowercase().starts_with("label") {
+        if first.to_ascii_lowercase().starts_with("name")
+            || first.to_ascii_lowercase().starts_with("label")
+        {
             first = right.trim().to_string();
         }
     }
@@ -280,9 +310,14 @@ fn sanitize_ai_rule_label(raw: &str) -> Option<String> {
     }
 }
 
-async fn generate_rule_label_with_ai(ai_client: Option<&AiClient>, rule_text: &str, rule_label_mode: Option<&str>) -> String {
+async fn generate_rule_label_with_ai(
+    ai_client: Option<&AiClient>,
+    rule_text: &str,
+    rule_label_mode: Option<&str>,
+) -> String {
     let fallback = generate_rule_label(rule_text);
-    let use_ai = matches!(rule_label_mode.unwrap_or("ai_first"), "ai_first") && ai_rule_label_enabled();
+    let use_ai =
+        matches!(rule_label_mode.unwrap_or("ai_first"), "ai_first") && ai_rule_label_enabled();
     if !use_ai {
         return fallback;
     }
@@ -300,7 +335,10 @@ async fn generate_rule_label_with_ai(ai_client: Option<&AiClient>, rule_text: &s
     match client.chat(system_prompt, &user_prompt).await {
         Ok(res) => sanitize_ai_rule_label(&res.content).unwrap_or(fallback),
         Err(e) => {
-            tracing::warn!("AI rule label generation failed, fallback to algorithm: {}", e);
+            tracing::warn!(
+                "AI rule label generation failed, fallback to algorithm: {}",
+                e
+            );
             fallback
         }
     }
@@ -320,7 +358,8 @@ fn extract_first_rule_id(message: &str) -> Option<i64> {
 
 fn extract_rule_label_token(message: &str) -> Option<String> {
     static RULE_LABEL_RE: OnceLock<Regex> = OnceLock::new();
-    let re = RULE_LABEL_RE.get_or_init(|| Regex::new(r"(?iu)\b(rule-[\p{L}\p{N}_-]+)\b").expect("rule label regex"));
+    let re = RULE_LABEL_RE
+        .get_or_init(|| Regex::new(r"(?iu)\b(rule-[\p{L}\p{N}_-]+)\b").expect("rule label regex"));
     let cap = re.captures(message)?;
     Some(cap.get(1)?.as_str().to_string())
 }
@@ -339,43 +378,80 @@ fn extract_text_after_delimiter(message: &str) -> Option<String> {
 
 fn is_confirm_delete_phrase(lower: &str) -> bool {
     [
-        "確認", "確認刪除", "是", "好", "同意", "刪除吧", "確定刪除",
-        "confirm", "yes", "y", "delete it", "proceed",
+        "確認",
+        "確認刪除",
+        "是",
+        "好",
+        "同意",
+        "刪除吧",
+        "確定刪除",
+        "confirm",
+        "yes",
+        "y",
+        "delete it",
+        "proceed",
     ]
     .iter()
     .any(|k| lower.contains(k))
 }
 
 fn is_cancel_delete_phrase(lower: &str) -> bool {
-    ["取消", "不要", "否", "no", "cancel", "stop"].iter().any(|k| lower.contains(k))
+    ["取消", "不要", "否", "no", "cancel", "stop"]
+        .iter()
+        .any(|k| lower.contains(k))
 }
 
 fn is_rule_count_query(lower: &str) -> bool {
     [
-        "幾條規則", "多少規則", "規則數量", "有幾個規則", "現在規則",
-        "how many rule", "rule count", "number of rules",
+        "幾條規則",
+        "多少規則",
+        "規則數量",
+        "有幾個規則",
+        "現在規則",
+        "how many rule",
+        "rule count",
+        "number of rules",
     ]
     .iter()
     .any(|k| lower.contains(k))
 }
 
 fn is_rule_list_query(lower: &str) -> bool {
-    ["列出規則", "顯示規則", "查看規則", "list rules", "show rules"].iter().any(|k| lower.contains(k))
+    [
+        "列出規則",
+        "顯示規則",
+        "查看規則",
+        "list rules",
+        "show rules",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
 }
 
 fn is_rule_edit_intent(lower: &str) -> bool {
-    ["編輯規則", "修改規則", "update rule", "edit rule"].iter().any(|k| lower.contains(k))
+    ["編輯規則", "修改規則", "update rule", "edit rule"]
+        .iter()
+        .any(|k| lower.contains(k))
 }
 
 fn is_rule_disable_intent(lower: &str) -> bool {
-    ["停用規則", "關閉規則", "disable rule", "turn off rule"].iter().any(|k| lower.contains(k))
+    ["停用規則", "關閉規則", "disable rule", "turn off rule"]
+        .iter()
+        .any(|k| lower.contains(k))
 }
 
 fn is_rule_delete_intent(lower: &str) -> bool {
-    ["刪除規則", "delete rule", "remove rule"].iter().any(|k| lower.contains(k))
+    ["刪除規則", "delete rule", "remove rule"]
+        .iter()
+        .any(|k| lower.contains(k))
 }
 
-async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user: &User, message: &str) -> Option<String> {
+async fn handle_rule_chat_command(
+    pool: &SqlitePool,
+    ai_client: &AiClient,
+    user: &User,
+    message: &str,
+) -> Option<String> {
     let trimmed = message.trim();
     if trimmed.is_empty() {
         return None;
@@ -399,10 +475,18 @@ async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user:
 
                 return Some(match result {
                     Ok(r) if r.rows_affected() > 0 => {
-                        if zh { format!("已刪除規則 #{}。", rule_id) } else { format!("Deleted rule #{}.", rule_id) }
+                        if zh {
+                            format!("已刪除規則 #{}。", rule_id)
+                        } else {
+                            format!("Deleted rule #{}.", rule_id)
+                        }
                     }
                     _ => {
-                        if zh { "刪除失敗，可能規則已不存在。".to_string() } else { "Delete failed, rule may no longer exist.".to_string() }
+                        if zh {
+                            "刪除失敗，可能規則已不存在。".to_string()
+                        } else {
+                            "Delete failed, rule may no longer exist.".to_string()
+                        }
                     }
                 });
             }
@@ -441,13 +525,24 @@ async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user:
         .unwrap_or_default();
 
         if rules.is_empty() {
-            return Some(if zh { "你目前還沒有規則。".to_string() } else { "You don't have any rules yet.".to_string() });
+            return Some(if zh {
+                "你目前還沒有規則。".to_string()
+            } else {
+                "You don't have any rules yet.".to_string()
+            });
         }
 
-        let lines = rules.into_iter().map(|(id, label, text, matched, enabled)| {
-            let state = if enabled { "enabled" } else { "disabled" };
-            format!("#{} [{}] ({}, matched {}) {}", id, label, state, matched, text)
-        }).collect::<Vec<_>>().join("\n");
+        let lines = rules
+            .into_iter()
+            .map(|(id, label, text, matched, enabled)| {
+                let state = if enabled { "enabled" } else { "disabled" };
+                format!(
+                    "#{} [{}] ({}, matched {}) {}",
+                    id, label, state, matched, text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         return Some(if zh {
             format!("目前規則如下：\n{}", lines)
@@ -467,7 +562,9 @@ async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user:
             });
         };
 
-        let generated_label = generate_rule_label_with_ai(Some(ai_client), &new_text, Some(&user.rule_label_mode)).await;
+        let generated_label =
+            generate_rule_label_with_ai(Some(ai_client), &new_text, Some(&user.rule_label_mode))
+                .await;
         let result = sqlx::query(
             "UPDATE email_rules SET rule_text = ?, rule_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
         )
@@ -480,10 +577,18 @@ async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user:
 
         return Some(match result {
             Ok(r) if r.rows_affected() > 0 => {
-                if zh { format!("已更新規則 #{}。", rule_id) } else { format!("Updated rule #{}.", rule_id) }
+                if zh {
+                    format!("已更新規則 #{}。", rule_id)
+                } else {
+                    format!("Updated rule #{}.", rule_id)
+                }
             }
             _ => {
-                if zh { "找不到可更新的規則編號。".to_string() } else { "Could not find that rule id to update.".to_string() }
+                if zh {
+                    "找不到可更新的規則編號。".to_string()
+                } else {
+                    "Could not find that rule id to update.".to_string()
+                }
             }
         });
     }
@@ -508,10 +613,18 @@ async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user:
 
         return Some(match result {
             Ok(r) if r.rows_affected() > 0 => {
-                if zh { format!("已停用規則 #{}。", rule_id) } else { format!("Disabled rule #{}.", rule_id) }
+                if zh {
+                    format!("已停用規則 #{}。", rule_id)
+                } else {
+                    format!("Disabled rule #{}.", rule_id)
+                }
             }
             _ => {
-                if zh { "找不到可停用的規則編號。".to_string() } else { "Could not find that rule id to disable.".to_string() }
+                if zh {
+                    "找不到可停用的規則編號。".to_string()
+                } else {
+                    "Could not find that rule id to disable.".to_string()
+                }
             }
         });
     }
@@ -533,27 +646,41 @@ async fn handle_rule_chat_command(pool: &SqlitePool, ai_client: &AiClient, user:
 
         let Some(rule_id) = rule_id else {
             return Some(if zh {
-                "請指定要刪除的規則編號或標籤，例如：刪除規則 12，或刪除規則 RULE-INVOICE".to_string()
+                "請指定要刪除的規則編號或標籤，例如：刪除規則 12，或刪除規則 RULE-INVOICE"
+                    .to_string()
             } else {
-                "Please specify rule id or label, e.g. delete rule 12 or delete rule RULE-INVOICE".to_string()
+                "Please specify rule id or label, e.g. delete rule 12 or delete rule RULE-INVOICE"
+                    .to_string()
             });
         };
 
-        let exists: Option<(String,)> = sqlx::query_as("SELECT rule_text FROM email_rules WHERE id = ? AND user_id = ? LIMIT 1")
-            .bind(rule_id)
-            .bind(&user.id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+        let exists: Option<(String,)> = sqlx::query_as(
+            "SELECT rule_text FROM email_rules WHERE id = ? AND user_id = ? LIMIT 1",
+        )
+        .bind(rule_id)
+        .bind(&user.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
 
         let Some((rule_text,)) = exists else {
-            return Some(if zh { "找不到該規則。".to_string() } else { "Rule not found.".to_string() });
+            return Some(if zh {
+                "找不到該規則。".to_string()
+            } else {
+                "Rule not found.".to_string()
+            });
         };
 
-        pending_rule_delete_map().write().await.insert(user.id.clone(), rule_id);
+        pending_rule_delete_map()
+            .write()
+            .await
+            .insert(user.id.clone(), rule_id);
         return Some(if zh {
-            format!("你即將刪除規則 #{}：{}。\n請回覆「確認刪除」以執行，或回覆「取消」放棄。", rule_id, rule_text)
+            format!(
+                "你即將刪除規則 #{}：{}。\n請回覆「確認刪除」以執行，或回覆「取消」放棄。",
+                rule_id, rule_text
+            )
         } else {
             format!("You are about to delete rule #{}: {}.\nReply 'confirm' to proceed or 'cancel' to abort.", rule_id, rule_text)
         });
@@ -707,7 +834,11 @@ fn best_matching_snippet(content: &str, terms: &[String]) -> String {
     lines.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
 }
 
-async fn build_docs_context(query: &str, preferred_language: Option<&str>, docs_whitelist: &[String]) -> Option<String> {
+async fn build_docs_context(
+    query: &str,
+    preferred_language: Option<&str>,
+    docs_whitelist: &[String],
+) -> Option<String> {
     let terms = extract_query_terms(query);
     if terms.is_empty() {
         return None;
@@ -729,7 +860,10 @@ async fn build_docs_context(query: &str, preferred_language: Option<&str>, docs_
             continue;
         }
 
-        let score: usize = terms.iter().map(|t| entry.lower_content.matches(t).count()).sum();
+        let score: usize = terms
+            .iter()
+            .map(|t| entry.lower_content.matches(t).count())
+            .sum();
         if score == 0 {
             continue;
         }
@@ -782,8 +916,33 @@ fn looks_like_email_rule(message: &str) -> bool {
 
     let lower = m.to_lowercase();
     let keywords = [
-        "轉寄", "請幫我", "遇到", "收到", "帳單", "通知", "發票", "提醒", "回覆", "處理", "規則", "新增規則", "建立規則",
-        "forward", "when", "invoice", "bill", "receipt", "notify", "remind", "reply", "urgent", "important", "rule", "add rule", "create rule", "set a rule",
+        "轉寄",
+        "請幫我",
+        "遇到",
+        "收到",
+        "帳單",
+        "通知",
+        "發票",
+        "提醒",
+        "回覆",
+        "處理",
+        "規則",
+        "新增規則",
+        "建立規則",
+        "forward",
+        "when",
+        "invoice",
+        "bill",
+        "receipt",
+        "notify",
+        "remind",
+        "reply",
+        "urgent",
+        "important",
+        "rule",
+        "add rule",
+        "create rule",
+        "set a rule",
     ];
     keywords.iter().any(|k| lower.contains(k))
 }
@@ -823,8 +982,16 @@ fn extract_rule_from_message(message: &str) -> Option<String> {
 
     let lower = cleaned.to_lowercase();
     let prefixes = [
-        "新增規則", "建立規則", "設定規則", "幫我新增規則", "幫我建立規則",
-        "add rule", "create rule", "set a rule", "new rule", "rule",
+        "新增規則",
+        "建立規則",
+        "設定規則",
+        "幫我新增規則",
+        "幫我建立規則",
+        "add rule",
+        "create rule",
+        "set a rule",
+        "new rule",
+        "rule",
     ];
 
     for p in prefixes {
@@ -858,14 +1025,23 @@ fn rule_capture_notice(preferred_language: &str, outcome: &RuleCaptureOutcome) -
             if preferred_language == "zh-TW" {
                 Some(format!("[Rule Created] 已根據你的需求建立新規則：{}", rule))
             } else {
-                Some(format!("[Rule Created] I created a new rule from your request: {}", rule))
+                Some(format!(
+                    "[Rule Created] I created a new rule from your request: {}",
+                    rule
+                ))
             }
         }
         RuleCaptureOutcome::Duplicate(rule) => {
             if preferred_language == "zh-TW" {
-                Some(format!("[Rule Exists] 這條規則已存在，已略過重複新增：{}", rule))
+                Some(format!(
+                    "[Rule Exists] 這條規則已存在，已略過重複新增：{}",
+                    rule
+                ))
             } else {
-                Some(format!("[Rule Exists] This rule already exists, so I skipped creating a duplicate: {}", rule))
+                Some(format!(
+                    "[Rule Exists] This rule already exists, so I skipped creating a duplicate: {}",
+                    rule
+                ))
             }
         }
         RuleCaptureOutcome::None => None,
@@ -884,7 +1060,7 @@ async fn capture_rule_from_chat(
     };
 
     let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM email_rules WHERE user_id = ? AND lower(rule_text) = lower(?) LIMIT 1"
+        "SELECT id FROM email_rules WHERE user_id = ? AND lower(rule_text) = lower(?) LIMIT 1",
     )
     .bind(user_id)
     .bind(&cleaned)
@@ -1006,10 +1182,12 @@ async fn build_user_data_snapshot(
         config.readonly_base.as_deref().and_then(|base| {
             let runtime_pb = std::path::Path::new(sender_dir);
             let overlay_pb = std::path::Path::new(overlay_root);
-            runtime_pb
-                .strip_prefix(overlay_pb)
-                .ok()
-                .map(|rel| std::path::Path::new(base).join(rel).to_string_lossy().into_owned())
+            runtime_pb.strip_prefix(overlay_pb).ok().map(|rel| {
+                std::path::Path::new(base)
+                    .join(rel)
+                    .to_string_lossy()
+                    .into_owned()
+            })
         })
     } else {
         None
@@ -1031,26 +1209,31 @@ async fn build_user_data_snapshot(
         .fetch_one(pool)
         .await
         .unwrap_or(0);
-    let memory_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_memories WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let activity_row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_activity_stats WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let activity_event_total: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(count), 0) FROM user_activity_stats WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let chat_log_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_logs WHERE user_email = ?")
-        .bind(user_email)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
+    let memory_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_memories WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let activity_row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_activity_stats WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let activity_event_total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(count), 0) FROM user_activity_stats WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let chat_log_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_logs WHERE user_email = ?")
+            .bind(user_email)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
     DataDeletionSnapshot {
         email_count,
@@ -1164,10 +1347,7 @@ fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<Pat
     }
 
     let mut candidates = vec![PathBuf::from(trimmed)];
-    if let Some(file_name) = PathBuf::from(trimmed)
-        .file_name()
-        .and_then(|s| s.to_str())
-    {
+    if let Some(file_name) = PathBuf::from(trimmed).file_name().and_then(|s| s.to_str()) {
         candidates.push(resolve_runtime_mail_path(
             state,
             &format!("data/mail_spool/processed/{}", file_name),
@@ -1186,8 +1366,10 @@ async fn get_me(
     Query(query): Query<AuthQuery>,
 ) -> Json<Option<User>> {
     if let Some(email) = query.email {
-        if email.is_empty() { return Json(None); }
-        
+        if email.is_empty() {
+            return Json(None);
+        }
+
         // Use UPSERT logic or separate check to handle concurrency/re-registrations
         let role = role_for_email(&state, &email);
         if !state.config.readonly_mode_enabled {
@@ -1195,16 +1377,19 @@ async fn get_me(
             let _ = sqlx::query("INSERT OR IGNORE INTO users (id, email) VALUES (?, ?)")
                 .bind(&new_id)
                 .bind(&email)
-                .execute(&state.pool).await;
+                .execute(&state.pool)
+                .await;
         }
 
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
-            .fetch_optional(&state.pool).await.unwrap_or(None);
-            
-        if let Some(mut u) = user { 
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
+
+        if let Some(mut u) = user {
             u.role = role;
-            return Json(Some(u)); 
+            return Json(Some(u));
         }
     }
     Json(None)
@@ -1215,13 +1400,26 @@ async fn get_dashboard(
     Query(query): Query<AuthQuery>,
 ) -> Json<serde_json::Value> {
     let pool = &state.pool;
-    
+
     // Always fetch global stats
-    let users_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(pool).await.unwrap_or(0);
-    let received_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails").fetch_one(pool).await.unwrap_or(0);
-    let replied_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE status = 'replied'").fetch_one(pool).await.unwrap_or(0);
-    let ai_replies_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_logs").fetch_one(pool).await.unwrap_or(0);
-    
+    let users_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let received_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let replied_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE status = 'replied'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let ai_replies_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_logs")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
     let global_stats = serde_json::json!({
         "registered_users": users_count,
         "emails_received": received_count,
@@ -1229,38 +1427,51 @@ async fn get_dashboard(
         "emails_sent": 0,
         "ai_replies": ai_replies_count,
     });
-    
+
     if let Some(email) = query.email {
         if !email.is_empty() {
             let is_admin = is_admin_or_developer(&state, &email);
-            
+
             let user_id: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
                 .bind(&email)
-                .fetch_optional(pool).await.unwrap_or(None);
-                
+                .fetch_optional(pool)
+                .await
+                .unwrap_or(None);
+
             if let Some((uid,)) = user_id {
                 let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
-                    
-                let p_received: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?").bind(&uid).fetch_one(pool).await.unwrap_or(0);
-                let p_replied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ? AND status = 'replied'").bind(&uid).fetch_one(pool).await.unwrap_or(0);
-                
+
+                let p_received: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?")
+                        .bind(&uid)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+                let p_replied: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM emails WHERE user_id = ? AND status = 'replied'",
+                )
+                .bind(&uid)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+
                 let personal_stats = serde_json::json!({
                     "emails_received": p_received,
                     "emails_replied": p_replied,
                 });
 
                 if is_admin {
-                    return Json(serde_json::json!({ 
-                        "type": "admin", 
+                    return Json(serde_json::json!({
+                        "type": "admin",
                         "global_stats": global_stats,
                         "personal_stats": personal_stats,
                         "personal_emails": personal_emails
                     }));
                 } else {
-                    return Json(serde_json::json!({ 
-                        "type": "personal", 
+                    return Json(serde_json::json!({
+                        "type": "personal",
                         "global_stats": global_stats,
                         "personal_stats": personal_stats,
                         "personal_emails": personal_emails
@@ -1269,7 +1480,7 @@ async fn get_dashboard(
             }
         }
     }
-    
+
     // Anonymous
     Json(serde_json::json!({
         "type": "anonymous",
@@ -1304,7 +1515,9 @@ async fn post_chat(
     let chat_res = if !email.is_empty() {
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
             .bind(&email)
-            .fetch_optional(pool).await.unwrap_or(None);
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
 
         if let Some(mut user) = user {
             if user.onboarding_step == 0 {
@@ -1318,7 +1531,9 @@ async fn post_chat(
                 }
             }
 
-            if let Some(command_reply) = handle_rule_chat_command(pool, &state.ai_client, &user, &message).await {
+            if let Some(command_reply) =
+                handle_rule_chat_command(pool, &state.ai_client, &user, &message).await
+            {
                 let _ = sqlx::query(
                     "INSERT INTO chat_transcripts (user_id, user_email, user_message, ai_reply) VALUES (?, ?, ?, ?)"
                 )
@@ -1345,48 +1560,88 @@ async fn post_chat(
             }
 
             // Update preferences
-            let new_pref = match OnboardingService::extract_preferences(&state.ai_client, &user, &message).await {
-                Ok(p) => p,
-                Err(_) => user.preferences.clone().unwrap_or_default()
-            };
+            let new_pref =
+                match OnboardingService::extract_preferences(&state.ai_client, &user, &message)
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(_) => user.preferences.clone().unwrap_or_default(),
+                };
             sqlx::query("UPDATE users SET preferences = ?, is_onboarded = true WHERE id = ?")
-                .bind(&new_pref).bind(&user.id).execute(pool).await.ok();
+                .bind(&new_pref)
+                .bind(&user.id)
+                .execute(pool)
+                .await
+                .ok();
             user.preferences = Some(new_pref);
 
             let docs_context = build_docs_context(
                 &message,
                 Some(user.preferred_language.as_str()),
                 &state.config.docs_whitelist,
-            ).await;
+            )
+            .await;
 
             let memory = OnboardingService::get_memory(pool, &user.id).await;
-            let mut res = match OnboardingService::generate_reply(&state.ai_client, &user, &message, &memory, &state.config.assistant_email, None, docs_context.clone()).await {
+            let mut res = match OnboardingService::generate_reply(
+                &state.ai_client,
+                &user,
+                &message,
+                &memory,
+                &state.config.assistant_email,
+                None,
+                docs_context.clone(),
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Failed to generate reply: {}", e);
-                    crate::ai::ChatResult { content: "Sorry, I am having trouble connecting to my AI brain.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None }
+                    crate::ai::ChatResult {
+                        content: "Sorry, I am having trouble connecting to my AI brain."
+                            .to_string(),
+                        total_tokens: 0,
+                        duration_ms: 0,
+                        finish_reason: None,
+                    }
                 }
             };
 
             // Detect repetitive questions (simple keyword for now)
             let lower_msg = message.to_lowercase();
-            if lower_msg.contains("forward") || lower_msg.contains("email") || lower_msg.contains("信箱") || lower_msg.contains("轉寄") {
-                let _ = OnboardingService::log_activity(pool, &user.id, "ask_forwarding_info").await;
+            if lower_msg.contains("forward")
+                || lower_msg.contains("email")
+                || lower_msg.contains("信箱")
+                || lower_msg.contains("轉寄")
+            {
+                let _ =
+                    OnboardingService::log_activity(pool, &user.id, "ask_forwarding_info").await;
             }
 
-            let rule_capture = capture_rule_from_chat(pool, Some(&state.ai_client), &user.id, &message, Some(&user.rule_label_mode)).await;
+            let rule_capture = capture_rule_from_chat(
+                pool,
+                Some(&state.ai_client),
+                &user.id,
+                &message,
+                Some(&user.rule_label_mode),
+            )
+            .await;
             if let Some(notice) = rule_capture_notice(&user.preferred_language, &rule_capture) {
                 res.content = format!("{}\n\n{}", res.content, notice);
             }
 
             // Append Onboarding Question if needed
             if user.onboarding_step < 4 {
-                if let Some(question) = OnboardingService::get_next_onboarding_question(&user).await {
+                if let Some(question) = OnboardingService::get_next_onboarding_question(&user).await
+                {
                     res.content = format!("{}\n\n---\n💡 [Onboarding] {}", res.content, question);
                 }
                 // Advance onboarding step
                 sqlx::query("UPDATE users SET onboarding_step = onboarding_step + 1 WHERE id = ?")
-                    .bind(&user.id).execute(pool).await.ok();
+                    .bind(&user.id)
+                    .execute(pool)
+                    .await
+                    .ok();
             }
 
             let ai_client_clone = state.ai_client.clone();
@@ -1395,7 +1650,14 @@ async fn post_chat(
             let msg_clone = message.clone();
             let reply_clone = res.content.clone();
             tokio::spawn(async move {
-                let _ = OnboardingService::update_memory(&ai_client_clone, &pool_clone, &user_id, &msg_clone, &reply_clone).await;
+                let _ = OnboardingService::update_memory(
+                    &ai_client_clone,
+                    &pool_clone,
+                    &user_id,
+                    &msg_clone,
+                    &reply_clone,
+                )
+                .await;
             });
 
             let _ = sqlx::query(
@@ -1410,23 +1672,55 @@ async fn post_chat(
 
             res
         } else {
-            let docs_context = build_docs_context(&message, None, &state.config.docs_whitelist).await;
-            OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email, docs_context.clone()).await
-                .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
+            let docs_context =
+                build_docs_context(&message, None, &state.config.docs_whitelist).await;
+            OnboardingService::generate_anonymous_reply(
+                &state.ai_client,
+                &message,
+                guest_name,
+                &state.config.assistant_email,
+                docs_context.clone(),
+            )
+            .await
+            .unwrap_or_else(|_| crate::ai::ChatResult {
+                content: "Error connecting to AI.".to_string(),
+                total_tokens: 0,
+                duration_ms: 0,
+                finish_reason: None,
+            })
         }
     } else {
         let docs_context = build_docs_context(&message, None, &state.config.docs_whitelist).await;
-        OnboardingService::generate_anonymous_reply(&state.ai_client, &message, guest_name, &state.config.assistant_email, docs_context.clone()).await
-            .unwrap_or_else(|_| crate::ai::ChatResult { content: "Error connecting to AI.".to_string(), total_tokens: 0, duration_ms: 0, finish_reason: None })
+        OnboardingService::generate_anonymous_reply(
+            &state.ai_client,
+            &message,
+            guest_name,
+            &state.config.assistant_email,
+            docs_context.clone(),
+        )
+        .await
+        .unwrap_or_else(|_| crate::ai::ChatResult {
+            content: "Error connecting to AI.".to_string(),
+            total_tokens: 0,
+            duration_ms: 0,
+            finish_reason: None,
+        })
     };
 
     // Record this AI reply in chat_logs
-    let log_email = if email.is_empty() { None } else { Some(email.clone()) };
+    let log_email = if email.is_empty() {
+        None
+    } else {
+        Some(email.clone())
+    };
     sqlx::query("INSERT INTO chat_logs (user_email) VALUES (?)")
-        .bind(&log_email).execute(pool).await.ok();
+        .bind(&log_email)
+        .execute(pool)
+        .await
+        .ok();
 
-    Json(serde_json::json!({ 
-        "reply": chat_res.content, 
+    Json(serde_json::json!({
+        "reply": chat_res.content,
         "total_tokens": chat_res.total_tokens,
         "duration_ms": chat_res.duration_ms,
         "finish_reason": chat_res.finish_reason,
@@ -1521,7 +1815,8 @@ async fn post_chat_feedback(
                 } else {
                     ai_reply.to_string()
                 };
-                let suggestion_text = payload.suggestion
+                let suggestion_text = payload
+                    .suggestion
                     .as_deref()
                     .map(str::trim)
                     .filter(|v| !v.is_empty())
@@ -1542,7 +1837,14 @@ async fn post_chat_feedback(
                     suggestion_text,
                     preview.replace('\n', "<br/>")
                 );
-                let _ = send_system_email_as_assistant(&state, &admin_email, &subject, &text_body, &html_body).await;
+                let _ = send_system_email_as_assistant(
+                    &state,
+                    &admin_email,
+                    &subject,
+                    &text_body,
+                    &html_body,
+                )
+                .await;
             }
             Json(serde_json::json!({ "status": "success" }))
         }
@@ -1643,13 +1945,12 @@ async fn post_reply_feedback(
         return Json(serde_json::json!({ "status": "error", "message": "Reply cannot be empty" }));
     }
 
-    let feedback_target: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT user_email, suggestion FROM chat_feedback WHERE id = ?"
-    )
-    .bind(payload.feedback_id)
-    .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None);
+    let feedback_target: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT user_email, suggestion FROM chat_feedback WHERE id = ?")
+            .bind(payload.feedback_id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
 
     let Some((user_email_opt, suggestion_opt)) = feedback_target else {
         return Json(serde_json::json!({ "status": "error", "message": "Feedback not found" }));
@@ -1682,7 +1983,9 @@ async fn post_reply_feedback(
             reply_message.replace('\n', "<br/>"),
             suggestion.replace('\n', "<br/>")
         );
-        let _ = send_system_email_as_assistant(&state, &user_email, subject, &text_body, &html_body).await;
+        let _ =
+            send_system_email_as_assistant(&state, &user_email, subject, &text_body, &html_body)
+                .await;
     }
 
     Json(serde_json::json!({ "status": "success" }))
@@ -1705,6 +2008,11 @@ struct BuildInfo {
     readonly_mode_enabled: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
+    remote_debug_sshfs_enabled: bool,
+    remote_debug_mode: String,
+    remote_debug_remote: Option<String>,
+    remote_debug_mount_point: Option<String>,
+    remote_debug_overlay_dir: Option<String>,
 }
 
 async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
@@ -1723,6 +2031,11 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
         readonly_mode_enabled: state.config.readonly_mode_enabled,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
+        remote_debug_sshfs_enabled: state.config.remote_debug_sshfs_enabled,
+        remote_debug_mode: state.config.remote_debug_mode.clone(),
+        remote_debug_remote: state.config.remote_debug_remote.clone(),
+        remote_debug_mount_point: state.config.remote_debug_mount_point.clone(),
+        remote_debug_overlay_dir: state.config.remote_debug_overlay_dir.clone(),
     })
 }
 
@@ -1731,9 +2044,9 @@ struct MagicLinkRequest {
     email: String,
 }
 
-use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
 use lettre::message::{Message, SinglePart};
 use lettre::{SmtpTransport, Transport};
+use mail_send::{mail_builder::MessageBuilder, SmtpClientBuilder};
 
 /// Extract pure email address from formats like "Name <email@domain.com>" or "email@domain.com".
 /// Returns only the email address part for use in SMTP From field.
@@ -1759,15 +2072,19 @@ async fn send_system_email_as_assistant(
     text_body: &str,
     html_body: &str,
 ) -> bool {
-    let preferred = sqlx::query_scalar::<_, String>("SELECT mail_send_method FROM users WHERE email = ? LIMIT 1")
-        .bind(to_email)
-        .fetch_optional(&state.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "direct_mx".to_string());
+    let preferred = sqlx::query_scalar::<_, String>(
+        "SELECT mail_send_method FROM users WHERE email = ? LIMIT 1",
+    )
+    .bind(to_email)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "direct_mx".to_string());
 
-    match deliver_email_with_fallback(state, to_email, subject, text_body, html_body, &preferred).await {
+    match deliver_email_with_fallback(state, to_email, subject, text_body, html_body, &preferred)
+        .await
+    {
         Ok(_) => true,
         Err(e) => {
             tracing::error!("System email delivery failed to {}: {}", to_email, e);
@@ -1783,7 +2100,10 @@ async fn send_via_smtp_relay(
     text_body: &str,
     html_body: &str,
 ) -> Result<(), String> {
-    let smtp_ready = state.config.smtp_relay_host.as_deref()
+    let smtp_ready = state
+        .config
+        .smtp_relay_host
+        .as_deref()
         .map(|h| !h.is_empty() && h != "smtp.your-server-address")
         .unwrap_or(false);
     if !smtp_ready {
@@ -1811,7 +2131,10 @@ async fn send_via_smtp_relay(
     }
 
     match builder.connect().await {
-        Ok(mut client) => client.send(message).await.map_err(|e| format!("relay send failed: {:?}", e)),
+        Ok(mut client) => client
+            .send(message)
+            .await
+            .map_err(|e| format!("relay send failed: {:?}", e)),
         Err(e) => Err(format!("relay connect failed: {:?}", e)),
     }
 }
@@ -1850,7 +2173,9 @@ async fn send_via_direct_mx(
         .port(25)
         .build();
 
-    mailer.send(&email_msg).map_err(|e| format!("direct mx send failed: {:?}", e))?;
+    mailer
+        .send(&email_msg)
+        .map_err(|e| format!("direct mx send failed: {:?}", e))?;
     Ok(())
 }
 
@@ -1885,7 +2210,6 @@ async fn deliver_email_with_fallback(
     Err(errors.join(" | "))
 }
 
-
 async fn post_magic_link(
     State(state): State<AppState>,
     Json(payload): Json<MagicLinkRequest>,
@@ -1898,12 +2222,13 @@ async fn post_magic_link(
     let new_id = uuid::Uuid::new_v4().to_string();
     let result = sqlx::query(
         "INSERT INTO users (id, email, magic_token) VALUES (?, ?, ?)
-         ON CONFLICT(email) DO UPDATE SET magic_token = excluded.magic_token"
+         ON CONFLICT(email) DO UPDATE SET magic_token = excluded.magic_token",
     )
     .bind(&new_id)
     .bind(&email)
     .bind(&token)
-    .execute(&state.pool).await;
+    .execute(&state.pool)
+    .await;
 
     if let Err(e) = result {
         tracing::error!("DB error during magic link upsert: {:?}", e);
@@ -1933,13 +2258,21 @@ async fn post_magic_link(
         login_url
     );
     let user_pref: (String, String, String) = sqlx::query_as(
-        "SELECT email_format, preferred_language, mail_send_method FROM users WHERE email = ?"
+        "SELECT email_format, preferred_language, mail_send_method FROM users WHERE email = ?",
     )
     .bind(&email)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(Some(("both".to_string(), "en".to_string(), "direct_mx".to_string())))
-    .unwrap_or(("both".to_string(), "en".to_string(), "direct_mx".to_string()));
+    .unwrap_or(Some((
+        "both".to_string(),
+        "en".to_string(),
+        "direct_mx".to_string(),
+    )))
+    .unwrap_or((
+        "both".to_string(),
+        "en".to_string(),
+        "direct_mx".to_string(),
+    ));
 
     let email_format = user_pref.0;
     let preferred_language = user_pref.1;
@@ -1954,7 +2287,7 @@ async fn post_magic_link(
     }
 
     let html_body = if preferred_language == "zh-TW" {
-            format!(
+        format!(
             r#"<!DOCTYPE html>
 <html>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 40px; background-color: #f5f5f7; color: #1d1d1f;">
@@ -1972,8 +2305,8 @@ async fn post_magic_link(
 </body>
 </html>"#,
             login_url, login_url
-            )
-        } else {
+        )
+    } else {
         format!(
             r#"<!DOCTYPE html>
 <html>
@@ -2009,13 +2342,29 @@ async fn post_magic_link(
         final_html.as_str(),
         &preferred_send_method,
     )
-    .await {
-        Ok(_) => Json(serde_json::json!({ "status": "success", "message": "Magic link sent to your email" })),
+    .await
+    {
+        Ok(_) => Json(
+            serde_json::json!({ "status": "success", "message": "Magic link sent to your email" }),
+        ),
         Err(err_msg) => {
-            tracing::error!("Magic link delivery failed: {}. Login URL is in server console.", err_msg);
+            tracing::error!(
+                "Magic link delivery failed: {}. Login URL is in server console.",
+                err_msg
+            );
             let user_id = get_user_id_by_email(&state.pool, &email).await;
-            log_mail_event(&state.pool, "ERROR", "smtp_send", &err_msg, Some(&email), user_id.as_deref()).await;
-            Json(serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }))
+            log_mail_event(
+                &state.pool,
+                "ERROR",
+                "smtp_send",
+                &err_msg,
+                Some(&email),
+                user_id.as_deref(),
+            )
+            .await;
+            Json(
+                serde_json::json!({ "status": "ok_debug", "message": "Email delivery failed; login URL logged to console" }),
+            )
         }
     }
 }
@@ -2028,20 +2377,21 @@ async fn lookup_mx_host(domain: &str) -> Option<String> {
     match tokio::process::Command::new("dig")
         .args(["+short", "MX", domain])
         .output()
-        .await {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.trim().is_empty() {
-                    tracing::warn!("dig returned empty results for MX lookup of {}", domain);
-                    return None;
-                }
-                parse_mx_records(&stdout)
-            },
-            Err(e) => {
-                tracing::error!("Failed to execute 'dig' command: {}. Make sure 'dnsutils' or 'bind9-host' is installed.", e);
-                None
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                tracing::warn!("dig returned empty results for MX lookup of {}", domain);
+                return None;
             }
+            parse_mx_records(&stdout)
         }
+        Err(e) => {
+            tracing::error!("Failed to execute 'dig' command: {}. Make sure 'dnsutils' or 'bind9-host' is installed.", e);
+            None
+        }
+    }
 }
 
 /// Parse `dig +short MX` output lines like "10 alt1.gmail-smtp-in.l.google.com."
@@ -2054,7 +2404,11 @@ fn parse_mx_records(output: &str) -> Option<String> {
             if parts.len() == 2 {
                 let priority: u32 = parts[0].parse().ok()?;
                 let host = parts[1].trim_end_matches('.').to_string();
-                if !host.is_empty() { Some((priority, host)) } else { None }
+                if !host.is_empty() {
+                    Some((priority, host))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -2071,9 +2425,7 @@ mod web_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn find_header_end(buf: &[u8]) -> Option<usize> {
-        buf.windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .map(|i| i + 4)
+        buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
     }
 
     async fn start_mock_ai_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -2163,8 +2515,12 @@ mod web_tests {
     #[test]
     fn looks_like_email_rule_detects_common_intents() {
         assert!(looks_like_email_rule("請幫我把帳單通知都轉寄並提醒我"));
-        assert!(looks_like_email_rule("When I receive invoice emails, remind me to reply quickly"));
-        assert!(looks_like_email_rule("Please add rule: remind me when invoice arrives"));
+        assert!(looks_like_email_rule(
+            "When I receive invoice emails, remind me to reply quickly"
+        ));
+        assert!(looks_like_email_rule(
+            "Please add rule: remind me when invoice arrives"
+        ));
         assert!(!looks_like_email_rule("hi"));
         assert!(!looks_like_email_rule("just browsing this dashboard"));
     }
@@ -2189,19 +2545,21 @@ mod web_tests {
             "GMAIL-FILTER-FORWARDING.zh-TW.md",
             &["zh-tw".to_string()]
         ));
-        assert!(!is_doc_allowed(
-            "RBAC.md",
-            &["gmail".to_string()]
-        ));
+        assert!(!is_doc_allowed("RBAC.md", &["gmail".to_string()]));
 
-        assert!(language_bonus("RBAC.zh-TW.md", Some("zh-TW")) > language_bonus("RBAC.md", Some("zh-TW")));
-        assert!(language_bonus("RBAC.md", Some("en")) > language_bonus("RBAC.zh-TW.md", Some("en")));
+        assert!(
+            language_bonus("RBAC.zh-TW.md", Some("zh-TW"))
+                > language_bonus("RBAC.md", Some("zh-TW"))
+        );
+        assert!(
+            language_bonus("RBAC.md", Some("en")) > language_bonus("RBAC.zh-TW.md", Some("en"))
+        );
     }
 
     #[test]
     fn sanitize_path_component_normalizes_unsafe_chars() {
         assert_eq!(sanitize_path_component("A/B C?.txt"), "A_B_C_.txt");
-        assert_eq!(sanitize_path_component("<>") , "__");
+        assert_eq!(sanitize_path_component("<>"), "__");
     }
 
     #[test]
@@ -2223,7 +2581,10 @@ mod web_tests {
     fn parse_training_consent_answer_handles_yes_no() {
         assert_eq!(parse_training_consent_answer("Yes, I agree"), Some(true));
         assert_eq!(parse_training_consent_answer("我同意"), Some(true));
-        assert_eq!(parse_training_consent_answer("No, I do not consent"), Some(false));
+        assert_eq!(
+            parse_training_consent_answer("No, I do not consent"),
+            Some(false)
+        );
         assert_eq!(parse_training_consent_answer("不同意"), Some(false));
         assert_eq!(parse_training_consent_answer("maybe later"), None);
     }
@@ -2253,7 +2614,7 @@ mod web_tests {
                 rule_label TEXT NOT NULL DEFAULT 'RULE',
                 source TEXT NOT NULL,
                 is_enabled INTEGER NOT NULL
-            )"
+            )",
         )
         .execute(&pool)
         .await
@@ -2261,8 +2622,10 @@ mod web_tests {
 
         let user_id = "u1";
         let msg = "forward invoices to me and remind me";
-        let first = capture_rule_from_chat(&pool, None, user_id, msg, Some("deterministic_only")).await;
-        let second = capture_rule_from_chat(&pool, None, user_id, msg, Some("deterministic_only")).await;
+        let first =
+            capture_rule_from_chat(&pool, None, user_id, msg, Some("deterministic_only")).await;
+        let second =
+            capture_rule_from_chat(&pool, None, user_id, msg, Some("deterministic_only")).await;
 
         assert!(matches!(first, RuleCaptureOutcome::Created(_)));
         assert!(matches!(second, RuleCaptureOutcome::Duplicate(_)));
@@ -2289,13 +2652,15 @@ mod web_tests {
                 rule_label TEXT NOT NULL DEFAULT 'RULE',
                 source TEXT NOT NULL,
                 is_enabled INTEGER NOT NULL
-            )"
+            )",
         )
         .execute(&pool)
         .await
         .expect("create email_rules");
 
-        let outcome = capture_rule_from_chat(&pool, None, "u1", "hello there", Some("deterministic_only")).await;
+        let outcome =
+            capture_rule_from_chat(&pool, None, "u1", "hello there", Some("deterministic_only"))
+                .await;
         assert!(matches!(outcome, RuleCaptureOutcome::None));
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules")
@@ -2349,6 +2714,11 @@ mod web_tests {
             readonly_mode_enabled: false,
             readonly_base: None,
             overlay_dir: None,
+            remote_debug_sshfs_enabled: false,
+            remote_debug_mode: "readonly".to_string(),
+            remote_debug_remote: None,
+            remote_debug_mount_point: None,
+            remote_debug_overlay_dir: None,
         };
 
         let state = AppState {
@@ -2406,37 +2776,58 @@ async fn post_verify(
     Json(payload): Json<VerifyRequest>,
 ) -> Json<Option<User>> {
     let token = payload.token.trim();
-    tracing::info!(">>> [AUTH] Attempting to verify token: '{}'", mask_token(token));
-    
+    tracing::info!(
+        ">>> [AUTH] Attempting to verify token: '{}'",
+        mask_token(token)
+    );
+
     // Debug: check total tokens in DB
-    let total_tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE magic_token IS NOT NULL")
-        .fetch_one(&state.pool).await.unwrap_or(0);
-    tracing::info!(">>> [AUTH] System current has {} active magic tokens in DB.", total_tokens);
+    let total_tokens: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE magic_token IS NOT NULL")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0);
+    tracing::info!(
+        ">>> [AUTH] System current has {} active magic tokens in DB.",
+        total_tokens
+    );
 
     let query_result = sqlx::query_as::<_, User>("SELECT * FROM users WHERE magic_token = ?")
         .bind(token)
-        .fetch_optional(&state.pool).await;
-        
+        .fetch_optional(&state.pool)
+        .await;
+
     match query_result {
         Ok(Some(mut u)) => {
-            tracing::info!(">>> [AUTH] SUCCESS: Token match found for user: {}", u.email);
+            tracing::info!(
+                ">>> [AUTH] SUCCESS: Token match found for user: {}",
+                u.email
+            );
             // Clear token after use
             let clear_res = sqlx::query("UPDATE users SET magic_token = NULL WHERE id = ?")
                 .bind(&u.id)
-                .execute(&state.pool).await;
-            
+                .execute(&state.pool)
+                .await;
+
             if let Err(e) = clear_res {
-                tracing::error!(">>> [AUTH] FAILED to clear token for user {}: {:?}", u.email, e);
+                tracing::error!(
+                    ">>> [AUTH] FAILED to clear token for user {}: {:?}",
+                    u.email,
+                    e
+                );
             }
-                
+
             u.magic_token = None;
             u.role = role_for_email(&state, &u.email);
             Json(Some(u))
-        },
+        }
         Ok(None) => {
-            tracing::warn!(">>> [AUTH] FAILED: No user found with token '{}'.", mask_token(token));
+            tracing::warn!(
+                ">>> [AUTH] FAILED: No user found with token '{}'.",
+                mask_token(token)
+            );
             Json(None)
-        },
+        }
         Err(e) => {
             tracing::error!(">>> [AUTH] DATABASE ERROR during verification: {:?}", e);
             Json(None)
@@ -2511,7 +2902,10 @@ async fn post_settings(
     State(state): State<AppState>,
     Json(payload): Json<SettingsRequest>,
 ) -> Json<serde_json::Value> {
-    let pdf_passwords_json = payload.pdf_passwords.as_ref().and_then(|v| serde_json::to_string(v).ok());
+    let pdf_passwords_json = payload
+        .pdf_passwords
+        .as_ref()
+        .and_then(|v| serde_json::to_string(v).ok());
     let timezone = payload
         .timezone
         .as_deref()
@@ -2578,16 +2972,18 @@ async fn post_settings(
         .bind(&payload.email)
         .execute(&state.pool).await;
 
-        
     if result.is_ok() {
         let user_id = &payload.email; // Using email as user_id for stats for now
         let _ = OnboardingService::log_activity(&state.pool, user_id, "change_settings").await;
-        if payload.auto_reply { let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_auto_reply").await; }
-        if payload.dry_run { let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_dry_run").await; }
+        if payload.auto_reply {
+            let _ =
+                OnboardingService::log_activity(&state.pool, user_id, "enable_auto_reply").await;
+        }
+        if payload.dry_run {
+            let _ = OnboardingService::log_activity(&state.pool, user_id, "enable_dry_run").await;
+        }
     }
 
-
-        
     match result {
         Ok(_) => Json(serde_json::json!({ "status": "success" })),
         Err(e) => {
@@ -2601,7 +2997,9 @@ async fn get_admin_errors(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
 ) -> Json<serde_json::Value> {
-    let is_admin = query.email.as_deref()
+    let is_admin = query
+        .email
+        .as_deref()
         .map(|e| is_admin_or_developer(&state, e))
         .unwrap_or(false);
 
@@ -2660,7 +3058,7 @@ async fn post_retry_mail_error(
     let is_privileged = is_admin_or_developer(&state, &requester_email);
 
     let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
-        "SELECT error_type, context, user_id, message FROM mail_errors WHERE id = ?"
+        "SELECT error_type, context, user_id, message FROM mail_errors WHERE id = ?",
     )
     .bind(payload.error_id)
     .fetch_optional(&state.pool)
@@ -2681,22 +3079,32 @@ async fn post_retry_mail_error(
     }
 
     if error_type != "unknown_sender" {
-        return Json(serde_json::json!({ "status": "error", "message": "Only unknown_sender logs can be retried" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Only unknown_sender logs can be retried" }),
+        );
     }
 
     let Some(context_path) = context else {
-        return Json(serde_json::json!({ "status": "error", "message": "Missing log context path" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Missing log context path" }),
+        );
     };
 
     let Some(source_path) = resolve_mail_error_source_path(&state, &context_path) else {
-        return Json(serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }),
+        );
     };
 
     let file_name = source_path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("mail.eml");
-    let retry_name = format!("retry_{}_{}", chrono::Utc::now().timestamp_millis(), file_name);
+    let retry_name = format!(
+        "retry_{}_{}",
+        chrono::Utc::now().timestamp_millis(),
+        file_name
+    );
     let retry_spool_root = resolve_runtime_mail_path(&state, "data/mail_spool");
     let retry_path = retry_spool_root.join(retry_name);
 
@@ -2711,7 +3119,11 @@ async fn post_retry_mail_error(
         &state.pool,
         "INFO",
         "manual_retry",
-        &format!("Queued retry for mail_errors.id={} from {}", payload.error_id, source_path.display()),
+        &format!(
+            "Queued retry for mail_errors.id={} from {}",
+            payload.error_id,
+            source_path.display()
+        ),
         Some(&retry_path.to_string_lossy()),
         requester_user_id.as_deref(),
     )
@@ -2763,9 +3175,10 @@ async fn post_manual_process_emails(
         .bind(&payload.email)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None) else {
-            return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
-        };
+        .unwrap_or(None)
+    else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
 
     let force_reextract = payload.force_reextract.unwrap_or(false);
     let mut processed = 0_i64;
@@ -2796,11 +3209,13 @@ async fn post_manual_process_emails(
         }
 
         if force_reextract {
-            let _ = sqlx::query("DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?")
-                .bind(&user.id)
-                .bind(&id)
-                .execute(&state.pool)
-                .await;
+            let _ = sqlx::query(
+                "DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?",
+            )
+            .bind(&user.id)
+            .bind(&id)
+            .execute(&state.pool)
+            .await;
             let _ = sqlx::query("DELETE FROM auto_replies WHERE user_id = ? AND source_email_id = ? AND reply_status = 'draft'")
                 .bind(&user.id)
                 .bind(&id)
@@ -2878,7 +3293,7 @@ async fn get_finance_monthly(
 
     let rows = sqlx::query_as::<_, MonthlyFinanceSummaryRow>(
         "SELECT month_key, category, total_amount, CAST(updated_at AS TEXT) as updated_at \
-         FROM monthly_finance_summary WHERE user_id = ? ORDER BY month_key DESC, category ASC"
+         FROM monthly_finance_summary WHERE user_id = ? ORDER BY month_key DESC, category ASC",
     )
     .bind(&user_id)
     .fetch_all(&state.pool)
@@ -2896,7 +3311,8 @@ async fn post_create_rule(
         .bind(&payload.email)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None) else {
+        .unwrap_or(None)
+    else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
@@ -2905,7 +3321,12 @@ async fn post_create_rule(
         return Json(serde_json::json!({ "status": "error", "message": "Rule cannot be empty" }));
     }
 
-    let generated_label = generate_rule_label_with_ai(Some(&state.ai_client), rule_text, Some(&user.rule_label_mode)).await;
+    let generated_label = generate_rule_label_with_ai(
+        Some(&state.ai_client),
+        rule_text,
+        Some(&user.rule_label_mode),
+    )
+    .await;
     let result = sqlx::query(
         "INSERT INTO email_rules (user_id, rule_text, rule_label, source, is_enabled) VALUES (?, ?, ?, 'manual', 1)"
     )
@@ -2932,7 +3353,8 @@ async fn post_update_rule(
         .bind(&payload.email)
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None) else {
+        .unwrap_or(None)
+    else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
@@ -2941,7 +3363,12 @@ async fn post_update_rule(
         return Json(serde_json::json!({ "status": "error", "message": "Rule cannot be empty" }));
     }
 
-    let generated_label = generate_rule_label_with_ai(Some(&state.ai_client), rule_text, Some(&user.rule_label_mode)).await;
+    let generated_label = generate_rule_label_with_ai(
+        Some(&state.ai_client),
+        rule_text,
+        Some(&user.rule_label_mode),
+    )
+    .await;
     let result = sqlx::query(
         "UPDATE email_rules SET rule_text = ?, rule_label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
     )
@@ -3036,13 +3463,15 @@ async fn get_auto_replies(
         Ok(drafts) => {
             let replies: Vec<AutoReplyResponse> = drafts
                 .into_iter()
-                .map(|(id, source_email_id, from, subject, body)| AutoReplyResponse {
-                    id,
-                    source_email_id,
-                    from,
-                    subject,
-                    body,
-                })
+                .map(
+                    |(id, source_email_id, from, subject, body)| AutoReplyResponse {
+                        id,
+                        source_email_id,
+                        from,
+                        subject,
+                        body,
+                    },
+                )
                 .collect();
             Json(serde_json::json!({ "status": "success", "replies": replies }))
         }
@@ -3076,7 +3505,9 @@ async fn post_update_auto_reply(
 
     let body = payload.reply_body.trim();
     if body.is_empty() {
-        return Json(serde_json::json!({ "status": "error", "message": "Reply body cannot be empty" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Reply body cannot be empty" }),
+        );
     }
 
     let result = sqlx::query(
@@ -3122,13 +3553,14 @@ async fn post_send_auto_reply(
 
     let to_addr = recipient.clone();
     let subject = "Re: Auto-Reply";
-    let preferred_send_method = sqlx::query_scalar::<_, String>("SELECT mail_send_method FROM users WHERE id = ? LIMIT 1")
-        .bind(&user_id)
-        .fetch_optional(&state.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "direct_mx".to_string());
+    let preferred_send_method =
+        sqlx::query_scalar::<_, String>("SELECT mail_send_method FROM users WHERE id = ? LIMIT 1")
+            .bind(&user_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "direct_mx".to_string());
 
     match deliver_email_with_fallback(
         &state,
@@ -3138,24 +3570,35 @@ async fn post_send_auto_reply(
         &reply_body,
         &preferred_send_method,
     )
-    .await {
+    .await
+    {
         Ok(_) => {
             let _ = sqlx::query("UPDATE auto_replies SET reply_status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?")
                 .bind(&payload.reply_id)
                 .execute(&state.pool)
                 .await;
             if let Some(email_id) = source_email_id {
-                let _ = sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ? AND user_id = ?")
-                    .bind(email_id)
-                    .bind(&user_id)
-                    .execute(&state.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE emails SET status = 'replied' WHERE id = ? AND user_id = ?",
+                )
+                .bind(email_id)
+                .bind(&user_id)
+                .execute(&state.pool)
+                .await;
             }
             Json(serde_json::json!({ "status": "success", "message": "Reply sent" }))
         }
         Err(e) => {
             tracing::error!("Auto-reply delivery failed: {}", e);
-            log_mail_event(&state.pool, "ERROR", "smtp_send", &e, Some(&payload.reply_id), Some(&user_id)).await;
+            log_mail_event(
+                &state.pool,
+                "ERROR",
+                "smtp_send",
+                &e,
+                Some(&payload.reply_id),
+                Some(&user_id),
+            )
+            .await;
             Json(serde_json::json!({ "status": "error", "message": "Failed to send reply" }))
         }
     }
@@ -3265,7 +3708,7 @@ async fn send_data_deletion_confirmation_email(
     };
 
     let preferred_send_method = sqlx::query_scalar::<_, String>(
-        "SELECT mail_send_method FROM users WHERE email = ? LIMIT 1"
+        "SELECT mail_send_method FROM users WHERE email = ? LIMIT 1",
     )
     .bind(user_email)
     .fetch_optional(&state.pool)
@@ -3290,11 +3733,12 @@ async fn post_request_data_deletion(
     Json(payload): Json<DataDeletionRequestPayload>,
 ) -> Json<serde_json::Value> {
     let email = payload.email.trim().to_ascii_lowercase();
-    let user_row: Option<(String, String)> = sqlx::query_as("SELECT id, preferred_language FROM users WHERE email = ?")
-        .bind(&email)
-        .fetch_optional(&state.pool)
-        .await
-        .unwrap_or(None);
+    let user_row: Option<(String, String)> =
+        sqlx::query_as("SELECT id, preferred_language FROM users WHERE email = ?")
+            .bind(&email)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None);
 
     let Some((user_id, preferred_language)) = user_row else {
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
@@ -3302,10 +3746,20 @@ async fn post_request_data_deletion(
 
     let sender_dir = resolve_runtime_mail_path(
         &state,
-        &format!("data/mail_spool/{}", sanitize_path_component(&email.to_ascii_lowercase())),
+        &format!(
+            "data/mail_spool/{}",
+            sanitize_path_component(&email.to_ascii_lowercase())
+        ),
     );
     let sender_dir_str = sender_dir.to_string_lossy().to_string();
-    let snapshot = build_user_data_snapshot(&state.pool, &user_id, &email, &sender_dir_str, &state.config).await;
+    let snapshot = build_user_data_snapshot(
+        &state.pool,
+        &user_id,
+        &email,
+        &sender_dir_str,
+        &state.config,
+    )
+    .await;
     let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
     let token = uuid::Uuid::new_v4().to_string();
     let req_id = uuid::Uuid::new_v4().to_string();
@@ -3324,13 +3778,31 @@ async fn post_request_data_deletion(
         .unwrap_or_else(|_| format!("http://localhost:{}", state.config.server_port));
     let confirm_url = format!("{}/gdpr-delete?token={}", base_url, token);
 
-    let send_result = send_data_deletion_confirmation_email(&state, &email, &preferred_language, &snapshot, &confirm_url).await;
+    let send_result = send_data_deletion_confirmation_email(
+        &state,
+        &email,
+        &preferred_language,
+        &snapshot,
+        &confirm_url,
+    )
+    .await;
     let delivered = send_result.is_ok();
     if let Err(reason) = send_result {
-        let msg = format!("Failed to deliver data deletion confirmation email to {}: {}", email, reason);
+        let msg = format!(
+            "Failed to deliver data deletion confirmation email to {}: {}",
+            email, reason
+        );
         tracing::error!("{}", msg);
         let context = format!("confirm_url={}; reason={}", confirm_url, reason);
-        log_mail_event(&state.pool, "ERROR", "gdpr_email_send", &msg, Some(&context), Some(&user_id)).await;
+        log_mail_event(
+            &state.pool,
+            "ERROR",
+            "gdpr_email_send",
+            &msg,
+            Some(&context),
+            Some(&user_id),
+        )
+        .await;
     }
 
     Json(serde_json::json!({
@@ -3348,7 +3820,7 @@ async fn get_data_deletion_summary(
         "SELECT r.id, r.user_id, u.email as user_email, r.status, r.snapshot_json \
          FROM data_deletion_requests r \
          JOIN users u ON u.id = r.user_id \
-         WHERE r.token = ?"
+         WHERE r.token = ?",
     )
     .bind(query.token.trim())
     .fetch_optional(&state.pool)
@@ -3356,11 +3828,15 @@ async fn get_data_deletion_summary(
     .unwrap_or(None);
 
     let Some(row) = row else {
-        return Json(serde_json::json!({ "status": "error", "message": "Invalid or expired token" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Invalid or expired token" }),
+        );
     };
 
     if row.status == "finalized" {
-        return Json(serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }));
+        return Json(
+            serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }),
+        );
     }
 
     if row.status == "requested" {
@@ -3370,7 +3846,8 @@ async fn get_data_deletion_summary(
             .await;
     }
 
-    let snapshot: DataDeletionSnapshot = serde_json::from_str(&row.snapshot_json).unwrap_or_default();
+    let snapshot: DataDeletionSnapshot =
+        serde_json::from_str(&row.snapshot_json).unwrap_or_default();
 
     Json(serde_json::json!({
         "status": "ready",
@@ -3386,14 +3863,16 @@ async fn post_confirm_data_deletion(
     Json(payload): Json<DataDeletionConfirmPayload>,
 ) -> Json<serde_json::Value> {
     if !payload.confirm {
-        return Json(serde_json::json!({ "status": "error", "message": "Final confirmation is required" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Final confirmation is required" }),
+        );
     }
 
     let row = sqlx::query_as::<_, DataDeletionRequestRow>(
         "SELECT r.id, r.user_id, u.email as user_email, r.status, r.snapshot_json \
          FROM data_deletion_requests r \
          JOIN users u ON u.id = r.user_id \
-         WHERE r.token = ?"
+         WHERE r.token = ?",
     )
     .bind(payload.token.trim())
     .fetch_optional(&state.pool)
@@ -3401,41 +3880,79 @@ async fn post_confirm_data_deletion(
     .unwrap_or(None);
 
     let Some(row) = row else {
-        return Json(serde_json::json!({ "status": "error", "message": "Invalid or expired token" }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Invalid or expired token" }),
+        );
     };
 
     if row.status == "finalized" {
-        return Json(serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }));
+        return Json(
+            serde_json::json!({ "status": "finalized", "message": "Deletion already completed" }),
+        );
     }
 
     let sender_dir = resolve_runtime_mail_path(
         &state,
-        &format!("data/mail_spool/{}", sanitize_path_component(&row.user_email.to_ascii_lowercase())),
+        &format!(
+            "data/mail_spool/{}",
+            sanitize_path_component(&row.user_email.to_ascii_lowercase())
+        ),
     );
 
     let mut tx = match state.pool.begin().await {
         Ok(t) => t,
         Err(e) => {
-            return Json(serde_json::json!({ "status": "error", "message": format!("Cannot start deletion transaction: {}", e) }));
+            return Json(
+                serde_json::json!({ "status": "error", "message": format!("Cannot start deletion transaction: {}", e) }),
+            );
         }
     };
 
-    let _ = sqlx::query("DELETE FROM emails WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM email_rules WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM user_memories WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM user_activity_stats WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM mail_errors WHERE user_id = ?").bind(&row.user_id).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM chat_logs WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM chat_transcripts WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
-    let _ = sqlx::query("DELETE FROM chat_feedback WHERE user_email = ?").bind(&row.user_email).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM emails WHERE user_id = ?")
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM email_rules WHERE user_id = ?")
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM user_memories WHERE user_id = ?")
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM user_activity_stats WHERE user_id = ?")
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM mail_errors WHERE user_id = ?")
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM chat_logs WHERE user_email = ?")
+        .bind(&row.user_email)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM chat_transcripts WHERE user_email = ?")
+        .bind(&row.user_email)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM chat_feedback WHERE user_email = ?")
+        .bind(&row.user_email)
+        .execute(&mut *tx)
+        .await;
     let _ = sqlx::query("UPDATE data_deletion_requests SET status = 'finalized', finalized_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(&row.id)
         .execute(&mut *tx)
         .await;
-    let _ = sqlx::query("DELETE FROM users WHERE id = ?").bind(&row.user_id).execute(&mut *tx).await;
+    let _ = sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(&row.user_id)
+        .execute(&mut *tx)
+        .await;
 
     if let Err(e) = tx.commit().await {
-        return Json(serde_json::json!({ "status": "error", "message": format!("Deletion failed: {}", e) }));
+        return Json(
+            serde_json::json!({ "status": "error", "message": format!("Deletion failed: {}", e) }),
+        );
     }
 
     let _ = fs::remove_dir_all(&sender_dir).await;
@@ -3543,7 +4060,13 @@ async fn post_dsar_request(
         None => return Json(serde_json::json!({"status": "error", "message": "User not found"})),
     };
 
-    let valid_types = ["access", "export", "correction", "restriction", "withdraw-consent"];
+    let valid_types = [
+        "access",
+        "export",
+        "correction",
+        "restriction",
+        "withdraw-consent",
+    ];
     if !valid_types.contains(&req.request_type.as_str()) {
         return Json(serde_json::json!({"status": "error", "message": "Invalid request type"}));
     }
@@ -3564,7 +4087,9 @@ async fn post_dsar_request(
     .execute(&state.pool)
     .await;
 
-    Json(serde_json::json!({"status": "success", "message": "DSAR request created", "request_id": id}))
+    Json(
+        serde_json::json!({"status": "success", "message": "DSAR request created", "request_id": id}),
+    )
 }
 
 async fn get_dsar_status(
@@ -3688,7 +4213,9 @@ async fn post_age_verification(
     };
 
     if req.is_minor && !req.guardian_consent_given.unwrap_or(false) {
-        return Json(serde_json::json!({"status": "error", "message": "Guardian consent required for minors"}));
+        return Json(
+            serde_json::json!({"status": "error", "message": "Guardian consent required for minors"}),
+        );
     }
 
     let _ = sqlx::query(
@@ -3747,11 +4274,9 @@ async fn post_retention_policy(
     Json(serde_json::json!({"status": "success", "message": "Retention policy updated"}))
 }
 
-async fn get_retention_policies(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+async fn get_retention_policies(State(state): State<AppState>) -> Json<serde_json::Value> {
     let policies = sqlx::query_as::<_, DataRetentionPolicy>(
-        "SELECT id, data_type, retention_days, is_active, updated_at FROM data_retention_policies"
+        "SELECT id, data_type, retention_days, is_active, updated_at FROM data_retention_policies",
     )
     .fetch_all(&state.pool)
     .await
@@ -3770,36 +4295,33 @@ async fn run_data_retention_purge(State(state): State<AppState>) -> Json<serde_j
 
     let mut purged = Vec::new();
     for policy in policies {
-        let cutoff = format!(
-            "datetime('now', '-{} days')", 
-            policy.retention_days
-        );
+        let cutoff = format!("datetime('now', '-{} days')", policy.retention_days);
 
         let affected = match policy.data_type.as_str() {
-            "chat_transcripts" => {
-                sqlx::query(&format!(
-                    "DELETE FROM chat_transcripts WHERE created_at < {}", cutoff
-                ))
-                .execute(&state.pool)
-                .await
-                .map(|r| r.rows_affected()).unwrap_or(0)
-            }
-            "chat_feedback" => {
-                sqlx::query(&format!(
-                    "DELETE FROM chat_feedback WHERE created_at < {}", cutoff
-                ))
-                .execute(&state.pool)
-                .await
-                .map(|r| r.rows_affected()).unwrap_or(0)
-            }
-            "mail_errors" => {
-                sqlx::query(&format!(
-                    "DELETE FROM mail_errors WHERE occurred_at < {}", cutoff
-                ))
-                .execute(&state.pool)
-                .await
-                .map(|r| r.rows_affected()).unwrap_or(0)
-            }
+            "chat_transcripts" => sqlx::query(&format!(
+                "DELETE FROM chat_transcripts WHERE created_at < {}",
+                cutoff
+            ))
+            .execute(&state.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .unwrap_or(0),
+            "chat_feedback" => sqlx::query(&format!(
+                "DELETE FROM chat_feedback WHERE created_at < {}",
+                cutoff
+            ))
+            .execute(&state.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .unwrap_or(0),
+            "mail_errors" => sqlx::query(&format!(
+                "DELETE FROM mail_errors WHERE occurred_at < {}",
+                cutoff
+            ))
+            .execute(&state.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .unwrap_or(0),
             _ => 0,
         };
 
@@ -3869,11 +4391,13 @@ async fn get_wishes(
         Ok(rows) => {
             // Fetch voted wish IDs for the logged-in user.
             let voted_ids: Vec<String> = if let Some(ref uid) = user_id_opt {
-                sqlx::query_scalar::<_, String>("SELECT wish_id FROM feature_votes WHERE user_id = ?")
-                    .bind(uid)
-                    .fetch_all(&state.pool)
-                    .await
-                    .unwrap_or_default()
+                sqlx::query_scalar::<_, String>(
+                    "SELECT wish_id FROM feature_votes WHERE user_id = ?",
+                )
+                .bind(uid)
+                .fetch_all(&state.pool)
+                .await
+                .unwrap_or_default()
             } else {
                 vec![]
             };
@@ -3896,7 +4420,11 @@ async fn get_wishes(
         }
         Err(e) => {
             tracing::error!("get_wishes DB error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "db error"}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "db error"})),
+            )
+                .into_response()
         }
     }
 }
@@ -3911,9 +4439,14 @@ async fn post_create_wish(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "title must be 1–200 characters"})),
-        ).into_response();
+        )
+            .into_response();
     }
-    let description = body.description.as_deref().map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    let description = body
+        .description
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
 
     // Verify the user exists.
     let user_id: Option<String> =
@@ -3927,7 +4460,8 @@ async fn post_create_wish(
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "user not found"})),
-        ).into_response();
+        )
+            .into_response();
     };
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -3942,10 +4476,18 @@ async fn post_create_wish(
     .await;
 
     match result {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"id": id, "status": "created"}))).into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"id": id, "status": "created"})),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("post_create_wish DB error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "db error"}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "db error"})),
+            )
+                .into_response()
         }
     }
 }
@@ -3967,7 +4509,8 @@ async fn post_vote_wish(
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "user not found"})),
-        ).into_response();
+        )
+            .into_response();
     };
 
     // Verify the wish exists.
@@ -3976,22 +4519,27 @@ async fn post_vote_wish(
             .bind(&wish_id)
             .fetch_one(&state.pool)
             .await
-            .unwrap_or(0) > 0;
+            .unwrap_or(0)
+            > 0;
 
     if !wish_exists {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "wish not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "wish not found"})),
+        )
+            .into_response();
     }
 
     // Toggle: if already voted, remove vote; otherwise add it.
-    let already_voted: bool =
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM feature_votes WHERE wish_id = ? AND user_id = ?",
-        )
-        .bind(&wish_id)
-        .bind(&user_id)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0) > 0;
+    let already_voted: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM feature_votes WHERE wish_id = ? AND user_id = ?",
+    )
+    .bind(&wish_id)
+    .bind(&user_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0)
+        > 0;
 
     if already_voted {
         let _ = sqlx::query("DELETE FROM feature_votes WHERE wish_id = ? AND user_id = ?")
@@ -4070,7 +4618,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .nest("/api", api_router)
         .fallback_service(
             ServeDir::new("frontend/dist")
-                .not_found_service(ServeFile::new("frontend/dist/index.html"))
+                .not_found_service(ServeFile::new("frontend/dist/index.html")),
         )
         .layer(CorsLayer::permissive())
         .with_state(state);

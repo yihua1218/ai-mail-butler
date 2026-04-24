@@ -1,20 +1,20 @@
-use anyhow::Result;
-use tracing::{info, warn, error};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::net::SocketAddr;
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::time::{sleep, Duration};
-use tokio::fs;
-use std::path::{Path, PathBuf};
-use crate::models::User;
 use crate::ai::AiClient;
-use sqlx::SqlitePool;
-use uuid::Uuid;
+use crate::models::User;
+use anyhow::Result;
 use chrono::Utc;
 use lettre::message::{Message, SinglePart};
 use lettre::{SmtpTransport, Transport};
+use sqlx::SqlitePool;
+use std::collections::HashSet;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::fs;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{sleep, Duration};
+use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::config::Config;
 
@@ -89,7 +89,10 @@ pub async fn list_spool_eml_files(spool_dir: &str) -> Result<Vec<PathBuf>> {
 /// corresponding base spool whose filenames are not already present in the
 /// overlay are appended.  In normal mode this is identical to
 /// `list_spool_eml_files`.
-pub async fn union_list_eml_files(config: &Config, runtime_spool_dir: &str) -> Result<Vec<PathBuf>> {
+pub async fn union_list_eml_files(
+    config: &Config,
+    runtime_spool_dir: &str,
+) -> Result<Vec<PathBuf>> {
     // overlay (or sole) spool
     let mut files = list_spool_eml_files(runtime_spool_dir).await?;
 
@@ -133,7 +136,8 @@ async fn union_read_file(config: &Config, path: &Path) -> std::io::Result<Vec<u8
         Ok(data) => Ok(data),
         Err(e) if config.readonly_mode_enabled => {
             let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
-            if let (Some(base), Ok(rel)) = (&config.readonly_base, path.strip_prefix(overlay_root)) {
+            if let (Some(base), Ok(rel)) = (&config.readonly_base, path.strip_prefix(overlay_root))
+            {
                 let base_path = Path::new(base).join(rel);
                 fs::read(&base_path).await
             } else {
@@ -144,7 +148,11 @@ async fn union_read_file(config: &Config, path: &Path) -> std::io::Result<Vec<u8
     }
 }
 
-pub async fn resolve_cli_target_path(config: &Config, spool_dir: &str, target: &str) -> Result<PathBuf> {
+pub async fn resolve_cli_target_path(
+    config: &Config,
+    spool_dir: &str,
+    target: &str,
+) -> Result<PathBuf> {
     if let Ok(index) = target.parse::<usize>() {
         let files = union_list_eml_files(config, spool_dir).await?;
         return files
@@ -226,7 +234,11 @@ fn first_email_address(raw: &str) -> Option<String> {
         }
     }
 
-    let trimmed = raw.trim().trim_matches('"').trim_matches('>').trim_matches('<');
+    let trimmed = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('>')
+        .trim_matches('<');
     if trimmed.contains('@') {
         Some(trimmed.to_ascii_lowercase())
     } else {
@@ -271,7 +283,9 @@ fn all_email_addresses(raw: &str) -> Vec<String> {
     }
 
     let mut seen = HashSet::new();
-    out.into_iter().filter(|email| seen.insert(email.clone())).collect()
+    out.into_iter()
+        .filter(|email| seen.insert(email.clone()))
+        .collect()
 }
 
 fn header_values(parsed: &mailparse::ParsedMail<'_>, header_key: &str) -> Vec<String> {
@@ -325,10 +339,7 @@ fn resolve_runtime_path(config: &Config, logical_path: &str) -> PathBuf {
         return logical_buf;
     }
 
-    let overlay_root = config
-        .overlay_dir
-        .as_deref()
-        .unwrap_or("data/overlay");
+    let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
     let overlay_root_path = PathBuf::from(overlay_root);
     if logical_buf.starts_with(&overlay_root_path) {
         return logical_buf;
@@ -362,8 +373,8 @@ fn collect_attachment_parts<'a>(
     }
 
     let disposition = part.get_content_disposition();
-    let has_filename = disposition.params.contains_key("filename")
-        || part.ctype.params.contains_key("name");
+    let has_filename =
+        disposition.params.contains_key("filename") || part.ctype.params.contains_key("name");
     let is_attachment = matches!(
         disposition.disposition,
         mailparse::DispositionType::Attachment
@@ -391,7 +402,10 @@ fn collect_inline_text_parts<'a>(
     }
 
     let disposition = part.get_content_disposition();
-    if matches!(disposition.disposition, mailparse::DispositionType::Attachment) {
+    if matches!(
+        disposition.disposition,
+        mailparse::DispositionType::Attachment
+    ) {
         return;
     }
 
@@ -437,7 +451,11 @@ fn parse_mx_records(output: &str) -> Option<String> {
             if parts.len() == 2 {
                 let priority: u32 = parts[0].parse().ok()?;
                 let host = parts[1].trim_end_matches('.').to_string();
-                if host.is_empty() { None } else { Some((priority, host)) }
+                if host.is_empty() {
+                    None
+                } else {
+                    Some((priority, host))
+                }
             } else {
                 None
             }
@@ -452,7 +470,8 @@ async fn lookup_mx_host(domain: &str) -> Option<String> {
     match tokio::process::Command::new("dig")
         .args(["+short", "MX", domain])
         .output()
-        .await {
+        .await
+    {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.trim().is_empty() {
@@ -465,7 +484,12 @@ async fn lookup_mx_host(domain: &str) -> Option<String> {
     }
 }
 
-async fn send_via_relay(config: &Config, to_email: &str, subject: &str, text_body: &str) -> Result<(), String> {
+async fn send_via_relay(
+    config: &Config,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+) -> Result<(), String> {
     let smtp_ready = config
         .smtp_relay_host
         .as_deref()
@@ -489,18 +513,27 @@ async fn send_via_relay(config: &Config, to_email: &str, subject: &str, text_bod
         .text_body(text_body.to_string());
 
     let is_implicit = port == 465;
-    let mut builder = mail_send::SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
+    let mut builder =
+        mail_send::SmtpClientBuilder::new(host.as_str(), port).implicit_tls(is_implicit);
     if !smtp_user.is_empty() {
         builder = builder.credentials((smtp_user.as_str(), pass.as_str()));
     }
 
     match builder.connect().await {
-        Ok(mut client) => client.send(message).await.map_err(|e| format!("relay send failed: {:?}", e)),
+        Ok(mut client) => client
+            .send(message)
+            .await
+            .map_err(|e| format!("relay send failed: {:?}", e)),
         Err(e) => Err(format!("relay connect failed: {:?}", e)),
     }
 }
 
-async fn send_via_direct_mx(config: &Config, to_email: &str, subject: &str, text_body: &str) -> Result<(), String> {
+async fn send_via_direct_mx(
+    config: &Config,
+    to_email: &str,
+    subject: &str,
+    text_body: &str,
+) -> Result<(), String> {
     let from_addr: lettre::message::Mailbox = extract_pure_email(&config.assistant_email)
         .parse()
         .unwrap_or_else(|_| "noreply@example.com".parse().expect("default mailbox"));
@@ -529,7 +562,9 @@ async fn send_via_direct_mx(config: &Config, to_email: &str, subject: &str, text
         .port(25)
         .build();
 
-    mailer.send(&email_msg).map_err(|e| format!("direct mx send failed: {:?}", e))?;
+    mailer
+        .send(&email_msg)
+        .map_err(|e| format!("direct mx send failed: {:?}", e))?;
     Ok(())
 }
 
@@ -589,7 +624,8 @@ fn normalize_finance_direction(raw: Option<&str>, category: &str) -> String {
     let v = raw.unwrap_or("").to_lowercase();
     if v.contains("income") || v.contains("in") || v.contains("存入") {
         "income".to_string()
-    } else if v.contains("expense") || v.contains("out") || v.contains("支出") || v.contains("消費") {
+    } else if v.contains("expense") || v.contains("out") || v.contains("支出") || v.contains("消費")
+    {
         "expense".to_string()
     } else {
         match category {
@@ -634,7 +670,10 @@ pub(crate) async fn analyze_and_store_financial_records(
     let ai_res = match ai_client.chat(system_prompt, &user_prompt).await {
         Ok(v) => v,
         Err(e) => {
-            warn!("Financial extraction AI call failed for email {}: {}", email_id, e);
+            warn!(
+                "Financial extraction AI call failed for email {}: {}",
+                email_id, e
+            );
             return;
         }
     };
@@ -800,7 +839,10 @@ mod tests {
 
     #[test]
     fn extract_pure_email_handles_angle_brackets() {
-        assert_eq!(extract_pure_email("Test <test@example.com>"), "test@example.com");
+        assert_eq!(
+            extract_pure_email("Test <test@example.com>"),
+            "test@example.com"
+        );
     }
 
     #[test]
@@ -828,14 +870,26 @@ mod tests {
 
     #[test]
     fn normalize_finance_direction_income() {
-        assert_eq!(normalize_finance_direction(Some("income"), "expense"), "income");
-        assert_eq!(normalize_finance_direction(Some("存入"), "expense"), "income");
+        assert_eq!(
+            normalize_finance_direction(Some("income"), "expense"),
+            "income"
+        );
+        assert_eq!(
+            normalize_finance_direction(Some("存入"), "expense"),
+            "income"
+        );
     }
 
     #[test]
     fn normalize_finance_direction_expense() {
-        assert_eq!(normalize_finance_direction(Some("expense"), "expense"), "expense");
-        assert_eq!(normalize_finance_direction(Some("支出"), "expense"), "expense");
+        assert_eq!(
+            normalize_finance_direction(Some("expense"), "expense"),
+            "expense"
+        );
+        assert_eq!(
+            normalize_finance_direction(Some("支出"), "expense"),
+            "expense"
+        );
     }
 
     #[test]
@@ -874,11 +928,7 @@ async fn log_mail_event(
 /// Handle a single inbound SMTP connection.
 /// Saves a session transcript to `<spool_dir>/session_<id>.log` and the
 /// received email body to `<spool_dir>/mail_<id>.eml`.
-async fn handle_smtp_connection(
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-    spool_dir: String,
-) {
+async fn handle_smtp_connection(stream: TcpStream, peer_addr: SocketAddr, spool_dir: String) {
     let session_id = format!(
         "{}-{}",
         Utc::now().format("%Y%m%d%H%M%S%.3f"),
@@ -1122,7 +1172,15 @@ impl MailService {
             Ok(v) => v,
             Err(e) => {
                 error!("[CLI] Failed to parse mail {:?}: {}", path.file_name(), e);
-                log_mail_event(pool, "ERROR", "parse_error", &e.to_string(), path.to_str(), None).await;
+                log_mail_event(
+                    pool,
+                    "ERROR",
+                    "parse_error",
+                    &e.to_string(),
+                    path.to_str(),
+                    None,
+                )
+                .await;
                 return CliFileResult {
                     file_path: file_path_str,
                     status: "failed".to_string(),
@@ -1243,11 +1301,7 @@ impl MailService {
                 .execute(pool)
                 .await;
 
-            push_step(
-                &mut simulation_logs,
-                options,
-                "Run financial extraction",
-            );
+            push_step(&mut simulation_logs, options, "Run financial extraction");
             analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body).await;
 
             let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
@@ -1256,11 +1310,7 @@ impl MailService {
                 .await;
 
             if options.simulate_agent {
-                push_step(
-                    &mut simulation_logs,
-                    options,
-                    "Start agent simulation",
-                );
+                push_step(&mut simulation_logs, options, "Start agent simulation");
 
                 let enabled_rules: Vec<String> = sqlx::query_scalar(
                     "SELECT rule_text FROM email_rules WHERE user_id = ? AND is_enabled = 1 ORDER BY updated_at DESC",
@@ -1340,11 +1390,7 @@ impl MailService {
                 }
 
                 if options.simulate_memory {
-                    push_step(
-                        &mut simulation_logs,
-                        options,
-                        "Load user long-term memory",
-                    );
+                    push_step(&mut simulation_logs, options, "Load user long-term memory");
                     let memory = crate::services::OnboardingService::get_memory(pool, &u.id).await;
 
                     let mut ai_user = u.clone();
@@ -1356,7 +1402,10 @@ impl MailService {
                             .join("\n");
                         let merged = match ai_user.preferences.as_ref() {
                             Some(p) if !p.trim().is_empty() => {
-                                format!("{}\n\nActive email processing rules:\n{}", p, rules_context)
+                                format!(
+                                    "{}\n\nActive email processing rules:\n{}",
+                                    p, rules_context
+                                )
                             }
                             _ => format!("Active email processing rules:\n{}", rules_context),
                         };
@@ -1447,8 +1496,7 @@ impl MailService {
         let listener = TcpListener::bind("0.0.0.0:25").await?;
         info!(
             "SMTP server listening on 0.0.0.0:25  (logical spool: {}, runtime spool: {})",
-            logical_spool_dir,
-            spool_dir
+            logical_spool_dir, spool_dir
         );
 
         let spool_owned = spool_dir.to_string();
@@ -1487,10 +1535,7 @@ impl MailService {
             if let Ok(paths) = union_list_eml_files(&config, spool_dir).await {
                 for path in paths {
                     // Only process .eml files; skip subdirectories and .log files
-                    let is_eml = path
-                        .extension()
-                        .map(|e| e == "eml")
-                        .unwrap_or(false);
+                    let is_eml = path.extension().map(|e| e == "eml").unwrap_or(false);
                     if !path.is_file() || !is_eml {
                         continue;
                     }
@@ -1501,20 +1546,34 @@ impl MailService {
                         match mailparse::parse_mail(&contents) {
                             Err(e) => {
                                 error!("Failed to parse mail {:?}: {}", path.file_name(), e);
-                                log_mail_event(&pool, "ERROR", "parse_error", &e.to_string(), path.to_str(), None).await;
+                                log_mail_event(
+                                    &pool,
+                                    "ERROR",
+                                    "parse_error",
+                                    &e.to_string(),
+                                    path.to_str(),
+                                    None,
+                                )
+                                .await;
                             }
                             Ok(parsed) => {
-                                let subject = parsed.headers.iter()
+                                let subject = parsed
+                                    .headers
+                                    .iter()
                                     .find(|h| h.get_key().eq_ignore_ascii_case("Subject"))
                                     .map(|h| h.get_value())
                                     .unwrap_or_else(|| "No Subject".to_string());
 
-                                let to_addr = parsed.headers.iter()
+                                let to_addr = parsed
+                                    .headers
+                                    .iter()
                                     .find(|h| h.get_key().eq_ignore_ascii_case("To"))
                                     .map(|h| h.get_value())
                                     .unwrap_or_default();
 
-                                let from_addr = parsed.headers.iter()
+                                let from_addr = parsed
+                                    .headers
+                                    .iter()
                                     .find(|h| h.get_key().eq_ignore_ascii_case("From"))
                                     .map(|h| h.get_value())
                                     .unwrap_or_default();
@@ -1532,7 +1591,9 @@ impl MailService {
                                     .unwrap_or_else(|| from_addr.trim().to_ascii_lowercase());
 
                                 let assistant_addr = first_email_address(&config.assistant_email)
-                                    .unwrap_or_else(|| config.assistant_email.trim().to_ascii_lowercase());
+                                    .unwrap_or_else(|| {
+                                        config.assistant_email.trim().to_ascii_lowercase()
+                                    });
 
                                 // Build candidates in priority order:
                                 // 1) Delivered-To / X-Original-To (intended mailbox owner)
@@ -1610,8 +1671,11 @@ impl MailService {
                                 let message_key = path
                                     .file_stem()
                                     .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| format!("mail_{}", Utc::now().timestamp_millis()));
-                                let message_dir = format!("{}/{}/{}", spool_dir, sender_key, message_key);
+                                    .unwrap_or_else(|| {
+                                        format!("mail_{}", Utc::now().timestamp_millis())
+                                    });
+                                let message_dir =
+                                    format!("{}/{}/{}", spool_dir, sender_key, message_key);
                                 let attachments_dir = format!("{}/attachments", message_dir);
                                 let decoded_parts_dir = format!("{}/decoded_parts", message_dir);
 
@@ -1619,8 +1683,14 @@ impl MailService {
                                     error!("Failed to create archive dir {}: {}", message_dir, e);
                                 } else {
                                     let _ = fs::create_dir_all(&decoded_parts_dir).await;
-                                    let _ = fs::write(format!("{}/raw.eml", message_dir), &contents).await;
-                                    let _ = fs::write(format!("{}/body.txt", message_dir), body.as_bytes()).await;
+                                    let _ =
+                                        fs::write(format!("{}/raw.eml", message_dir), &contents)
+                                            .await;
+                                    let _ = fs::write(
+                                        format!("{}/body.txt", message_dir),
+                                        body.as_bytes(),
+                                    )
+                                    .await;
 
                                     let metadata = format!(
                                         "from: {}\nto: {}\nsubject: {}\nreceived_at: {}\n",
@@ -1629,7 +1699,9 @@ impl MailService {
                                         subject,
                                         Utc::now().to_rfc3339()
                                     );
-                                    let _ = fs::write(format!("{}/meta.txt", message_dir), metadata).await;
+                                    let _ =
+                                        fs::write(format!("{}/meta.txt", message_dir), metadata)
+                                            .await;
 
                                     let mut attachment_parts = Vec::new();
                                     collect_attachment_parts(&parsed, &mut attachment_parts);
@@ -1641,11 +1713,19 @@ impl MailService {
                                                 attachments_dir,
                                                 sanitize_path_component(&filename)
                                             );
-                                            if let Err(e) = fs::write(&attachment_path, &data).await {
-                                                error!("Failed to save attachment {}: {}", attachment_path, e);
+                                            if let Err(e) = fs::write(&attachment_path, &data).await
+                                            {
+                                                error!(
+                                                    "Failed to save attachment {}: {}",
+                                                    attachment_path, e
+                                                );
                                             }
 
-                                            if part.ctype.mimetype.eq_ignore_ascii_case("application/pdf") {
+                                            if part
+                                                .ctype
+                                                .mimetype
+                                                .eq_ignore_ascii_case("application/pdf")
+                                            {
                                                 match crate::services::OnboardingService::extract_pdf_text(&data, &passwords) {
                                                     Ok(text) => {
                                                         if !text.trim().is_empty() {
@@ -1700,7 +1780,11 @@ impl MailService {
                                                 if decoded.trim().is_empty() {
                                                     continue;
                                                 }
-                                                let ext = if part.ctype.mimetype.eq_ignore_ascii_case("text/html") {
+                                                let ext = if part
+                                                    .ctype
+                                                    .mimetype
+                                                    .eq_ignore_ascii_case("text/html")
+                                                {
                                                     "html"
                                                 } else {
                                                     "txt"
@@ -1711,8 +1795,14 @@ impl MailService {
                                                     idx + 1,
                                                     ext
                                                 );
-                                                if let Err(e) = fs::write(&decoded_path, decoded.as_bytes()).await {
-                                                    error!("Failed to save decoded text part {}: {}", decoded_path, e);
+                                                if let Err(e) =
+                                                    fs::write(&decoded_path, decoded.as_bytes())
+                                                        .await
+                                                {
+                                                    error!(
+                                                        "Failed to save decoded text part {}: {}",
+                                                        decoded_path, e
+                                                    );
                                                 }
                                             }
                                             Err(e) => {
@@ -1749,14 +1839,20 @@ impl MailService {
                                     let stored_content = if pdf_texts.is_empty() {
                                         body.clone()
                                     } else {
-                                        format!("{}\n\n[PDF Extracted]\n{}", body, pdf_texts.join("\n---\n"))
+                                        format!(
+                                            "{}\n\n[PDF Extracted]\n{}",
+                                            body,
+                                            pdf_texts.join("\n---\n")
+                                        )
                                     };
 
-                                    let _ = sqlx::query("UPDATE emails SET stored_content = ? WHERE id = ?")
-                                        .bind(&stored_content)
-                                        .bind(&id)
-                                        .execute(&pool)
-                                        .await;
+                                    let _ = sqlx::query(
+                                        "UPDATE emails SET stored_content = ? WHERE id = ?",
+                                    )
+                                    .bind(&stored_content)
+                                    .bind(&id)
+                                    .execute(&pool)
+                                    .await;
 
                                     analyze_and_store_financial_records(
                                         &pool,
@@ -1770,14 +1866,18 @@ impl MailService {
 
                                     if !u.is_onboarded {
                                         let token = Uuid::new_v4().to_string();
-                                        let _ = sqlx::query("UPDATE users SET magic_token = ? WHERE id = ?")
-                                            .bind(&token)
-                                            .bind(&u.id)
-                                            .execute(&pool)
-                                            .await;
+                                        let _ = sqlx::query(
+                                            "UPDATE users SET magic_token = ? WHERE id = ?",
+                                        )
+                                        .bind(&token)
+                                        .bind(&u.id)
+                                        .execute(&pool)
+                                        .await;
 
                                         let login_url = build_login_url(&config, &token);
-                                        let (subject_line, text_body) = if u.preferred_language == "zh-TW" {
+                                        let (subject_line, text_body) = if u.preferred_language
+                                            == "zh-TW"
+                                        {
                                             (
                                                 "AI Mail Butler 使用說明與登入連結",
                                                 format!(
@@ -1795,7 +1895,15 @@ impl MailService {
                                             )
                                         };
 
-                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body, &u.mail_send_method).await {
+                                        if let Err(e) = send_basic_email(
+                                            &config,
+                                            &u.email,
+                                            subject_line,
+                                            &text_body,
+                                            &u.mail_send_method,
+                                        )
+                                        .await
+                                        {
                                             log_mail_event(
                                                 &pool,
                                                 "ERROR",
@@ -1803,18 +1911,28 @@ impl MailService {
                                                 &format!("Failed to send onboarding email: {}", e),
                                                 Some(&id),
                                                 Some(&u.id),
-                                            ).await;
+                                            )
+                                            .await;
                                         }
 
-                                        let _ = sqlx::query("UPDATE emails SET status = 'pending' WHERE id = ?")
-                                            .bind(&id)
-                                            .execute(&pool)
-                                            .await;
+                                        let _ = sqlx::query(
+                                            "UPDATE emails SET status = 'pending' WHERE id = ?",
+                                        )
+                                        .bind(&id)
+                                        .execute(&pool)
+                                        .await;
 
                                         if let Some(fname) = path.file_name() {
-                                            let dest = format!("{}/{}", processed_dir, fname.to_string_lossy());
+                                            let dest = format!(
+                                                "{}/{}",
+                                                processed_dir,
+                                                fname.to_string_lossy()
+                                            );
                                             if let Err(e) = fs::rename(&path, &dest).await {
-                                                error!("Failed to move {:?} to processed/: {}", path, e);
+                                                error!(
+                                                    "Failed to move {:?} to processed/: {}",
+                                                    path, e
+                                                );
                                                 let _ = fs::remove_file(&path).await;
                                             }
                                         }
@@ -1839,17 +1957,24 @@ impl MailService {
                                     .unwrap_or_default();
 
                                     // Check if any rule matches this email
-                                    if let Ok(Some((matched_rule_id, matched_rule_text, matched_rule_label))) = 
-                                        crate::services::EmailReplyService::find_matching_rule(
-                                            &pool,
-                                            &u.id,
-                                            &subject,
-                                            &body,
-                                            &from_clean,
-                                        ).await
+                                    if let Ok(Some((
+                                        matched_rule_id,
+                                        matched_rule_text,
+                                        matched_rule_label,
+                                    ))) = crate::services::EmailReplyService::find_matching_rule(
+                                        &pool,
+                                        &u.id,
+                                        &subject,
+                                        &body,
+                                        &from_clean,
+                                    )
+                                    .await
                                     {
                                         matched_rule = true;
-                                        info!("Email {} matched rule ID {}: {}", id, matched_rule_id, matched_rule_text);
+                                        info!(
+                                            "Email {} matched rule ID {}: {}",
+                                            id, matched_rule_id, matched_rule_text
+                                        );
 
                                         let _ = sqlx::query(
                                             "UPDATE email_rules SET matched_count = matched_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?"
@@ -1860,13 +1985,13 @@ impl MailService {
                                         .await;
 
                                         let _ = sqlx::query(
-                                            "UPDATE emails SET matched_rule_label = ? WHERE id = ?"
+                                            "UPDATE emails SET matched_rule_label = ? WHERE id = ?",
                                         )
                                         .bind(&matched_rule_label)
                                         .bind(&id)
                                         .execute(&pool)
                                         .await;
-                                        
+
                                         // Generate auto-reply based on the matched rule
                                         match crate::services::EmailReplyService::generate_auto_reply(
                                             &ai_client,
@@ -1878,8 +2003,8 @@ impl MailService {
                                         ).await {
                                             Ok(reply_body) => {
                                                 // Store as draft or send based on auto_reply flag
-                                                let reply_status = if u.auto_reply { "sent" } else { "draft" };
-                                                
+                                                let reply_status = "draft";
+
                                                 match crate::services::EmailReplyService::store_auto_reply(
                                                     &pool,
                                                     &u.id,
@@ -1892,7 +2017,11 @@ impl MailService {
                                                 ).await {
                                                     Ok(reply_id) => {
                                                         info!("Auto-reply stored with ID: {}", reply_id);
-                                                        
+                                                        let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+                                                            .bind(&id)
+                                                            .execute(&pool)
+                                                            .await;
+
                                                         // If auto_reply is enabled, send immediately
                                                         if u.auto_reply {
                                                             let to_email = from_clean.clone();
@@ -1903,6 +2032,7 @@ impl MailService {
                                                             let reply_id_clone = reply_id.clone();
                                                             let config_clone = config.clone();
                                                             let preferred_method = u.mail_send_method.clone();
+                                                            let user_id = u.id.clone();
 
                                                             tokio::spawn(async move {
                                                                 match send_basic_email(
@@ -1914,13 +2044,26 @@ impl MailService {
                                                                 ).await {
                                                                     Ok(_) => {
                                                                         info!("Auto-reply sent for {} via rule", id_clone);
-                                                                        let _ = sqlx::query("UPDATE auto_replies SET sent_at = CURRENT_TIMESTAMP WHERE id = ?")
+                                                                        let _ = sqlx::query("UPDATE auto_replies SET reply_status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?")
                                                                             .bind(&reply_id_clone)
+                                                                            .execute(&pool_clone)
+                                                                            .await;
+                                                                        let _ = sqlx::query("UPDATE emails SET status = 'replied' WHERE id = ?")
+                                                                            .bind(&id_clone)
                                                                             .execute(&pool_clone)
                                                                             .await;
                                                                     }
                                                                     Err(e) => {
                                                                         error!("Auto-reply delivery failed: {}", e);
+                                                                        log_mail_event(
+                                                                            &pool_clone,
+                                                                            "ERROR",
+                                                                            "smtp_send",
+                                                                            &format!("Auto-reply delivery failed: {}", e),
+                                                                            Some(&id_clone),
+                                                                            Some(&user_id),
+                                                                        )
+                                                                        .await;
                                                                     }
                                                                 }
                                                             });
@@ -1939,10 +2082,11 @@ impl MailService {
 
                                     if has_rules {
                                         info!("Triggering AI for email {}", id);
-                                        let memory = crate::services::OnboardingService::get_memory(
-                                            &pool, &u.id,
-                                        )
-                                        .await;
+                                        let memory =
+                                            crate::services::OnboardingService::get_memory(
+                                                &pool, &u.id,
+                                            )
+                                            .await;
 
                                         let mut ai_user = u.clone();
                                         if !enabled_rules.is_empty() {
@@ -1953,9 +2097,15 @@ impl MailService {
                                                 .join("\n");
                                             let merged = match ai_user.preferences.as_ref() {
                                                 Some(p) if !p.trim().is_empty() => {
-                                                    format!("{}\n\nActive email processing rules:\n{}", p, rules_context)
+                                                    format!(
+                                                        "{}\n\nActive email processing rules:\n{}",
+                                                        p, rules_context
+                                                    )
                                                 }
-                                                _ => format!("Active email processing rules:\n{}", rules_context),
+                                                _ => format!(
+                                                    "Active email processing rules:\n{}",
+                                                    rules_context
+                                                ),
                                             };
                                             ai_user.preferences = Some(merged);
                                         }
@@ -2015,16 +2165,24 @@ impl MailService {
                                                         .clone()
                                                         .unwrap_or_default();
 
-                                                    let message =
-                                                        {
-                                                            let preferred_language = u.preferred_language.as_str();
-                                                            let assistant_name = if preferred_language == "zh-TW" {
-                                                                u.assistant_name_zh.as_deref().unwrap_or("AI 郵件助理")
+                                                    let message = {
+                                                        let preferred_language =
+                                                            u.preferred_language.as_str();
+                                                        let assistant_name =
+                                                            if preferred_language == "zh-TW" {
+                                                                u.assistant_name_zh
+                                                                    .as_deref()
+                                                                    .unwrap_or("AI 郵件助理")
                                                             } else {
-                                                                u.assistant_name_en.as_deref().unwrap_or("AI Mail Butler")
+                                                                u.assistant_name_en
+                                                                    .as_deref()
+                                                                    .unwrap_or("AI Mail Butler")
                                                             };
-                                                            let assistant_mailbox = format!("{} <{}>", assistant_name, config.assistant_email);
-                                                            mail_send::mail_builder::MessageBuilder::new()
+                                                        let assistant_mailbox = format!(
+                                                            "{} <{}>",
+                                                            assistant_name, config.assistant_email
+                                                        );
+                                                        mail_send::mail_builder::MessageBuilder::new()
                                                             .from(assistant_mailbox.clone())
                                                             .reply_to(assistant_mailbox)
                                                             .to(target_email
@@ -2032,7 +2190,7 @@ impl MailService {
                                                                 .replace('>', ""))
                                                             .subject(format!("Re: {}", subject))
                                                             .text_body(ai_reply)
-                                                        };
+                                                    };
 
                                                     let is_implicit = port == 465;
                                                     let pool_clone = pool.clone();
@@ -2045,8 +2203,7 @@ impl MailService {
                                                                 host.as_str(),
                                                                 port,
                                                             );
-                                                        builder =
-                                                            builder.implicit_tls(is_implicit);
+                                                        builder = builder.implicit_tls(is_implicit);
                                                         if !smtp_user.is_empty() {
                                                             builder = builder.credentials((
                                                                 smtp_user.as_str(),
@@ -2131,14 +2288,18 @@ impl MailService {
                                         }
                                     } else if !matched_rule {
                                         let token = Uuid::new_v4().to_string();
-                                        let _ = sqlx::query("UPDATE users SET magic_token = ? WHERE id = ?")
-                                            .bind(&token)
-                                            .bind(&u.id)
-                                            .execute(&pool)
-                                            .await;
+                                        let _ = sqlx::query(
+                                            "UPDATE users SET magic_token = ? WHERE id = ?",
+                                        )
+                                        .bind(&token)
+                                        .bind(&u.id)
+                                        .execute(&pool)
+                                        .await;
 
                                         let login_url = build_login_url(&config, &token);
-                                        let (subject_line, text_body) = if u.preferred_language == "zh-TW" {
+                                        let (subject_line, text_body) = if u.preferred_language
+                                            == "zh-TW"
+                                        {
                                             (
                                                 "你的轉寄信件尚未符合任何規則",
                                                 format!(
@@ -2158,7 +2319,15 @@ impl MailService {
                                             )
                                         };
 
-                                        if let Err(e) = send_basic_email(&config, &u.email, subject_line, &text_body, &u.mail_send_method).await {
+                                        if let Err(e) = send_basic_email(
+                                            &config,
+                                            &u.email,
+                                            subject_line,
+                                            &text_body,
+                                            &u.mail_send_method,
+                                        )
+                                        .await
+                                        {
                                             log_mail_event(
                                                 &pool,
                                                 "ERROR",
@@ -2176,10 +2345,7 @@ impl MailService {
                                         "No user found for sender {:?} (recipient {:?}, candidates {:?}); email discarded",
                                         from_clean, to_clean, owner_candidates
                                     );
-                                    warn!(
-                                        "{}",
-                                        warn_msg
-                                    );
+                                    warn!("{}", warn_msg);
                                     log_mail_event(
                                         &pool,
                                         "WARN",

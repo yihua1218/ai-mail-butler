@@ -12,6 +12,11 @@ pub struct Config {
     pub readonly_mode_enabled: bool,
     pub readonly_base: Option<String>,
     pub overlay_dir: Option<String>,
+    pub remote_debug_sshfs_enabled: bool,
+    pub remote_debug_mode: String,
+    pub remote_debug_remote: Option<String>,
+    pub remote_debug_mount_point: Option<String>,
+    pub remote_debug_overlay_dir: Option<String>,
 }
 
 impl Config {
@@ -27,15 +32,23 @@ impl Config {
 
     pub fn load() -> Self {
         Self {
-            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/data.sqlite".to_string()),
-            server_port: std::env::var("PORT").unwrap_or_else(|_| "3000".to_string()).parse().unwrap_or(3000),
+            database_url: std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "sqlite:data/data.sqlite".to_string()),
+            server_port: std::env::var("PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse()
+                .unwrap_or(3000),
             ai_api_key: std::env::var("AI_API_KEY").unwrap_or_default(),
             developer_email: std::env::var("DEVELOPER_EMAIL").ok(),
             smtp_relay_host: std::env::var("SMTP_RELAY_HOST").ok(),
-            smtp_relay_port: std::env::var("SMTP_RELAY_PORT").unwrap_or_else(|_| "587".to_string()).parse().unwrap_or(587),
+            smtp_relay_port: std::env::var("SMTP_RELAY_PORT")
+                .unwrap_or_else(|_| "587".to_string())
+                .parse()
+                .unwrap_or(587),
             smtp_relay_user: std::env::var("SMTP_RELAY_USER").ok(),
             smtp_relay_pass: std::env::var("SMTP_RELAY_PASS").ok(),
-            assistant_email: std::env::var("ASSISTANT_EMAIL").unwrap_or_else(|_| "assistant@example.com".to_string()),
+            assistant_email: std::env::var("ASSISTANT_EMAIL")
+                .unwrap_or_else(|_| "assistant@example.com".to_string()),
             docs_whitelist: std::env::var("DOCS_WHITELIST")
                 .unwrap_or_default()
                 .split(',')
@@ -43,8 +56,24 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
             readonly_mode_enabled: Self::parse_bool_env("READONLY_MODE"),
-            readonly_base: std::env::var("READONLY_BASE").ok().filter(|s| !s.trim().is_empty()),
-            overlay_dir: std::env::var("OVERLAY_DIR").ok().filter(|s| !s.trim().is_empty()),
+            readonly_base: std::env::var("READONLY_BASE")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            overlay_dir: std::env::var("OVERLAY_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            remote_debug_sshfs_enabled: Self::parse_bool_env("REMOTE_DEBUG_SSHFS_ENABLED"),
+            remote_debug_mode: std::env::var("REMOTE_DEBUG_MODE")
+                .unwrap_or_else(|_| "readonly".to_string()),
+            remote_debug_remote: std::env::var("REMOTE_DEBUG_REMOTE")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            remote_debug_mount_point: std::env::var("REMOTE_DEBUG_MOUNT_POINT")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            remote_debug_overlay_dir: std::env::var("REMOTE_DEBUG_OVERLAY_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         }
     }
 }
