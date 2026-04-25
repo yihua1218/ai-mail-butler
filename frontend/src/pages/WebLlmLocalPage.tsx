@@ -13,7 +13,7 @@ const { Title, Paragraph, Text } = Typography;
 
 const WebLlmLocalPage: React.FC = () => {
   const { i18n } = useTranslation();
-  const isZh = i18n.language === 'zh-TW';
+  const isZh = i18n.language.startsWith('zh');
   const extensionFileName = 'ai-mail-butler-browser-extension-0.1.0.zip';
   const extensionDownloadHref = `/downloads/${extensionFileName}`;
 
@@ -157,6 +157,14 @@ const WebLlmLocalPage: React.FC = () => {
                 {isZh ? '下載安裝封裝' : 'Download Install Package'}
               </Button>
               <Text type="secondary">{extensionFileName}</Text>
+              <Paragraph style={{ marginBottom: 0 }}>
+                <Text type="secondary">
+                  {isZh ? '下載連結：' : 'Download link: '}
+                </Text>
+                <a href={extensionDownloadHref} download={extensionFileName}>
+                  {extensionDownloadHref}
+                </a>
+              </Paragraph>
             </Space>
           </Col>
           <Col xs={24} lg={16}>

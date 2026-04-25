@@ -33,6 +33,7 @@ type MonthlyFinance = {
 };
 
 const PIE_COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2', '#a0d911'];
+const FINANCE_CARD_COLLAPSE_KEY = 'ai_mail_butler_finance_collapsed_cards';
 
 const FinanceAnalysisPage: React.FC = () => {
   const { user } = useAuth();
@@ -41,7 +42,52 @@ const FinanceAnalysisPage: React.FC = () => {
   const location = useLocation();
   const [records, setRecords] = useState<FinanceRecord[]>([]);
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
+  const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(FINANCE_CARD_COLLAPSE_KEY) || '{}');
+    } catch {
+      return {};
+    }
+  });
   const { Text } = Typography;
+
+  const toggleCard = (key: string) => {
+    setCollapsedCards((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      localStorage.setItem(FINANCE_CARD_COLLAPSE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const CollapsibleCard = ({
+    storageKey,
+    title,
+    extra,
+    children,
+  }: {
+    storageKey: string;
+    title: React.ReactNode;
+    extra?: React.ReactNode;
+    children: React.ReactNode;
+  }) => {
+    const collapsed = !!collapsedCards[storageKey];
+    return (
+      <Card
+        bordered={false}
+        title={title}
+        extra={
+          <Space>
+            {extra}
+            <Button size="small" onClick={() => toggleCard(storageKey)}>
+              {collapsed ? t('expand') : t('collapse')}
+            </Button>
+          </Space>
+        }
+      >
+        {!collapsed && children}
+      </Card>
+    );
+  };
 
   const formatInUserTimezone = (value?: string) => {
     if (!value) return '-';
@@ -141,25 +187,35 @@ const FinanceAnalysisPage: React.FC = () => {
     return `${year}-${month}`;
   }, [user?.timezone]);
 
-  const expensePieData = useMemo(() => {
-    const totals = new Map<string, number>();
+  const incomeExpensePieData = useMemo(() => {
+    const totals = new Map<string, number>([
+      ['income', 0],
+      ['expense', 0],
+    ]);
     records
       .filter((row) => (row.transaction_month_key || row.month_key) === currentMonthKey)
-      .filter((row) => row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill')
       .forEach((row) => {
-        const key = row.finance_type || row.category || 'expense';
-        totals.set(key, (totals.get(key) || 0) + Math.abs(Number(row.amount) || 0));
+        const amount = Math.abs(Number(row.amount) || 0);
+        if (row.direction === 'income' || row.direction === 'deposit' || row.category === 'income' || row.category === 'deposit') {
+          totals.set('income', (totals.get('income') || 0) + amount);
+        } else if (row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill') {
+          totals.set('expense', (totals.get('expense') || 0) + amount);
+        }
       });
+    const colors: Record<string, string> = {
+      income: '#2f9e44',
+      expense: '#e8590c',
+    };
     return Array.from(totals.entries())
-      .map(([category, value], index) => ({ category, value, color: PIE_COLORS[index % PIE_COLORS.length] }))
+      .map(([category, value]) => ({ category, value, color: colors[category] || PIE_COLORS[0] }))
       .filter((item) => item.value > 0)
       .sort((a, b) => b.value - a.value);
   }, [records, currentMonthKey]);
 
-  const expensePieTotal = expensePieData.reduce((sum, item) => sum + item.value, 0);
-  const pieBackground = expensePieData.reduce<{ cursor: number; segments: string[] }>((acc, item) => {
+  const incomeExpensePieTotal = incomeExpensePieData.reduce((sum, item) => sum + item.value, 0);
+  const pieBackground = incomeExpensePieData.reduce<{ cursor: number; segments: string[] }>((acc, item) => {
     const start = acc.cursor;
-    const end = start + (item.value / expensePieTotal) * 100;
+    const end = start + (item.value / incomeExpensePieTotal) * 100;
     acc.segments.push(`${item.color} ${start}% ${end}%`);
     acc.cursor = end;
     return acc;
@@ -214,7 +270,32 @@ const FinanceAnalysisPage: React.FC = () => {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card bordered={false} title={t('finance_monthly_summary')}>
+      <CollapsibleCard storageKey="income-expense-ratio" title={t('finance_income_expense_pie')}>
+        {incomeExpensePieData.length > 0 ? (
+          <div className="finance-pie-layout">
+            <div className="finance-pie-chart" style={{ background: `conic-gradient(${pieBackground})` }}>
+              <div className="finance-pie-center">
+                <Text type="secondary">{currentMonthKey}</Text>
+                <strong>{incomeExpensePieTotal.toLocaleString()}</strong>
+              </div>
+            </div>
+            <div className="finance-pie-legend">
+              {incomeExpensePieData.map((item) => (
+                <div className="finance-pie-legend-row" key={item.category}>
+                  <span className="finance-pie-swatch" style={{ background: item.color }} />
+                  <span>{t(`finance_cat_${item.category}`, { defaultValue: item.category })}</span>
+                  <Text type="secondary">
+                    {item.value.toLocaleString()} ({Math.round((item.value / incomeExpensePieTotal) * 100)}%)
+                  </Text>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <Empty description={t('finance_no_income_expense_mix')} />
+        )}
+      </CollapsibleCard>
+      <CollapsibleCard storageKey="monthly-summary" title={t('finance_monthly_summary')}>
         <Table
           rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`}
           columns={monthlyColumns}
@@ -222,34 +303,9 @@ const FinanceAnalysisPage: React.FC = () => {
           scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 12 }}
         />
-      </Card>
-      <Card bordered={false} title={t('finance_monthly_expense_pie')}>
-        {expensePieData.length > 0 ? (
-          <div className="finance-pie-layout">
-            <div className="finance-pie-chart" style={{ background: `conic-gradient(${pieBackground})` }}>
-              <div className="finance-pie-center">
-                <Text type="secondary">{currentMonthKey}</Text>
-                <strong>{expensePieTotal.toLocaleString()}</strong>
-              </div>
-            </div>
-            <div className="finance-pie-legend">
-              {expensePieData.map((item) => (
-                <div className="finance-pie-legend-row" key={item.category}>
-                  <span className="finance-pie-swatch" style={{ background: item.color }} />
-                  <span>{t(`finance_cat_${item.category}`, { defaultValue: item.category })}</span>
-                  <Text type="secondary">
-                    {item.value.toLocaleString()} ({Math.round((item.value / expensePieTotal) * 100)}%)
-                  </Text>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <Empty description={t('finance_no_expense_mix')} />
-        )}
-      </Card>
-      <Card
-        bordered={false}
+      </CollapsibleCard>
+      <CollapsibleCard
+        storageKey="records"
         title={isFilteringByEmail ? t('finance_records_filtered', { subject: linkedSubject }) : t('finance_records')}
         extra={linkedEmailId ? (
           <Space wrap>
@@ -269,7 +325,7 @@ const FinanceAnalysisPage: React.FC = () => {
           pagination={{ pageSize: 10 }}
           rowClassName={(record: FinanceRecord) => (linkedEmailId && record.email_id === linkedEmailId ? 'finance-linked-row' : '')}
         />
-      </Card>
+      </CollapsibleCard>
     </Space>
   );
 };

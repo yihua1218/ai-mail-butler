@@ -24,7 +24,7 @@ The deploy image tag is fixed to:
 
 - `sha-${GITHUB_SHA}`
 
-So every successful pipeline deploys an immutable SHA tag.
+So every successful pipeline deploys an immutable SHA tag. After the staging server successfully pulls the new image and restarts Docker Compose, the workflow purges the entire Cloudflare zone cache with `purge_everything`.
 
 ## 2. GitHub Actions Settings You Must Configure
 
@@ -43,6 +43,8 @@ Create the following **Repository secrets** (or Environment secrets if you bind 
 | `DEPLOY_PATH`              | Yes                     | Absolute path on server containing compose files |
 | `DEPLOY_REGISTRY_USERNAME` | Yes (for private image) | GHCR login username                              |
 | `DEPLOY_REGISTRY_TOKEN`    | Yes (for private image) | GHCR token/password used by `docker login`       |
+| `CLOUDFLARE_ZONE_ID`       | Yes                     | Cloudflare zone ID to purge after deploy         |
+| `CLOUDFLARE_API_TOKEN`     | Yes                     | Cache-purge-only Cloudflare API Token            |
 
 ### Generate SSH key pair for GitHub Actions deploy
 
@@ -188,7 +190,12 @@ ASSISTANT_EMAIL=assistant@example.com
 AI_API_BASE_URL=http://your-ai-endpoint/v1
 AI_API_KEY=your-key
 AI_MODEL_NAME=your-model
+
+CLOUDFLARE_ZONE_ID=your-cloudflare-zone-id
+CLOUDFLARE_API_TOKEN=your-cache-purge-only-token
 ```
+
+For Cloudflare API Token permissions and partial cache purge examples, see [Cloudflare Cache Purge Token and Operations](CLOUDFLARE-CACHE-PURGE.md).
 
 ## 6. First Deployment Checklist
 

@@ -2719,6 +2719,8 @@ mod web_tests {
             remote_debug_remote: None,
             remote_debug_mount_point: None,
             remote_debug_overlay_dir: None,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
         };
 
         let state = AppState {
@@ -4562,6 +4564,148 @@ async fn post_vote_wish(
     }
 }
 
+#[derive(Deserialize)]
+struct CloudflarePurgeRequest {
+    email: String,
+    target: String,
+}
+
+#[derive(Serialize)]
+struct CloudflarePurgePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purge_everything: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files: Option<Vec<String>>,
+}
+
+fn public_base_url(state: &AppState) -> String {
+    std::env::var("PUBLIC_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("http://localhost:{}", state.config.server_port))
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn cloudflare_purge_payload(state: &AppState, target: &str) -> Option<CloudflarePurgePayload> {
+    let base = public_base_url(state);
+    match target {
+        "all" => Some(CloudflarePurgePayload {
+            purge_everything: Some(true),
+            files: None,
+        }),
+        "frontend" => Some(CloudflarePurgePayload {
+            purge_everything: None,
+            files: Some(vec![
+                format!("{base}/"),
+                format!("{base}/dashboard"),
+                format!("{base}/chat"),
+                format!("{base}/settings"),
+                format!("{base}/rules"),
+                format!("{base}/finance"),
+                format!("{base}/privacy"),
+                format!("{base}/how-it-works"),
+                format!("{base}/webllm-local"),
+                format!("{base}/about"),
+            ]),
+        }),
+        "webllm-local" => Some(CloudflarePurgePayload {
+            purge_everything: None,
+            files: Some(vec![format!("{base}/webllm-local")]),
+        }),
+        "browser-extension-zip" => Some(CloudflarePurgePayload {
+            purge_everything: None,
+            files: Some(vec![format!(
+                "{base}/downloads/ai-mail-butler-browser-extension-0.1.0.zip"
+            )]),
+        }),
+        _ => None,
+    }
+}
+
+async fn post_admin_cache_purge(
+    State(state): State<AppState>,
+    Json(payload): Json<CloudflarePurgeRequest>,
+) -> impl IntoResponse {
+    if !is_admin_or_developer(&state, &payload.email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "status": "error", "message": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    let Some(zone_id) = state.config.cloudflare_zone_id.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "status": "error", "message": "CLOUDFLARE_ZONE_ID is not configured" })),
+        )
+            .into_response();
+    };
+    let Some(api_token) = state.config.cloudflare_api_token.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "status": "error", "message": "CLOUDFLARE_API_TOKEN is not configured" })),
+        )
+            .into_response();
+    };
+    let Some(cf_payload) = cloudflare_purge_payload(&state, payload.target.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "status": "error", "message": "Unknown purge target" })),
+        )
+            .into_response();
+    };
+
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/purge_cache",
+        zone_id
+    );
+    let response = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(api_token)
+        .json(&cf_payload)
+        .send()
+        .await;
+
+    match response {
+        Ok(res) => {
+            let status = res.status();
+            let body = res
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if status.is_success() && body.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                Json(serde_json::json!({
+                    "status": "success",
+                    "target": payload.target,
+                    "cloudflare": body,
+                }))
+                .into_response()
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "message": "Cloudflare purge request failed",
+                        "cloudflare_status": status.as_u16(),
+                        "cloudflare": body,
+                    })),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("Cloudflare cache purge failed: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "status": "error", "message": "Cloudflare request failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn start_server(port: u16, state: AppState) -> Result<()> {
     let api_router = Router::new()
         .route("/health", get(|| async { "OK" }))
@@ -4609,6 +4753,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/wishes", get(get_wishes))
         .route("/wishes", post(post_create_wish))
         .route("/wishes/:id/vote", post(post_vote_wish))
+        .route("/admin/cache/purge", post(post_admin_cache_purge))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             readonly_write_guard,
@@ -4616,6 +4761,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
 
     let app = Router::new()
         .nest("/api", api_router)
+        .nest_service("/downloads", ServeDir::new("frontend/dist/downloads"))
         .fallback_service(
             ServeDir::new("frontend/dist")
                 .not_found_service(ServeFile::new("frontend/dist/index.html")),

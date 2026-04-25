@@ -24,7 +24,7 @@
 
 - `sha-${GITHUB_SHA}`
 
-因此每次成功 pipeline 都會部署不可變的 SHA 版本。
+因此每次成功 pipeline 都會部署不可變的 SHA 版本。當 staging server 成功 pull 新 image，且 Docker Compose `down` / `up -d` 成功後，workflow 會對 Cloudflare zone 執行 `purge_everything` 清除整站快取。
 
 ## 2. GitHub Actions 必須設定的資料
 
@@ -43,6 +43,8 @@
 | `DEPLOY_PATH`              | 是                | 遠端伺服器上的部署目錄絕對路徑                 |
 | `DEPLOY_REGISTRY_USERNAME` | 私有 image 時必填 | GHCR 登入帳號                                  |
 | `DEPLOY_REGISTRY_TOKEN`    | 私有 image 時必填 | 提供 `docker login` 使用的 GHCR token/password |
+| `CLOUDFLARE_ZONE_ID`       | 是                | 部署成功後要 purge 的 Cloudflare zone ID       |
+| `CLOUDFLARE_API_TOKEN`     | 是                | 只能清除快取的 Cloudflare API Token            |
 
 ### 產生給 GitHub Actions 部署用的 SSH 金鑰
 
@@ -188,7 +190,12 @@ ASSISTANT_EMAIL=assistant@example.com
 AI_API_BASE_URL=http://your-ai-endpoint/v1
 AI_API_KEY=your-key
 AI_MODEL_NAME=your-model
+
+CLOUDFLARE_ZONE_ID=your-cloudflare-zone-id
+CLOUDFLARE_API_TOKEN=your-cache-purge-only-token
 ```
+
+Cloudflare API Token 權限限制與部分清除快取範例，請參考 [Cloudflare Cache Purge Token 與快取清除操作](CLOUDFLARE-CACHE-PURGE.zh-TW.md)。
 
 ## 6. 首次部署檢查清單
 

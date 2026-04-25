@@ -121,6 +121,8 @@ docker-compose up --build -d
 詳細的部署指南（含 AWS EC2 實作）：
 - [Docker 部署指南 (繁體中文)](DOCKER_AWS_GUIDE.zh-TW.md)
 - [Docker Deployment Guide (English)](DOCKER_AWS_GUIDE.md)
+- [Cloudflare Cache Purge Token 與快取清除操作](docs/CLOUDFLARE-CACHE-PURGE.zh-TW.md)
+- [Cloudflare Cache Purge Token and Operations](docs/CLOUDFLARE-CACHE-PURGE.md)
 
 ## Cloudflare DNS 設定 (MX 紀錄)
 

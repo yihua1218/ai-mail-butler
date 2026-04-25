@@ -93,6 +93,8 @@ const DashboardPage: React.FC = () => {
   const [sendingDraft, setSendingDraft] = useState(false);
   const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
+  const [cachePurgeTarget, setCachePurgeTarget] = useState<string>('webllm-local');
+  const [purgingCache, setPurgingCache] = useState(false);
 
   const loadFeedback = async () => {
     if (!user?.email) return;
@@ -526,6 +528,22 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  const purgeCloudflareCache = async () => {
+    if (!user?.email || !isPrivileged) return;
+    setPurgingCache(true);
+    try {
+      await axios.post('/api/admin/cache/purge', {
+        email: user.email,
+        target: cachePurgeTarget,
+      });
+      message.success(t('cache_purge_success'));
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || t('cache_purge_failed'));
+    } finally {
+      setPurgingCache(false);
+    }
+  };
+
   const LogFilterBar = () => (
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
@@ -666,6 +684,32 @@ const DashboardPage: React.FC = () => {
       </Card>
     );
   };
+
+  const CachePurgeDisplay = () => (
+    <Card bordered={false} title={t('cache_purge_title')}>
+      <Space direction="vertical" style={{ width: '100%' }}>
+        <Paragraph style={{ marginBottom: 0, color: '#86868b' }}>
+          {t('cache_purge_desc')}
+        </Paragraph>
+        <Space wrap>
+          <Select
+            value={cachePurgeTarget}
+            style={{ minWidth: 260 }}
+            onChange={setCachePurgeTarget}
+            options={[
+              { value: 'webllm-local', label: t('cache_purge_webllm_local') },
+              { value: 'browser-extension-zip', label: t('cache_purge_extension_zip') },
+              { value: 'frontend', label: t('cache_purge_frontend') },
+              { value: 'all', label: t('cache_purge_all') },
+            ]}
+          />
+          <Button type="primary" loading={purgingCache} onClick={purgeCloudflareCache}>
+            {t('cache_purge_run')}
+          </Button>
+        </Space>
+      </Space>
+    </Card>
+  );
 
   const ResultsModal = () => {
     if (!resultsData) return null;
@@ -853,6 +897,7 @@ const DashboardPage: React.FC = () => {
               <Card bordered={false} title={t('dashboard_feedback_admin')}>
                 <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />
               </Card>
+              <CachePurgeDisplay />
               <RemoteDebugDisplay />
             </Space>
           </Col>

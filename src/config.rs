@@ -17,6 +17,8 @@ pub struct Config {
     pub remote_debug_remote: Option<String>,
     pub remote_debug_mount_point: Option<String>,
     pub remote_debug_overlay_dir: Option<String>,
+    pub cloudflare_zone_id: Option<String>,
+    pub cloudflare_api_token: Option<String>,
 }
 
 impl Config {
@@ -72,6 +74,12 @@ impl Config {
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
             remote_debug_overlay_dir: std::env::var("REMOTE_DEBUG_OVERLAY_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            cloudflare_zone_id: std::env::var("CLOUDFLARE_ZONE_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            cloudflare_api_token: std::env::var("CLOUDFLARE_API_TOKEN")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
         }
