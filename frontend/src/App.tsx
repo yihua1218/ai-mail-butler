@@ -15,6 +15,7 @@ const PrivacyPage = lazy(() => import('./pages/PrivacyPage').then(m => ({ defaul
 const ChatPage = lazy(() => import('./Chat').then((m) => ({ default: m.Chat })));
 const AboutPage = lazy(() => import('./About').then((m) => ({ default: m.About })));
 const HowItWorksPage = lazy(() => import('./pages/HowItWorksPage'));
+const WebLlmLocalPage = lazy(() => import('./pages/WebLlmLocalPage'));
 
 const { Header, Content, Footer } = Layout;
 const { Title } = Typography;
@@ -30,6 +31,7 @@ const PATH_TO_KEY: Record<string, string> = {
   '/finance': '6',
   '/privacy': '7',
   '/how-it-works': '8',
+  '/webllm-local': '9',
   '/gdpr-delete': '0',
   '/login': '1', // Login also maps to dashboard view
 };
@@ -42,6 +44,7 @@ const KEY_TO_PATH: Record<string, string> = {
   '6': '/finance',
   '7': '/privacy',
   '8': '/how-it-works',
+  '9': '/webllm-local',
 };
 
 const App: React.FC = () => {
@@ -90,6 +93,7 @@ const App: React.FC = () => {
       '6': t('finance'),
       '7': t('privacy.title'),
       '8': t('how_it_works'),
+      '9': t('webllm_local'),
     };
     document.title = `${titles[activeMenu] ?? 'AI Mail Butler'} | AI Mail Butler`;
   }, [activeMenu, t]);
@@ -167,6 +171,8 @@ const App: React.FC = () => {
         return <PrivacyPage />;
       case '8':
         return <HowItWorksPage />;
+      case '9':
+        return <WebLlmLocalPage />;
       default:
         return <DashboardPage />;
     }
@@ -232,6 +238,7 @@ const App: React.FC = () => {
                 { key: '6', label: t('finance') },
                 { key: '7', label: t('privacy.title') },
                 { key: '8', label: t('how_it_works') },
+                { key: '9', label: t('webllm_local') },
                 { key: '4', label: t('about') },
               ]}
             />

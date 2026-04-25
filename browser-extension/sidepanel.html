@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Mail Butler Local Panel</title>
+    <link rel="stylesheet" href="./sidepanel.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <div class="header-row">
+          <div>
+            <h1 id="titleMain">AI Mail Butler Local</h1>
+            <p id="titleSub">All rules and logs stay in this browser profile.</p>
+          </div>
+          <label class="lang-inline">
+            <span id="langLabel">Language</span>
+            <select id="langSelect">
+              <option value="en">English</option>
+              <option value="zh-TW">繁體中文</option>
+            </select>
+          </label>
+        </div>
+        <div class="lang-sync-row">
+          <label class="row">
+            <input id="followWebLang" type="checkbox" />
+            <span id="followWebLangLabel">Follow Web App Language</span>
+          </label>
+          <button id="syncLangNow" class="secondary" type="button">Sync Now</button>
+        </div>
+        <div id="langSyncStatus" class="meta"></div>
+        <section class="mini-card">
+          <div class="card-head">
+            <strong id="webWhitelistTitle">Web App Origin Whitelist</strong>
+          </div>
+          <div class="meta" id="webWhitelistHelp">Only these origins can be used for language sync.</div>
+          <div class="whitelist-add-row">
+            <input id="webWhitelistInput" type="text" placeholder="https://app.example.com" />
+            <button id="addWhitelistOrigin" class="secondary" type="button">Add</button>
+          </div>
+          <div id="webWhitelistStatus" class="meta"></div>
+          <div id="webWhitelistList" class="rule-list"></div>
+        </section>
+      </header>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 id="capabilityTitle">Permission & Capability Check</h2>
+          <button id="refreshCapability" class="secondary" type="button">Refresh</button>
+        </div>
+        <div id="capabilityStatus" class="meta">Checking runtime capabilities...</div>
+        <div class="repair-row">
+          <button id="repairGmailTab" class="secondary" type="button">Repair Current Gmail Tab</button>
+          <div id="repairGmailStatus" class="meta"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 id="runtimeTitle">Runtime Mode</h2>
+        <label>
+          <span id="modeLabel">Mode</span>
+          <select id="mode">
+            <option value="manual">manual</option>
+            <option value="draft_assist">draft_assist</option>
+            <option value="guarded_autosend">guarded_autosend</option>
+          </select>
+        </label>
+        <label>
+          <span id="minConfidenceLabel">Min confidence for auto-send</span>
+          <input id="minConfidence" type="number" min="0" max="1" step="0.01" />
+        </label>
+        <label class="row">
+          <input id="blockSensitive" type="checkbox" />
+          <span id="blockSensitiveLabel">Block sensitive emails by default</span>
+        </label>
+        <label class="row">
+          <input id="enableAudit" type="checkbox" />
+          <span id="enableAuditLabel">Store local audit metadata</span>
+        </label>
+        <button id="saveSettings">Save Settings</button>
+      </section>
+
+      <section class="card">
+        <h2 id="addRuleTitle">Add Rule</h2>
+        <div id="ruleFormMode" class="form-mode-badge">Create new rule</div>
+        <div id="ruleFormStatus" class="meta"></div>
+        <label><span id="ruleNameLabel">Rule name</span> <input id="ruleName" placeholder="e.g. Vendor follow-up" /></label>
+        <div id="ruleNameHelp" class="meta">Use a short name that helps you identify this rule later.</div>
+        <label><span id="rulePriorityLabel">Priority</span> <input id="rulePriority" type="number" value="10" /></label>
+        <div id="rulePriorityHelp" class="meta">Higher numbers win when multiple rules match the same thread.</div>
+        <label><span id="ruleSenderLabel">Sender matcher (csv)</span> <input id="ruleSender" placeholder="example.com,alice@" /></label>
+        <div id="ruleSenderHelp" class="meta">Match full addresses or partial domains, separated by commas.</div>
+        <label><span id="ruleSubjectRegexLabel">Subject regex</span> <input id="ruleSubjectRegex" placeholder="invoice|follow up" /></label>
+        <div id="ruleSubjectRegexHelp" class="meta">Optional regular expression for the Gmail subject line.</div>
+        <label><span id="ruleContainsLabel">Body contains (csv-all)</span> <input id="ruleContains" placeholder="payment,deadline" /></label>
+        <div id="ruleContainsHelp" class="meta">All listed keywords must appear in the message body.</div>
+        <label><span id="ruleToneLabel">Tone profile id</span> <input id="ruleTone" placeholder="professional / concise" /></label>
+        <div id="ruleToneHelp" class="meta">Reference a local tone preset, for example professional or concise.</div>
+        <div id="ruleToneExamples" class="meta">Examples: professional, concise, friendly, formal.</div>
+        <label><span id="ruleInstructionLabel">Instruction template</span>
+          <textarea id="ruleInstruction" rows="3" placeholder="How should the assistant reply?"></textarea>
+        </label>
+        <div id="ruleInstructionHelp" class="meta">Describe how the assistant should reply when this rule matches.</div>
+        <label><span id="ruleActionLabel">Allowed action</span>
+          <select id="ruleAction">
+            <option id="ruleActionOptionManual" value="manual">manual</option>
+            <option id="ruleActionOptionDraftAssist" value="draft_assist">draft_assist</option>
+            <option id="ruleActionOptionGuardedAutosend" value="guarded_autosend">guarded_autosend</option>
+          </select>
+        </label>
+        <div id="ruleActionHelp" class="meta">Choose whether this rule only suggests text, creates a draft, or allows guarded auto-send.</div>
+        <div id="ruleActionExamples" class="meta">manual = suggest only, draft_assist = create draft, guarded_autosend = may auto-send when safe.</div>
+        <label><span id="ruleConfidenceLabel">Auto-send confidence threshold</span>
+          <input id="ruleConfidence" type="number" min="0" max="1" step="0.01" value="0.9" />
+        </label>
+        <div id="ruleConfidenceHelp" class="meta">Guarded auto-send only applies when confidence meets or exceeds this threshold.</div>
+        <div class="form-actions">
+          <button id="addRule">Add Rule</button>
+          <button id="cancelEditRule" class="secondary" type="button">Cancel Edit</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 id="rulesTitle">Rules</h2>
+        <div id="ruleList" class="rule-list"></div>
+      </section>
+
+      <section class="card">
+        <h2 id="auditTitle">Local Audit (last 30)</h2>
+        <div id="auditList" class="audit-list"></div>
+      </section>
+    </main>
+
+    <script type="module" src="./sidepanel.js"></script>
+  </body>
+</html>
