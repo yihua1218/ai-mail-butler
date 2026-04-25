@@ -1,5 +1,8 @@
 # Compiled output
 /target
+/browser-extension/dist
+/browser-extension/node_modules
+/frontend/dist
 
 # Logs
 *.log
@@ -23,3 +26,4 @@ Thumbs.db
 
 # data files
 data
+frontend/public/downloads/*.zip

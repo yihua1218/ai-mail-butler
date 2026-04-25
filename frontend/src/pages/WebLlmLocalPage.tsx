@@ -1,7 +1,8 @@
 import React from 'react';
-import { Alert, Card, Col, Divider, List, Row, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Divider, List, Row, Space, Steps, Tag, Typography } from 'antd';
 import {
   CloudDownloadOutlined,
+  DownloadOutlined,
   SafetyOutlined,
   ThunderboltOutlined,
   WarningOutlined,
@@ -13,6 +14,8 @@ const { Title, Paragraph, Text } = Typography;
 const WebLlmLocalPage: React.FC = () => {
   const { i18n } = useTranslation();
   const isZh = i18n.language === 'zh-TW';
+  const extensionFileName = 'ai-mail-butler-browser-extension-0.1.0.zip';
+  const extensionDownloadHref = `/downloads/${extensionFileName}`;
 
   const requirements = isZh
     ? [
@@ -58,6 +61,44 @@ const WebLlmLocalPage: React.FC = () => {
         'Decision metadata is logged locally (without full plaintext by default).',
       ];
 
+  const installSteps = isZh
+    ? [
+        {
+          title: '下載 ZIP',
+          description: `下載 ${extensionFileName} 並解壓縮。`,
+        },
+        {
+          title: '開啟 Extensions',
+          description: '到 chrome://extensions 或 edge://extensions，開啟開發人員模式。',
+        },
+        {
+          title: '載入資料夾',
+          description: '點選「載入未封裝項目」，選擇解壓縮後的 extension 資料夾。',
+        },
+        {
+          title: '開啟 Gmail',
+          description: '登入 Gmail 後點擊 AI Mail Butler 圖示，開啟 side panel。',
+        },
+      ]
+    : [
+        {
+          title: 'Download ZIP',
+          description: `Download ${extensionFileName} and unzip it.`,
+        },
+        {
+          title: 'Open Extensions',
+          description: 'Go to chrome://extensions or edge://extensions and enable Developer Mode.',
+        },
+        {
+          title: 'Load Folder',
+          description: 'Click Load unpacked and select the unzipped extension folder.',
+        },
+        {
+          title: 'Open Gmail',
+          description: 'Sign in to Gmail, then click the AI Mail Butler icon to open the side panel.',
+        },
+      ];
+
   return (
     <div style={{ maxWidth: 1160, margin: '0 auto' }}>
       <Title level={2} style={{ marginBottom: 8 }}>
@@ -96,6 +137,49 @@ const WebLlmLocalPage: React.FC = () => {
         }
         style={{ marginBottom: 20, borderRadius: 12 }}
       />
+
+      <Card
+        title={isZh ? '下載 Browser Extension' : 'Download Browser Extension'}
+        extra={<CloudDownloadOutlined />}
+        style={{ marginBottom: 20, borderRadius: 14 }}
+      >
+        <Row gutter={[16, 16]} align="middle">
+          <Col xs={24} lg={8}>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Button
+                type="primary"
+                size="large"
+                icon={<DownloadOutlined />}
+                href={extensionDownloadHref}
+                download={extensionFileName}
+                block
+              >
+                {isZh ? '下載安裝封裝' : 'Download Install Package'}
+              </Button>
+              <Text type="secondary">{extensionFileName}</Text>
+            </Space>
+          </Col>
+          <Col xs={24} lg={16}>
+            <Steps
+              size="small"
+              current={-1}
+              items={installSteps}
+              direction="vertical"
+            />
+          </Col>
+        </Row>
+        <Alert
+          type="warning"
+          showIcon
+          message={isZh ? '瀏覽器安裝限制' : 'Browser Install Limitation'}
+          description={
+            isZh
+              ? 'Chrome / Edge 不允許一般網站直接安裝未上架商店的 Extension；此頁提供可下載封裝，使用者仍需解壓縮後以開發人員模式載入。'
+              : 'Chrome / Edge do not allow regular websites to directly install extensions that are not published through the store. This page provides the package download; users still need to unzip it and load it in Developer Mode.'
+          }
+          style={{ marginTop: 16, borderRadius: 12 }}
+        />
+      </Card>
 
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={8}>

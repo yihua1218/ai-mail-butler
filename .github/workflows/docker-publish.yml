@@ -22,11 +22,21 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+      - name: Package browser extension
+        run: |
+          cd browser-extension
+          npm ci
+          npm run package
       - name: Build frontend
         run: |
           cd frontend
-          npm install
+          npm ci
           npm run build
+      - name: Upload browser extension package artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: browser-extension-package
+          path: frontend/public/downloads/*.zip
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v5
         with:

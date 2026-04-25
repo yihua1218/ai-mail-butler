@@ -15,6 +15,21 @@
 - `content-script.js`：讀取 Gmail thread、掃描列表、插入草稿、條件式寄送。
 - `sidepanel.html` + `sidepanel.js` + `sidepanel.css`：本地規則與設定管理 UI。
 
+## 產生可下載封裝
+
+```bash
+cd browser-extension
+npm install
+npm run package
+```
+
+封裝會產生兩份輸出：
+
+- `browser-extension/dist/ai-mail-butler-browser-extension-0.1.0/`：可直接用 Chrome / Edge「載入未封裝項目」安裝的資料夾。
+- `frontend/public/downloads/ai-mail-butler-browser-extension-0.1.0.zip`：WebLLM 本地端頁面可提供下載的 ZIP。
+
+Chrome / Edge 基於安全限制，不允許一般網站直接安裝未上架 Chrome Web Store 的 extension。使用者需下載 ZIP、解壓縮，再用「開發人員模式」載入解壓後的資料夾。
+
 ## 安裝方式（開發人員模式）
 
 載入 extension 前，先打包 WebLLM runtime：
@@ -56,7 +71,7 @@ npm run build:webllm
 - 可啟用 `Follow Web App Language`，從目前作用中分頁讀取網站 `localStorage.i18n_lang` 進行同步。
 - 若目前作用中分頁不是你的 Web App，或該分頁沒有 `i18n_lang`，同步會提示失敗原因。
 - Side Panel 內可設定 `Web App Origin 白名單`，只有白名單內的 origin 會被允許用來同步網站語系。
-- 預設會先加入本機開發常用的 `http://localhost:5173` 與 `http://127.0.0.1:5173`，你也可以加入自己的正式站台 origin。
+- 預設會先加入正式站台 `https://butler.yihua.app`，以及本機開發常用的 `http://localhost:5173` 與 `http://127.0.0.1:5173`，你也可以加入自己的站台 origin。
 
 ## 運作限制（務必先讀）
 

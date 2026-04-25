@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build:webllm": "esbuild webllm-entry.js --bundle --format=esm --target=chrome124 --external:url --outfile=vendor/web-llm/index.js"
+    "build:webllm": "esbuild webllm-entry.js --bundle --format=esm --target=chrome124 --external:url --outfile=vendor/web-llm/index.js",
+    "package": "npm run build:webllm && node scripts/package-extension.mjs"
   },
   "dependencies": {
     "@mlc-ai/web-llm": "^0.2.82"

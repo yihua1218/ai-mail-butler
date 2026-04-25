@@ -15,6 +15,21 @@ This folder contains a Chrome Extension Manifest V3 scaffold for local-first Gma
 - `content-script.js`: Gmail thread extraction, visible-thread scan, draft insertion, guarded send trigger.
 - `sidepanel.html` + `sidepanel.js` + `sidepanel.css`: local settings/rule management UI.
 
+## Build Downloadable Package
+
+```bash
+cd browser-extension
+npm install
+npm run package
+```
+
+The package task creates two outputs:
+
+- `browser-extension/dist/ai-mail-butler-browser-extension-0.1.0/`: unpacked folder for Chrome / Edge Developer Mode.
+- `frontend/public/downloads/ai-mail-butler-browser-extension-0.1.0.zip`: downloadable ZIP served by the WebLLM local page.
+
+Chrome / Edge security rules do not allow a regular website to directly install an extension that is not published through the Chrome Web Store. Users should download the ZIP, unzip it, then load the unzipped folder through Developer Mode.
+
 ## Load Extension (Developer Mode)
 
 Build the packaged WebLLM runtime once before loading the extension:
@@ -29,6 +44,12 @@ npm run build:webllm
 2. Enable Developer Mode.
 3. Click **Load unpacked** and select this `browser-extension/` folder.
 4. Open Gmail (`https://mail.google.com`) and click the extension icon to open side panel.
+
+## Web App Origin Whitelist
+
+- The default whitelist includes the production web app origin `https://butler.yihua.app`.
+- Local development origins `http://localhost:5173` and `http://127.0.0.1:5173` are included by default.
+- The side panel lets users add or remove origins for web app language sync.
 
 ## Operational Limits (Important)
 

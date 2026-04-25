@@ -1,7 +1,11 @@
 const LANG_KEY = 'extension_ui_lang';
 const FOLLOW_WEBAPP_LANG_KEY = 'extension_follow_webapp_lang';
 const WEBAPP_LANG_WHITELIST_KEY = 'extension_webapp_lang_whitelist';
-const DEFAULT_WEBAPP_LANG_WHITELIST = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+const DEFAULT_WEBAPP_LANG_WHITELIST = [
+  'https://butler.yihua.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
 
 const I18N = {
   en: {

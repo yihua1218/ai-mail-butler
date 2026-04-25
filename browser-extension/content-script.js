@@ -3,12 +3,12 @@ const PANEL_ID = 'ai-mail-butler-local-panel';
 const HIGHLIGHT_ATTR = 'data-ai-mail-butler-match';
 const REPLIED_ATTR = 'data-ai-mail-butler-replied';
 const LANG_KEY = 'extension_ui_lang';
-const CONTENT_SCRIPT_VERSION = '2026-04-25-5';
+const CONTENT_SCRIPT_VERSION = '2026-04-26-1';
 
 const I18N = {
   en: {
     panelTitle: 'AI Mail Butler (Local)',
-    scan: 'Search Gmail by saved rules',
+    scan: 'Search again once',
     process: 'Generate reply for open thread',
     insertDraft: 'Insert draft',
     sendNow: 'Send now',
@@ -31,6 +31,7 @@ const I18N = {
     guardedConfirm: 'This rule allows guarded auto-send. Send this message now?',
     noDraft: 'No generated draft to insert yet.',
     noCompose: 'Cannot find the Gmail compose box. Open compose and try again.',
+    noReplyCompose: 'Cannot find the Gmail reply box. Open the message and try again.',
     draftInserted: 'Draft inserted.',
     draftInsertedAuto: 'Draft inserted. This thread matched an auto-send eligible rule.',
     sendButtonNotFound: 'Cannot find the Gmail Send button. Open the compose window and try again.',
@@ -48,7 +49,7 @@ const I18N = {
   },
   'zh-TW': {
     panelTitle: 'AI Mail Butler（本地端）',
-    scan: '依已儲存規則搜尋 Gmail',
+    scan: '重新搜尋一次',
     process: '為目前開啟的信件產生回覆',
     insertDraft: '插入草稿',
     sendNow: '立即寄出',
@@ -71,6 +72,7 @@ const I18N = {
     guardedConfirm: '此規則允許條件式自動寄送。要現在直接送出嗎？',
     noDraft: '目前還沒有可插入的草稿內容。',
     noCompose: '找不到 Gmail 撰寫視窗。請先打開撰寫視窗後再重試。',
+    noReplyCompose: '找不到 Gmail 回覆視窗。請先打開信件後再重試。',
     draftInserted: '已插入草稿。',
     draftInsertedAuto: '已插入草稿。這封信命中了可自動寄送的規則。',
     sendButtonNotFound: '找不到 Gmail 的寄送按鈕。請先確認撰寫視窗已開啟後再重試。',
@@ -227,6 +229,45 @@ function getVisibleInboxThreads() {
     const threadId = threadIdRaw || `visible-${index}-${stableHash(`${sender}\n${subject}\n${snippet}`)}`;
     return { threadId, sender, subject, body: snippet, row };
   });
+}
+
+function isThreadListView() {
+  return getVisibleInboxThreads().length > 0;
+}
+
+function getThreadRowLink(row) {
+  if (!(row instanceof HTMLElement)) return null;
+  if (row.matches('tr.zA')) {
+    return pickFirstVisible(['td[role="link"]', '.bog', '.yW span', '.y2'], row) || row;
+  }
+  return row;
+}
+
+function openThreadRow(row) {
+  const target = getThreadRowLink(row);
+  if (!(target instanceof HTMLElement)) return false;
+  target.click();
+  return true;
+}
+
+async function waitForOpenThread(threadId, timeoutMs = 8000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    await delay(250);
+    const thread = getOpenThread();
+    if (thread.subject || thread.body) {
+      if (!threadId || thread.threadId === threadId || window.location.hash.includes(threadId)) return thread;
+    }
+  }
+  return getOpenThread();
+}
+
+function findLatestUnrepliedMatch(rows, matched) {
+  const matchedById = new Map(matched.map((item) => [item.threadId, item]));
+  return rows.find(({ threadId }) => {
+    const match = threadId ? matchedById.get(threadId) : null;
+    return match && !match.replied;
+  }) || null;
 }
 
 function ensurePanel() {
@@ -426,7 +467,7 @@ async function runGmailSearch(query) {
   await waitForSearchResults(previousSignature);
 }
 
-async function scanVisibleThreads({ quiet = false, auto = false } = {}) {
+async function scanVisibleThreads({ quiet = false, auto = false, openLatestUnreplied = true } = {}) {
   const writeOutput = quiet ? setOutputIfVisible : setOutput;
   writeOutput(t('searchingByRules'));
   const searchRes = await sendRuntimeMessage({ type: 'GET_GMAIL_RULE_SEARCHES' });
@@ -443,12 +484,22 @@ async function scanVisibleThreads({ quiet = false, auto = false } = {}) {
 
   const matchedByThread = new Map();
   let lastMatchedQuery = '';
+  let latestUnrepliedCandidate = null;
   for (let index = 0; index < searches.length; index += 1) {
     const search = searches[index];
     writeOutput(t('searchableRuleProgress', { current: index + 1, total: searches.length, rule: search.ruleName || search.ruleId || search.query }));
     await runGmailSearch(search.query);
     const matched = await filterAndHighlightVisibleThreads();
     if (matched.length) lastMatchedQuery = search.query;
+    if (!latestUnrepliedCandidate) {
+      const candidate = findLatestUnrepliedMatch(getVisibleInboxThreads(), matched);
+      if (candidate) {
+        latestUnrepliedCandidate = {
+          query: search.query,
+          threadId: candidate.threadId,
+        };
+      }
+    }
     matched.forEach((item) => {
       if (item.threadId) matchedByThread.set(item.threadId, item);
     });
@@ -460,24 +511,46 @@ async function scanVisibleThreads({ quiet = false, auto = false } = {}) {
   }
 
   writeOutput(t(auto ? 'matchedThreadsByAutoSearch' : 'matchedThreadsBySearch', { count: matchedByThread.size }));
+
+  if (openLatestUnreplied && latestUnrepliedCandidate) {
+    await openLatestUnrepliedMatchedThread(latestUnrepliedCandidate, writeOutput);
+  }
 }
 
-async function processOpenThread() {
+async function openLatestUnrepliedMatchedThread(candidate, writeOutput = setOutput) {
+  await runGmailSearch(candidate.query);
+  const matched = await filterAndHighlightVisibleThreads();
+  const rows = getVisibleInboxThreads();
+  const matchedById = new Map(matched.map((item) => [item.threadId, item]));
+  const target =
+    rows.find(({ threadId }) => {
+      const match = threadId ? matchedById.get(threadId) : null;
+      return threadId === candidate.threadId && match && !match.replied;
+    }) ||
+    findLatestUnrepliedMatch(rows, matched);
+
+  if (!target?.row || !openThreadRow(target.row)) return;
+
+  await waitForOpenThread(target.threadId);
+  await processOpenThread({ autoInsertDraft: true, writeOutput });
+}
+
+async function processOpenThread({ autoInsertDraft = false, writeOutput = setOutput } = {}) {
   const thread = getOpenThread();
   if (!thread.subject && !thread.body) {
-    setOutput(t('noOpenThread'));
+    writeOutput(t('noOpenThread'));
     return;
   }
 
-  setOutput(t('processing'));
+  writeOutput(t('processing'));
   const res = await sendRuntimeMessage({ type: 'PROCESS_THREAD', thread });
   if (!res?.ok) {
-    setOutput(formatUserError(t('processFailedTitle'), res?.error || t('unknownError'), t('backgroundUnavailableNext')));
+    writeOutput(formatUserError(t('processFailedTitle'), res?.error || t('unknownError'), t('backgroundUnavailableNext')));
     return;
   }
 
   if (res.action === 'ignore') {
-    setOutput(t('noRuleMatched'));
+    writeOutput(t('noRuleMatched'));
     return;
   }
 
@@ -485,7 +558,7 @@ async function processOpenThread() {
   lastAction = res.action;
   lastProcessedThread = thread;
 
-  setOutput(
+  writeOutput(
     [
       `${t('action')}: ${res.action}`,
       `${t('rule')}: ${res.rule?.name || res.rule?.id || t('unnamed')}`,
@@ -498,8 +571,13 @@ async function processOpenThread() {
     ].filter((line) => line !== '').join('\n'),
   );
 
+  let insertedDraft = false;
+  if (autoInsertDraft && res.action !== 'ignore') {
+    insertedDraft = await insertDraft({ writeOutput, requireReply: true });
+  }
+
   if (res.action === 'guarded_autosend') {
-    const inserted = await insertDraft();
+    const inserted = autoInsertDraft ? insertedDraft : await insertDraft({ writeOutput, requireReply: true });
     const ok = inserted && window.confirm(t('guardedConfirm'));
     if (ok) {
       await clickSend();
@@ -516,15 +594,17 @@ function findComposeBody() {
   return editors[editors.length - 1] || null;
 }
 
-function openReplyComposer() {
+function openReplyComposer({ allowNewCompose = false } = {}) {
   if (findComposeBody()) return true;
 
-  const openMessage = pickFirstVisible(['div.adn.ads', 'div[role="listitem"]', 'div[data-message-id]']);
+  const messages = pickAllVisible(['div.adn.ads', 'div[role="listitem"][data-message-id]', 'div[data-message-id]']);
+  const openMessage = messages[messages.length - 1] || pickFirstVisible(['div.adn.ads', 'div[role="listitem"]', 'div[data-message-id]']);
   const replyButton = pickFirstVisible(
     [
       'div[role="button"][data-tooltip^="Reply"]',
       'div[role="button"][aria-label^="Reply"]',
       'div[role="button"][aria-label^="回覆"]',
+      'div[role="button"][data-tooltip^="回覆"]',
       'span[role="button"][aria-label^="Reply"]',
       'span[role="button"][aria-label^="回覆"]',
     ],
@@ -536,7 +616,21 @@ function openReplyComposer() {
     return true;
   }
 
-  const composeButton = document.querySelector('div[gh="cm"]');
+  const inlineReplyLink = pickFirstVisible(
+    [
+      'div[role="link"][aria-label^="Reply"]',
+      'div[role="link"][aria-label^="回覆"]',
+      'span[role="link"][aria-label^="Reply"]',
+      'span[role="link"][aria-label^="回覆"]',
+    ],
+    openMessage || document,
+  );
+  if (inlineReplyLink instanceof HTMLElement) {
+    inlineReplyLink.click();
+    return true;
+  }
+
+  const composeButton = allowNewCompose ? document.querySelector('div[gh="cm"]') : null;
   if (composeButton instanceof HTMLElement) {
     composeButton.click();
     return true;
@@ -570,22 +664,22 @@ function setComposeBodyText(editor, text) {
   }
 }
 
-async function insertDraft() {
+async function insertDraft({ writeOutput = setOutput, requireReply = false } = {}) {
   if (!lastReplyText) {
-    setOutput(t('noDraft'));
+    writeOutput(t('noDraft'));
     return false;
   }
 
-  openReplyComposer();
+  openReplyComposer({ allowNewCompose: !requireReply });
   const editor = await waitForComposeBody();
   if (!editor) {
-    setOutput(t('noCompose'));
+    writeOutput(t(requireReply ? 'noReplyCompose' : 'noCompose'));
     return false;
   }
 
   setComposeBodyText(editor, lastReplyText);
   await markThreadReplied('draft_inserted');
-  setOutput(lastAction === 'guarded_autosend' ? t('draftInsertedAuto') : t('draftInserted'));
+  writeOutput(lastAction === 'guarded_autosend' ? t('draftInsertedAuto') : t('draftInserted'));
   return true;
 }
 
@@ -617,6 +711,13 @@ function bindPanelActions() {
     clickSend().catch((err) => setOutput(classifyProcessError(err)));
   });
   panel.setAttribute('data-bound', '1');
+
+  if (isThreadListView() && panel.getAttribute('data-initial-rule-search') !== '1') {
+    panel.setAttribute('data-initial-rule-search', '1');
+    window.setTimeout(() => {
+      scanVisibleThreads().catch((err) => setOutput(classifyMessagingError(err)));
+    }, 250);
+  }
 }
 
 chrome.runtime?.onMessage?.addListener((message, _sender, sendResponse) => {
