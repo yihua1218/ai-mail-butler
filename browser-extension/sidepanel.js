@@ -49,8 +49,23 @@ const I18N = {
     runtimeTitle: 'Runtime Mode',
     modeLabel: 'Mode',
     minConfidenceLabel: 'Min confidence for auto-send',
+    autoScanMinutesLabel: 'Auto scan interval minutes',
+    autoScanMinutesHelp: 'Default is 30 minutes. Minimum is 5 minutes.',
     blockSensitiveLabel: 'Block sensitive emails by default',
     enableAuditLabel: 'Store local audit metadata',
+    replyIdentityModeLabel: 'Reply sender name',
+    replyIdentityUserOption: 'Use my name',
+    replyIdentityAssistantOption: 'Use AI assistant name',
+    userDisplayNameLabel: 'My name',
+    assistantDisplayNameLabel: 'AI assistant name',
+    webLlmEnabledLabel: 'Use WebLLM local model',
+    webLlmModelLabel: 'WebLLM model id',
+    webLlmTemperatureLabel: 'WebLLM temperature',
+    webLlmMaxTokensLabel: 'WebLLM max tokens',
+    webLlmReady: 'WebLLM ready',
+    webLlmLoading: 'WebLLM loading',
+    webLlmUnavailable: 'WebLLM unavailable',
+    webLlmStarting: 'Starting WebLLM...',
     saveSettings: 'Save Settings',
     addRuleTitle: 'Add Rule',
     editRuleTitle: 'Edit Rule',
@@ -111,6 +126,7 @@ const I18N = {
     placeholderRuleTone: 'professional / concise',
     placeholderRuleInstruction: 'How should the assistant reply?',
     issueSidePanelApi: 'Side Panel API is unavailable in this browser/runtime.',
+    issueWebGpu: 'WebGPU is unavailable; WebLLM cannot run local models in this browser profile.',
     issueMissingPermission: 'Permission missing or not granted',
     permissionNames: {
       storage: 'storage',
@@ -166,8 +182,23 @@ const I18N = {
     runtimeTitle: '執行模式',
     modeLabel: '模式',
     minConfidenceLabel: '自動寄送最低信心分數',
+    autoScanMinutesLabel: '自動掃描間隔（分鐘）',
+    autoScanMinutesHelp: '預設 30 分鐘。最短 5 分鐘。',
     blockSensitiveLabel: '預設封鎖敏感郵件自動寄送',
     enableAuditLabel: '儲存本地審計摘要',
+    replyIdentityModeLabel: '回信署名',
+    replyIdentityUserOption: '使用我的名字',
+    replyIdentityAssistantOption: '使用 AI 電子郵件助理的名字',
+    userDisplayNameLabel: '我的名字',
+    assistantDisplayNameLabel: 'AI 電子郵件助理名字',
+    webLlmEnabledLabel: '使用 WebLLM 本地模型',
+    webLlmModelLabel: 'WebLLM 模型 ID',
+    webLlmTemperatureLabel: 'WebLLM temperature',
+    webLlmMaxTokensLabel: 'WebLLM max tokens',
+    webLlmReady: 'WebLLM 已就緒',
+    webLlmLoading: 'WebLLM 載入中',
+    webLlmUnavailable: 'WebLLM 不可用',
+    webLlmStarting: '正在啟動 WebLLM...',
     saveSettings: '儲存設定',
     addRuleTitle: '新增規則',
     editRuleTitle: '編輯規則',
@@ -182,8 +213,8 @@ const I18N = {
     ruleSenderHelp: '可填完整信箱或網域片段，使用逗號分隔。',
     ruleSubjectRegexHelp: '可選填 Gmail 主旨的正規表示式。',
     ruleContainsHelp: '列出的所有關鍵字都必須出現在信件內容中。',
-    ruleToneHelp: '參考本地語氣設定，例如 professional 或 concise。',
-    ruleToneExamples: '範例：professional、concise、friendly、formal。',
+    ruleToneHelp: '請輸入語氣 ID：professional（專業穩重）、concise（精簡直接）、friendly（親切自然）、formal（正式禮貌）。',
+    ruleToneExamples: '語氣 ID 會影響回覆措辭與長度；例如 concise 會短一點，formal 會更有禮貌和距離感。',
     ruleInstructionHelp: '描述這條規則命中時，AI 應如何回覆。',
     ruleActionHelp: '選擇此規則只建議文字、建立草稿，或允許條件式自動寄送。',
     ruleActionExamples: 'manual = 只建議文字，draft_assist = 建立 Gmail 草稿，guarded_autosend = 在安全條件下可自動寄送。',
@@ -228,6 +259,7 @@ const I18N = {
     placeholderRuleTone: 'professional / concise',
     placeholderRuleInstruction: '請描述要如何回覆此類郵件',
     issueSidePanelApi: '此瀏覽器或執行環境不支援 Side Panel API。',
+    issueWebGpu: '此瀏覽器設定檔不支援 WebGPU，WebLLM 無法執行本地模型。',
     issueMissingPermission: '缺少或未授權權限',
     permissionNames: {
       storage: 'storage',
@@ -272,6 +304,10 @@ function tPermission(name) {
 function formatIssue(issue) {
   if (issue === 'Side Panel API is unavailable in this browser/runtime.') {
     return t('issueSidePanelApi');
+  }
+
+  if (issue === 'WebGPU is unavailable; WebLLM cannot run local models in this browser profile.') {
+    return t('issueWebGpu');
   }
 
   const prefix = 'Permission missing or not granted: ';
@@ -400,6 +436,18 @@ async function getCapabilityStatus() {
   return res.status;
 }
 
+async function getWebLlmStatus() {
+  const res = await chrome.runtime.sendMessage({ type: 'GET_WEBLLM_STATUS' });
+  if (!res?.ok) throw new Error(res?.error || 'Failed to get WebLLM status');
+  return res.status;
+}
+
+async function warmUpWebLlm() {
+  const res = await chrome.runtime.sendMessage({ type: 'WARM_UP_WEBLLM' });
+  if (!res?.ok) throw new Error(res?.error || 'Failed to warm up WebLLM');
+  return res.status;
+}
+
 function renderRepairStatus(message, isError = false) {
   const el = byId('repairGmailStatus');
   if (!el) return;
@@ -445,8 +493,19 @@ function applyStaticTranslations() {
   byId('runtimeTitle').textContent = t('runtimeTitle');
   byId('modeLabel').textContent = t('modeLabel');
   byId('minConfidenceLabel').textContent = t('minConfidenceLabel');
+  byId('autoScanMinutesLabel').textContent = t('autoScanMinutesLabel');
+  byId('autoScanMinutesHelp').textContent = t('autoScanMinutesHelp');
   byId('blockSensitiveLabel').textContent = t('blockSensitiveLabel');
   byId('enableAuditLabel').textContent = t('enableAuditLabel');
+  byId('replyIdentityModeLabel').textContent = t('replyIdentityModeLabel');
+  byId('replyIdentityUserOption').textContent = t('replyIdentityUserOption');
+  byId('replyIdentityAssistantOption').textContent = t('replyIdentityAssistantOption');
+  byId('userDisplayNameLabel').textContent = t('userDisplayNameLabel');
+  byId('assistantDisplayNameLabel').textContent = t('assistantDisplayNameLabel');
+  byId('webLlmEnabledLabel').textContent = t('webLlmEnabledLabel');
+  byId('webLlmModelLabel').textContent = t('webLlmModelLabel');
+  byId('webLlmTemperatureLabel').textContent = t('webLlmTemperatureLabel');
+  byId('webLlmMaxTokensLabel').textContent = t('webLlmMaxTokensLabel');
   byId('saveSettings').textContent = t('saveSettings');
 
   byId('addRuleTitle').textContent = editingRuleId ? t('editRuleTitle') : t('addRuleTitle');
@@ -698,8 +757,81 @@ function renderAudit(logs) {
 function fillSettings(settings) {
   byId('mode').value = settings.mode || 'draft_assist';
   byId('minConfidence').value = String(settings.minConfidenceAutoSend ?? 0.9);
+  byId('autoScanMinutes').value = String(Math.max(5, Number(settings.autoScanMinutes ?? 30)));
   byId('blockSensitive').checked = !!settings.blockSensitiveByDefault;
   byId('enableAudit').checked = !!settings.localAuditEnabled;
+  byId('replyIdentityMode').value = settings.replyIdentityMode === 'user' ? 'user' : 'assistant';
+  byId('userDisplayName').value = settings.userDisplayName || '';
+  byId('assistantDisplayName').value = settings.assistantDisplayName || 'AI Mail Butler';
+  byId('webLlmEnabled').checked = settings.webLlmEnabled !== false;
+  byId('webLlmModelId').value = settings.webLlmModelId || 'Llama-3.2-1B-Instruct-q4f16_1-MLC';
+  byId('webLlmTemperature').value = String(settings.webLlmTemperature ?? 0.3);
+  byId('webLlmMaxTokens').value = String(settings.webLlmMaxTokens ?? 700);
+}
+
+function renderWebLlmStatus(status) {
+  const container = byId('webLlmStatus');
+  if (!container) return;
+
+  const label = status?.ready ? t('webLlmReady') : status?.available ? t('webLlmLoading') : t('webLlmUnavailable');
+  const detail = [status?.modelId, status?.progressText, status?.error].filter(Boolean).join(' | ');
+  container.textContent = `${label}: ${detail || '-'}`;
+  container.style.color = status?.ready || status?.available ? '' : '#b42318';
+}
+
+async function warmUpAndTrackWebLlmStatus() {
+  renderWebLlmStatus({
+    available: true,
+    ready: false,
+    modelId: byId('webLlmModelId')?.value || '',
+    progressText: t('webLlmStarting'),
+    error: '',
+  });
+
+  if (chrome?.runtime?.connect) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let latestStatus = null;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('WebLLM warm-up timed out.'));
+      }, 15 * 60 * 1000);
+
+      const port = chrome.runtime.connect({ name: 'webllm-warmup' });
+      port.onMessage.addListener((message) => {
+        if (message?.type !== 'WEBLLM_STATUS') return;
+        latestStatus = message.status;
+        renderWebLlmStatus(latestStatus);
+
+        if (latestStatus?.ready || latestStatus?.error || latestStatus?.progressText?.includes('disabled')) {
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve(latestStatus);
+          try {
+            port.disconnect();
+          } catch {
+            // The background worker may close the port first.
+          }
+        }
+      });
+      port.onDisconnect.addListener(() => {
+        clearTimeout(timeoutId);
+        if (settled) return;
+        settled = true;
+        if (latestStatus) {
+          resolve(latestStatus);
+          return;
+        }
+        getWebLlmStatus().then(resolve).catch(reject);
+      });
+      port.postMessage({ type: 'START_WEBLLM_WARMUP' });
+    });
+  }
+
+  const status = await warmUpWebLlm();
+  renderWebLlmStatus(status);
+  return status;
 }
 
 function resetRuleForm() {
@@ -741,6 +873,7 @@ function renderCapabilityStatus(status) {
 async function init() {
   let state = await getState();
   let capability = await getCapabilityStatus();
+  let webLlmStatus = await getWebLlmStatus();
 
   currentLang = await loadLangPreference();
   webWhitelist = await loadWebAppWhitelist();
@@ -755,9 +888,23 @@ async function init() {
   renderRepairStatus(t('repairIdle'));
   renderRuleFormStatus(t('ruleFormIdle'));
   fillSettings(state.settings);
+  renderWebLlmStatus(webLlmStatus);
   renderRules(state.rules);
   renderAudit(state.auditLogs);
   renderCapabilityStatus(capability);
+  warmUpAndTrackWebLlmStatus()
+    .then((status) => {
+      webLlmStatus = status;
+    })
+    .catch((err) => {
+      renderWebLlmStatus({
+        available: false,
+        ready: false,
+        modelId: state.settings.webLlmModelId || '',
+        progressText: t('webLlmUnavailable'),
+        error: String(err?.message || err),
+      });
+    });
 
   if (followWebLang) {
     await syncLanguageFromActiveTab();
@@ -780,6 +927,7 @@ async function init() {
     renderRules(state.rules);
     renderAudit(state.auditLogs);
     renderCapabilityStatus(capability);
+    renderWebLlmStatus(webLlmStatus);
   });
 
   byId('repairGmailTab').addEventListener('click', async () => {
@@ -822,6 +970,8 @@ async function init() {
       renderRules(state.rules);
       renderAudit(state.auditLogs);
       renderCapabilityStatus(capability);
+      webLlmStatus = await getWebLlmStatus();
+      renderWebLlmStatus(webLlmStatus);
     } else {
       renderLangSyncStatus(t('syncIdle'));
     }
@@ -832,25 +982,38 @@ async function init() {
     renderRules(state.rules);
     renderAudit(state.auditLogs);
     renderCapabilityStatus(capability);
+    webLlmStatus = await getWebLlmStatus();
+    renderWebLlmStatus(webLlmStatus);
   });
 
   byId('refreshCapability').addEventListener('click', async () => {
     capability = await getCapabilityStatus();
+    webLlmStatus = await getWebLlmStatus();
     renderCapabilityStatus(capability);
+    renderWebLlmStatus(webLlmStatus);
   });
 
   byId('saveSettings').addEventListener('click', async () => {
     const settings = {
       mode: byId('mode').value,
       minConfidenceAutoSend: Number(byId('minConfidence').value || 0.9),
+      autoScanMinutes: Math.max(5, Number(byId('autoScanMinutes').value || 30)),
       blockSensitiveByDefault: byId('blockSensitive').checked,
       localAuditEnabled: byId('enableAudit').checked,
+      replyIdentityMode: byId('replyIdentityMode').value === 'user' ? 'user' : 'assistant',
+      userDisplayName: byId('userDisplayName').value.trim(),
+      assistantDisplayName: byId('assistantDisplayName').value.trim() || 'AI Mail Butler',
+      webLlmEnabled: byId('webLlmEnabled').checked,
+      webLlmModelId: byId('webLlmModelId').value.trim() || 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
+      webLlmTemperature: Number(byId('webLlmTemperature').value || 0.3),
+      webLlmMaxTokens: Number(byId('webLlmMaxTokens').value || 700),
     };
     await saveSettings(settings);
     state = await getState();
     fillSettings(state.settings);
     capability = await getCapabilityStatus();
     renderCapabilityStatus(capability);
+    webLlmStatus = await warmUpAndTrackWebLlmStatus();
   });
 
   byId('addRule').addEventListener('click', async () => {
@@ -864,7 +1027,9 @@ async function init() {
     renderRules(state.rules);
     renderAudit(state.auditLogs);
     capability = await getCapabilityStatus();
+    webLlmStatus = await getWebLlmStatus();
     renderCapabilityStatus(capability);
+    renderWebLlmStatus(webLlmStatus);
     const updated = !!editingRuleId;
     editingRuleId = null;
     resetRuleForm();
@@ -907,7 +1072,9 @@ async function init() {
     renderRules(state.rules);
     renderAudit(state.auditLogs);
     capability = await getCapabilityStatus();
+    webLlmStatus = await getWebLlmStatus();
     renderCapabilityStatus(capability);
+    renderWebLlmStatus(webLlmStatus);
   });
 }
 

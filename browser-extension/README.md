@@ -17,6 +17,14 @@ This folder contains a Chrome Extension Manifest V3 scaffold for local-first Gma
 
 ## Load Extension (Developer Mode)
 
+Build the packaged WebLLM runtime once before loading the extension:
+
+```bash
+cd browser-extension
+npm install
+npm run build:webllm
+```
+
 1. Open Chrome and go to `chrome://extensions`.
 2. Enable Developer Mode.
 3. Click **Load unpacked** and select this `browser-extension/` folder.
@@ -36,13 +44,13 @@ If any of these conditions break, unattended automation can pause or fail.
 ## Current Status
 
 - Local rule filtering: implemented.
-- Gmail visible-thread scan and highlight: implemented.
-- Draft insertion and guarded send click flow: implemented.
-- WebLLM integration: placeholder interface in `background.js`; replace `generateReplyWithLocalEngine` with a bundled local WebLLM runtime.
+- Gmail visible-thread scan and highlight: implemented for inbox/search-style visible result rows.
+- Draft insertion and guarded send click flow: implemented with compose-box waiting.
+- WebLLM integration: implemented through the packaged `vendor/web-llm/index.js` runtime built from `@mlc-ai/web-llm`. If the runtime is not built or WebGPU is unavailable, the extension reports that status and uses a deterministic local fallback.
 
 ## Production Hardening Checklist
 
-- Bundle WebLLM model runtime directly in extension package (no remote code).
+- Bundle and review WebLLM runtime artifacts before Chrome Web Store submission.
 - Add stricter selector health checks for Gmail UI changes.
 - Add cooldown/idempotency per thread.
 - Add encrypted local storage for sensitive rules and allowlists.

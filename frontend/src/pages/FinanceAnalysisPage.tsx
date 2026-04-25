@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Space, Table, Tag } from 'antd';
+import { Alert, Button, Card, Empty, Space, Table, Tag, Typography, type TableColumnsType } from 'antd';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -32,6 +32,8 @@ type MonthlyFinance = {
   updated_at: string;
 };
 
+const PIE_COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2', '#a0d911'];
+
 const FinanceAnalysisPage: React.FC = () => {
   const { user } = useAuth();
   const { i18n, t } = useTranslation();
@@ -39,6 +41,7 @@ const FinanceAnalysisPage: React.FC = () => {
   const location = useLocation();
   const [records, setRecords] = useState<FinanceRecord[]>([]);
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
+  const { Text } = Typography;
 
   const formatInUserTimezone = (value?: string) => {
     if (!value) return '-';
@@ -73,6 +76,16 @@ const FinanceAnalysisPage: React.FC = () => {
     return params.get('emailId') || '';
   }, [location.search]);
 
+  const highlightedEmailIdFromQuery = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get('highlightEmailId') || '';
+  }, [location.search]);
+
+  const subjectFromQuery = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get('subject') || '';
+  }, [location.search]);
+
   useEffect(() => {
     if (!user?.email) return;
     axios.get(`/api/finance/records?email=${encodeURIComponent(user.email)}`).then((res) => {
@@ -84,6 +97,74 @@ const FinanceAnalysisPage: React.FC = () => {
     }).catch(() => setMonthly([]));
   }, [user?.email]);
 
+  const monthlyCategoryColor = (category: string) => {
+    if (category === 'deposit' || category === 'income') return 'green';
+    if (category === 'expense') return 'volcano';
+    return 'blue';
+  };
+
+  const linkedEmailId = emailIdFromQuery || highlightedEmailIdFromQuery;
+  const linkedRecord = linkedEmailId ? records.find((row) => row.email_id === linkedEmailId) : undefined;
+  const linkedSubject = linkedRecord?.subject || subjectFromQuery || linkedEmailId;
+  const isFilteringByEmail = Boolean(emailIdFromQuery);
+
+  const buildFinanceLink = (params: Record<string, string>) => {
+    const next = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value) next.set(key, value);
+    });
+    const query = next.toString();
+    return query ? `/finance?${query}` : '/finance';
+  };
+
+  const clearEmailFilter = () => {
+    if (!linkedEmailId) {
+      navigate('/finance');
+      return;
+    }
+    navigate(buildFinanceLink({ highlightEmailId: linkedEmailId, subject: linkedSubject }));
+  };
+
+  const backToDashboard = () => {
+    navigate(linkedEmailId ? `/dashboard?emailId=${encodeURIComponent(linkedEmailId)}` : '/dashboard');
+  };
+
+  const currentMonthKey = useMemo(() => {
+    const timezone = user?.timezone || 'UTC';
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+    }).formatToParts(new Date());
+    const year = parts.find((part) => part.type === 'year')?.value || new Date().getFullYear().toString();
+    const month = parts.find((part) => part.type === 'month')?.value || String(new Date().getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}`;
+  }, [user?.timezone]);
+
+  const expensePieData = useMemo(() => {
+    const totals = new Map<string, number>();
+    records
+      .filter((row) => (row.transaction_month_key || row.month_key) === currentMonthKey)
+      .filter((row) => row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill')
+      .forEach((row) => {
+        const key = row.finance_type || row.category || 'expense';
+        totals.set(key, (totals.get(key) || 0) + Math.abs(Number(row.amount) || 0));
+      });
+    return Array.from(totals.entries())
+      .map(([category, value], index) => ({ category, value, color: PIE_COLORS[index % PIE_COLORS.length] }))
+      .filter((item) => item.value > 0)
+      .sort((a, b) => b.value - a.value);
+  }, [records, currentMonthKey]);
+
+  const expensePieTotal = expensePieData.reduce((sum, item) => sum + item.value, 0);
+  const pieBackground = expensePieData.reduce<{ cursor: number; segments: string[] }>((acc, item) => {
+    const start = acc.cursor;
+    const end = start + (item.value / expensePieTotal) * 100;
+    acc.segments.push(`${item.color} ${start}% ${end}%`);
+    acc.cursor = end;
+    return acc;
+  }, { cursor: 0, segments: [] }).segments.join(', ');
+
   if (!user) {
     return (
       <Card bordered={false}>
@@ -92,13 +173,7 @@ const FinanceAnalysisPage: React.FC = () => {
     );
   }
 
-  const monthlyCategoryColor = (category: string) => {
-    if (category === 'deposit' || category === 'income') return 'green';
-    if (category === 'expense') return 'volcano';
-    return 'blue';
-  };
-
-  const monthlyColumns = [
+  const monthlyColumns: TableColumnsType<MonthlyFinance> = [
     { title: t('finance_month_col'), dataIndex: 'month_key', key: 'month_key', width: 120 },
     { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color={monthlyCategoryColor(v)}>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
     { title: t('finance_total_amount_col'), dataIndex: 'total_amount', key: 'total_amount', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
@@ -109,7 +184,7 @@ const FinanceAnalysisPage: React.FC = () => {
     ? records.filter((row) => row.email_id === emailIdFromQuery)
     : records;
 
-  const recordColumns = [
+  const recordColumns: TableColumnsType<FinanceRecord> = [
     { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
     { title: t('finance_subject_col'), dataIndex: 'subject', key: 'subject', ellipsis: true },
     { title: t('finance_reason_col'), dataIndex: 'reason', key: 'reason', ellipsis: true },
@@ -142,20 +217,57 @@ const FinanceAnalysisPage: React.FC = () => {
       <Card bordered={false} title={t('finance_monthly_summary')}>
         <Table
           rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`}
-          columns={monthlyColumns as any}
+          columns={monthlyColumns}
           dataSource={monthly}
           scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 12 }}
         />
       </Card>
-      <Card bordered={false} title={emailIdFromQuery ? t('finance_records_filtered', { emailId: emailIdFromQuery }) : t('finance_records')}>
+      <Card bordered={false} title={t('finance_monthly_expense_pie')}>
+        {expensePieData.length > 0 ? (
+          <div className="finance-pie-layout">
+            <div className="finance-pie-chart" style={{ background: `conic-gradient(${pieBackground})` }}>
+              <div className="finance-pie-center">
+                <Text type="secondary">{currentMonthKey}</Text>
+                <strong>{expensePieTotal.toLocaleString()}</strong>
+              </div>
+            </div>
+            <div className="finance-pie-legend">
+              {expensePieData.map((item) => (
+                <div className="finance-pie-legend-row" key={item.category}>
+                  <span className="finance-pie-swatch" style={{ background: item.color }} />
+                  <span>{t(`finance_cat_${item.category}`, { defaultValue: item.category })}</span>
+                  <Text type="secondary">
+                    {item.value.toLocaleString()} ({Math.round((item.value / expensePieTotal) * 100)}%)
+                  </Text>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <Empty description={t('finance_no_expense_mix')} />
+        )}
+      </Card>
+      <Card
+        bordered={false}
+        title={isFilteringByEmail ? t('finance_records_filtered', { subject: linkedSubject }) : t('finance_records')}
+        extra={linkedEmailId ? (
+          <Space wrap>
+            <Text type="secondary">
+              {isFilteringByEmail ? t('finance_filtering_by') : t('finance_highlighting')}: {linkedSubject}
+            </Text>
+            {isFilteringByEmail && <Button size="small" onClick={clearEmailFilter}>{t('finance_clear_filter')}</Button>}
+            <Button size="small" onClick={backToDashboard}>{t('finance_back_dashboard')}</Button>
+          </Space>
+        ) : null}
+      >
         <Table
           rowKey="id"
-          columns={recordColumns as any}
+          columns={recordColumns}
           dataSource={filteredRecords}
           scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 10 }}
-          rowClassName={(record: FinanceRecord) => (emailIdFromQuery && record.email_id === emailIdFromQuery ? 'finance-linked-row' : '')}
+          rowClassName={(record: FinanceRecord) => (linkedEmailId && record.email_id === linkedEmailId ? 'finance-linked-row' : '')}
         />
       </Card>
     </Space>

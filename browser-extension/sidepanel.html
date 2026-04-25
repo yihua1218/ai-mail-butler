@@ -70,6 +70,11 @@
           <span id="minConfidenceLabel">Min confidence for auto-send</span>
           <input id="minConfidence" type="number" min="0" max="1" step="0.01" />
         </label>
+        <label>
+          <span id="autoScanMinutesLabel">Auto scan interval minutes</span>
+          <input id="autoScanMinutes" type="number" min="5" step="1" />
+        </label>
+        <div id="autoScanMinutesHelp" class="meta">Default is 30 minutes. Minimum is 5 minutes.</div>
         <label class="row">
           <input id="blockSensitive" type="checkbox" />
           <span id="blockSensitiveLabel">Block sensitive emails by default</span>
@@ -78,6 +83,38 @@
           <input id="enableAudit" type="checkbox" />
           <span id="enableAuditLabel">Store local audit metadata</span>
         </label>
+        <label>
+          <span id="replyIdentityModeLabel">Reply sender name</span>
+          <select id="replyIdentityMode">
+            <option id="replyIdentityUserOption" value="user">Use my name</option>
+            <option id="replyIdentityAssistantOption" value="assistant">Use AI assistant name</option>
+          </select>
+        </label>
+        <label>
+          <span id="userDisplayNameLabel">My name</span>
+          <input id="userDisplayName" type="text" placeholder="Your name" />
+        </label>
+        <label>
+          <span id="assistantDisplayNameLabel">AI assistant name</span>
+          <input id="assistantDisplayName" type="text" placeholder="AI Mail Butler" />
+        </label>
+        <label class="row">
+          <input id="webLlmEnabled" type="checkbox" />
+          <span id="webLlmEnabledLabel">Use WebLLM local model</span>
+        </label>
+        <label>
+          <span id="webLlmModelLabel">WebLLM model id</span>
+          <input id="webLlmModelId" type="text" />
+        </label>
+        <label>
+          <span id="webLlmTemperatureLabel">WebLLM temperature</span>
+          <input id="webLlmTemperature" type="number" min="0" max="2" step="0.1" />
+        </label>
+        <label>
+          <span id="webLlmMaxTokensLabel">WebLLM max tokens</span>
+          <input id="webLlmMaxTokens" type="number" min="64" max="4096" step="64" />
+        </label>
+        <div id="webLlmStatus" class="meta"></div>
         <button id="saveSettings">Save Settings</button>
       </section>
 

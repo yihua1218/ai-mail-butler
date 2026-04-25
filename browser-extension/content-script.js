@@ -1,19 +1,26 @@
+(() => {
 const PANEL_ID = 'ai-mail-butler-local-panel';
 const HIGHLIGHT_ATTR = 'data-ai-mail-butler-match';
+const REPLIED_ATTR = 'data-ai-mail-butler-replied';
 const LANG_KEY = 'extension_ui_lang';
-const CONTENT_SCRIPT_VERSION = '2026-04-25-2';
+const CONTENT_SCRIPT_VERSION = '2026-04-25-5';
 
 const I18N = {
   en: {
     panelTitle: 'AI Mail Butler (Local)',
-    scan: 'Scan visible Gmail list by rules',
+    scan: 'Search Gmail by saved rules',
     process: 'Generate reply for open thread',
     insertDraft: 'Insert draft',
     sendNow: 'Send now',
     ready: 'Ready.',
     scanning: 'Scanning visible Gmail threads...',
+    searchingByRules: 'Searching Gmail by saved rules...',
+    searchableRuleProgress: 'Searching rule {{current}}/{{total}}: {{rule}}',
     processing: 'Processing with local engine...',
     matchedThreads: 'Matched {{count}} visible thread(s).',
+    matchedThreadsBySearch: 'Found {{count}} matching thread(s) across Gmail rule searches.',
+    matchedThreadsByAutoSearch: 'Auto scan found {{count}} matching thread(s).',
+    noRules: 'No saved searchable rules. Add a rule with sender, subject, or body keywords first.',
     noOpenThread: 'No open Gmail thread detected. Open a conversation and try again.',
     noRuleMatched: 'No rule matched this thread.',
     action: 'Action',
@@ -41,14 +48,19 @@ const I18N = {
   },
   'zh-TW': {
     panelTitle: 'AI Mail Butler（本地端）',
-    scan: '依規則掃描目前可見的 Gmail 清單',
+    scan: '依已儲存規則搜尋 Gmail',
     process: '為目前開啟的信件產生回覆',
     insertDraft: '插入草稿',
     sendNow: '立即寄出',
     ready: '就緒。',
     scanning: '正在掃描目前可見的 Gmail 信件...',
+    searchingByRules: '正在依已儲存規則搜尋 Gmail...',
+    searchableRuleProgress: '正在搜尋規則 {{current}}/{{total}}：{{rule}}',
     processing: '正在用本地模型處理中...',
     matchedThreads: '已命中 {{count}} 封目前可見的信件。',
+    matchedThreadsBySearch: '已在 Gmail 規則搜尋中找到 {{count}} 封命中信件。',
+    matchedThreadsByAutoSearch: '自動掃描找到 {{count}} 封命中信件。',
+    noRules: '目前沒有可搜尋的已儲存規則。請先新增含寄件者、主旨或內容關鍵字的規則。',
     noOpenThread: '目前沒有偵測到已開啟的 Gmail 對話。請先打開一封信再重試。',
     noRuleMatched: '這封信目前沒有命中任何規則。',
     action: '動作',
@@ -66,7 +78,7 @@ const I18N = {
     scanFailedTitle: '掃描失敗。',
     processFailedTitle: '產生回覆失敗。',
     extensionUnavailable: '此分頁目前無法連到 Extension。',
-      extensionUnavailableNext: '這通常發生在你剛重新載入 Extension 之後。請重新整理 Gmail 分頁，再試一次。',
+    extensionUnavailableNext: '這通常發生在你剛重新載入 Extension 之後。請重新整理 Gmail 分頁，再試一次。',
     runtimeMissing: '此頁面的訊息傳遞 Runtime 目前不可用。',
     runtimeMissingNext: '請重新整理 Gmail 分頁，然後再打開 AI 面板。',
     backgroundUnavailable: 'Extension 背景服務目前沒有回應。',
@@ -79,11 +91,13 @@ const I18N = {
 let currentLang = (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh-TW' : 'en';
 let lastReplyText = '';
 let lastAction = 'ignore';
+let lastProcessedThread = null;
 
 function isVisible(node) {
   if (!(node instanceof HTMLElement)) return false;
   const style = window.getComputedStyle(node);
-  return style.display !== 'none' && style.visibility !== 'hidden' && node.offsetParent !== null;
+  const rect = node.getBoundingClientRect();
+  return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
 }
 
 function pickFirstVisible(selectors, root = document) {
@@ -114,6 +128,25 @@ function t(key, vars = {}) {
   return Object.entries(vars).reduce((acc, [k, v]) => acc.replaceAll(`{{${k}}}`, String(v)), template);
 }
 
+function stableHash(input) {
+  let hash = 0;
+  const text = String(input || '');
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+function compactText(input) {
+  return String(input || '').replace(/\s+/g, ' ').trim();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 async function loadLangPreference() {
   try {
     if (chrome?.storage?.local) {
@@ -130,7 +163,8 @@ function getOpenThread() {
   const subjectNode = pickFirstVisible(['h2.hP', 'h2[data-thread-perm-id]', 'div[role="main"] h2'], main);
   const subject = subjectNode?.textContent?.trim() || '';
 
-  const openMessage = pickFirstVisible(['div.adn.ads', 'div[role="listitem"]', 'div[data-message-id]'], main) || main;
+  const messages = pickAllVisible(['div.adn.ads', 'div[role="listitem"][data-message-id]', 'div[data-message-id]'], main);
+  const openMessage = messages[messages.length - 1] || main;
   const senderNode = pickFirstVisible(['span.gD[email]', 'span[email]', '[data-hovercard-id]'], openMessage);
   const sender =
     senderNode?.getAttribute?.('email') ||
@@ -138,26 +172,59 @@ function getOpenThread() {
     senderNode?.textContent?.trim() ||
     '';
 
-  const bodyNodes = pickAllVisible(['div.a3s', 'div.a3s.aiL', 'div.ii.gt div[dir="auto"]', 'div.ii.gt div[dir="ltr"]'], openMessage);
+  const bodyRoot = messages.length ? main : openMessage;
+  const bodyNodes = pickAllVisible(['div.a3s', 'div.a3s.aiL', 'div.ii.gt div[dir="auto"]', 'div.ii.gt div[dir="ltr"]'], bodyRoot);
   const body = bodyNodes
-    .map((n) => n.textContent || '')
+    .map((n) => compactText(n.textContent || ''))
+    .filter(Boolean)
     .join('\n')
     .trim();
 
   const hash = window.location.hash || '';
-  const threadMatch = hash.match(/(?:^|[/?&])th=([^&]+)/) || hash.match(/#inbox\/([^/?]+)/);
-  const threadId = threadMatch?.[1] || '';
+  const threadMatch =
+    hash.match(/(?:^|[/?&])th=([^&]+)/) ||
+    hash.match(/#(?:inbox|sent|all|search|category\/[^/]+)\/([^/?]+)/) ||
+    hash.match(/\/([^/?]+)$/);
+  const threadId = threadMatch?.[1] || stableHash(`${sender}\n${subject}\n${body.slice(0, 500)}`);
 
   return { threadId, sender, subject, body };
 }
 
 function getVisibleInboxThreads() {
-  const rows = Array.from(document.querySelectorAll('tr.zA'));
-  return rows.map((row) => {
-    const threadId = row.getAttribute('data-legacy-thread-id') || row.getAttribute('data-thread-id') || '';
-    const sender = row.querySelector('span[email]')?.getAttribute('email') || row.querySelector('.yW span')?.textContent?.trim() || '';
-    const subject = row.querySelector('.bog')?.textContent?.trim() || '';
-    const snippet = row.querySelector('.y2')?.textContent?.trim() || '';
+  const rows = Array.from(
+    document.querySelectorAll(
+      [
+        'tr.zA',
+        'div[role="main"] div[role="link"][data-legacy-thread-id]',
+        'div[role="main"] div[role="link"][data-thread-id]',
+        'div[role="main"] div[role="listitem"][data-legacy-thread-id]',
+        'div[role="main"] div[role="listitem"][data-thread-id]',
+      ].join(','),
+    ),
+  ).filter(isVisible);
+
+  return rows.map((row, index) => {
+    const threadIdRaw =
+      row.getAttribute('data-legacy-thread-id') ||
+      row.getAttribute('data-thread-id') ||
+      row.querySelector('[data-legacy-thread-id]')?.getAttribute('data-legacy-thread-id') ||
+      row.querySelector('[data-thread-id]')?.getAttribute('data-thread-id') ||
+      '';
+    const sender = compactText(
+      row.querySelector('span[email]')?.getAttribute('email') ||
+        row.querySelector('.yW span[email]')?.getAttribute('email') ||
+        row.querySelector('.yW span')?.textContent ||
+        row.querySelector('[email]')?.getAttribute('email') ||
+        '',
+    );
+    const subject = compactText(
+      row.querySelector('.bog')?.textContent ||
+        row.querySelector('[data-thread-perm-id]')?.textContent ||
+        row.querySelector('[role="link"] span[id]')?.textContent ||
+        '',
+    );
+    const snippet = compactText(row.querySelector('.y2')?.textContent || row.getAttribute('aria-label') || row.textContent || '');
+    const threadId = threadIdRaw || `visible-${index}-${stableHash(`${sender}\n${subject}\n${snippet}`)}`;
     return { threadId, sender, subject, body: snippet, row };
   });
 }
@@ -212,6 +279,11 @@ function setOutput(text) {
   if (output) output.textContent = text;
 }
 
+function setOutputIfVisible(text) {
+  const output = document.getElementById('ai-mail-butler-output');
+  if (output) output.textContent = text;
+}
+
 function formatUserError(title, reason, nextStep) {
   return `${title}\n\n${reason}\n\n${t('nextStep')}: ${nextStep}`;
 }
@@ -245,31 +317,149 @@ async function sendRuntimeMessage(message) {
   return chrome.runtime.sendMessage(message);
 }
 
-async function scanVisibleThreads() {
-  setOutput(t('scanning'));
-  const rows = getVisibleInboxThreads();
+async function markThreadReplied(action) {
+  if (!lastProcessedThread?.threadId) return;
+  try {
+    await sendRuntimeMessage({
+      type: 'MARK_THREAD_REPLIED',
+      action,
+      thread: lastProcessedThread,
+    });
+  } catch (err) {
+    console.warn('[AI Mail Butler] Failed to mark thread as replied:', err);
+  }
+}
+
+function clearThreadHighlights(rows = getVisibleInboxThreads()) {
   rows.forEach(({ row }) => {
     row.removeAttribute(HIGHLIGHT_ATTR);
+    row.removeAttribute(REPLIED_ATTR);
     row.style.outline = '';
     row.style.background = '';
   });
+}
 
+async function filterAndHighlightVisibleThreads() {
+  const rows = getVisibleInboxThreads();
   const payload = rows.map(({ row, ...rest }) => rest);
   const res = await sendRuntimeMessage({ type: 'FILTER_THREADS', threads: payload });
   if (!res?.ok) {
-    setOutput(formatUserError(t('scanFailedTitle'), res?.error || t('unknownError'), t('backgroundUnavailableNext')));
+    throw new Error(res?.error || t('unknownError'));
+  }
+
+  clearThreadHighlights(rows);
+  const matchedById = new Map(res.matched.map((m) => [m.threadId, m]));
+  rows.forEach(({ threadId, row }) => {
+    const match = threadId ? matchedById.get(threadId) : null;
+    if (!match) return;
+
+    row.setAttribute(HIGHLIGHT_ATTR, '1');
+    if (match.replied) {
+      row.setAttribute(REPLIED_ATTR, '1');
+      row.style.outline = '2px solid #1677ff';
+      row.style.background = '#e6f4ff';
+    } else {
+      row.style.outline = '2px solid #52c41a';
+      row.style.background = '#f6ffed';
+    }
+  });
+
+  return res.matched;
+}
+
+function findGmailSearchInput() {
+  return pickFirstVisible(
+    [
+      'form[role="search"] input[name="q"]',
+      'input[aria-label="Search mail"]',
+      'input[placeholder="Search mail"]',
+      'input[name="q"]',
+    ],
+    document,
+  );
+}
+
+function setNativeInputValue(input, value) {
+  const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
+  if (descriptor?.set) {
+    descriptor.set.call(input, value);
+  } else {
+    input.value = value;
+  }
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+async function waitForSearchResults(previousSignature) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8000) {
+    await delay(250);
+    const rows = getVisibleInboxThreads();
+    const signature = rows.map((item) => `${item.threadId}:${item.subject}`).join('|');
+    if (rows.length && signature !== previousSignature) return rows;
+
+    const mainText = compactText((document.querySelector('div[role="main"]') || document.body).textContent || '');
+    if (/No messages matched your search|No results found|找不到|沒有郵件/.test(mainText)) return rows;
+  }
+
+  return getVisibleInboxThreads();
+}
+
+async function runGmailSearch(query) {
+  const input = findGmailSearchInput();
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error('Cannot find Gmail search box.');
+  }
+
+  const previousRows = getVisibleInboxThreads();
+  const previousSignature = previousRows.map((item) => `${item.threadId}:${item.subject}`).join('|');
+  setNativeInputValue(input, query);
+
+  const form = input.closest('form');
+  if (form instanceof HTMLFormElement) {
+    form.requestSubmit();
+  } else {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+  }
+
+  await waitForSearchResults(previousSignature);
+}
+
+async function scanVisibleThreads({ quiet = false, auto = false } = {}) {
+  const writeOutput = quiet ? setOutputIfVisible : setOutput;
+  writeOutput(t('searchingByRules'));
+  const searchRes = await sendRuntimeMessage({ type: 'GET_GMAIL_RULE_SEARCHES' });
+  if (!searchRes?.ok) {
+    writeOutput(formatUserError(t('scanFailedTitle'), searchRes?.error || t('unknownError'), t('backgroundUnavailableNext')));
     return;
   }
 
-  const matchedIds = new Set(res.matched.map((m) => m.threadId));
-  rows.forEach(({ threadId, row }) => {
-    if (!threadId || !matchedIds.has(threadId)) return;
-    row.setAttribute(HIGHLIGHT_ATTR, '1');
-    row.style.outline = '2px solid #52c41a';
-    row.style.background = '#f6ffed';
-  });
+  const searches = Array.isArray(searchRes.searches) ? searchRes.searches : [];
+  if (!searches.length) {
+    writeOutput(t('noRules'));
+    return;
+  }
 
-  setOutput(t('matchedThreads', { count: res.matched.length }));
+  const matchedByThread = new Map();
+  let lastMatchedQuery = '';
+  for (let index = 0; index < searches.length; index += 1) {
+    const search = searches[index];
+    writeOutput(t('searchableRuleProgress', { current: index + 1, total: searches.length, rule: search.ruleName || search.ruleId || search.query }));
+    await runGmailSearch(search.query);
+    const matched = await filterAndHighlightVisibleThreads();
+    if (matched.length) lastMatchedQuery = search.query;
+    matched.forEach((item) => {
+      if (item.threadId) matchedByThread.set(item.threadId, item);
+    });
+  }
+
+  if (lastMatchedQuery && !getVisibleInboxThreads().some(({ row }) => row.getAttribute(HIGHLIGHT_ATTR) === '1')) {
+    await runGmailSearch(lastMatchedQuery);
+    await filterAndHighlightVisibleThreads();
+  }
+
+  writeOutput(t(auto ? 'matchedThreadsByAutoSearch' : 'matchedThreadsBySearch', { count: matchedByThread.size }));
 }
 
 async function processOpenThread() {
@@ -293,23 +483,26 @@ async function processOpenThread() {
 
   lastReplyText = res.generation?.replyText || '';
   lastAction = res.action;
+  lastProcessedThread = thread;
 
   setOutput(
     [
       `${t('action')}: ${res.action}`,
       `${t('rule')}: ${res.rule?.name || res.rule?.id || t('unnamed')}`,
       `${t('confidence')}: ${Number(res.generation?.confidence || 0).toFixed(2)}`,
+      res.generation?.model ? `Model: ${res.generation.model}` : '',
+      res.generation?.webLlmError ? `WebLLM: ${res.generation.webLlmError}` : '',
       '',
       `${t('draft')}:`,
       lastReplyText,
-    ].join('\n'),
+    ].filter((line) => line !== '').join('\n'),
   );
 
   if (res.action === 'guarded_autosend') {
-    insertDraft();
-    const ok = window.confirm(t('guardedConfirm'));
+    const inserted = await insertDraft();
+    const ok = inserted && window.confirm(t('guardedConfirm'));
     if (ok) {
-      clickSend();
+      await clickSend();
     }
   }
 }
@@ -352,6 +545,19 @@ function openReplyComposer() {
   return false;
 }
 
+async function waitForComposeBody(timeoutMs = 3000) {
+  const existing = findComposeBody();
+  if (existing) return existing;
+
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const editor = findComposeBody();
+    if (editor) return editor;
+  }
+  return null;
+}
+
 function setComposeBodyText(editor, text) {
   if (!(editor instanceof HTMLElement)) return;
   editor.focus();
@@ -364,30 +570,33 @@ function setComposeBodyText(editor, text) {
   }
 }
 
-function insertDraft() {
+async function insertDraft() {
   if (!lastReplyText) {
     setOutput(t('noDraft'));
-    return;
+    return false;
   }
 
   openReplyComposer();
-  const editor = findComposeBody();
+  const editor = await waitForComposeBody();
   if (!editor) {
     setOutput(t('noCompose'));
-    return;
+    return false;
   }
 
   setComposeBodyText(editor, lastReplyText);
+  await markThreadReplied('draft_inserted');
   setOutput(lastAction === 'guarded_autosend' ? t('draftInsertedAuto') : t('draftInserted'));
+  return true;
 }
 
-function clickSend() {
+async function clickSend() {
   const sendBtn = document.querySelector('div[role="button"][data-tooltip^="Send"]');
   if (!(sendBtn instanceof HTMLElement)) {
     setOutput(t('sendButtonNotFound'));
     return;
   }
   sendBtn.click();
+  await markThreadReplied('sent');
   setOutput(t('sendTriggered'));
 }
 
@@ -401,10 +610,23 @@ function bindPanelActions() {
   panel.querySelector('#ai-mail-butler-process')?.addEventListener('click', () => {
     processOpenThread().catch((err) => setOutput(classifyProcessError(err)));
   });
-  panel.querySelector('#ai-mail-butler-insert')?.addEventListener('click', insertDraft);
-  panel.querySelector('#ai-mail-butler-send')?.addEventListener('click', clickSend);
+  panel.querySelector('#ai-mail-butler-insert')?.addEventListener('click', () => {
+    insertDraft().catch((err) => setOutput(classifyProcessError(err)));
+  });
+  panel.querySelector('#ai-mail-butler-send')?.addEventListener('click', () => {
+    clickSend().catch((err) => setOutput(classifyProcessError(err)));
+  });
   panel.setAttribute('data-bound', '1');
 }
+
+chrome.runtime?.onMessage?.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== 'AI_MAIL_BUTLER_AUTO_SCAN') return false;
+
+  scanVisibleThreads({ quiet: true, auto: true })
+    .then(() => sendResponse({ ok: true }))
+    .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+  return true;
+});
 
 function installFloatingButton() {
   const existing = document.getElementById('ai-mail-butler-launcher');
@@ -438,3 +660,4 @@ function installFloatingButton() {
 loadLangPreference().finally(() => {
   installFloatingButton();
 });
+})();

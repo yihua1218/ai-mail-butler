@@ -234,7 +234,7 @@ const DashboardPage: React.FC = () => {
       width: 320,
       render: (_: unknown, record: any) => (
         <Space wrap>
-          <Button size="small" onClick={() => navigate(`/finance?emailId=${encodeURIComponent(record.id)}`)}>
+          <Button size="small" onClick={() => navigate(`/finance?emailId=${encodeURIComponent(record.id)}&subject=${encodeURIComponent(record.subject || '')}`)}>
             {t('view_finance')}
           </Button>
           <Button
@@ -530,9 +530,9 @@ const DashboardPage: React.FC = () => {
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
         <Space>
-          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(1)); setLogTimeTo(defaultNowLocal()); }}>1d</Button>
-          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(7)); setLogTimeTo(defaultNowLocal()); }}>7d</Button>
-          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(30)); setLogTimeTo(defaultNowLocal()); }}>30d</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(1)); setLogTimeTo(defaultNowLocal()); }}>{t('log_quick_1d')}</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(7)); setLogTimeTo(defaultNowLocal()); }}>{t('log_quick_7d')}</Button>
+          <Button onClick={() => { setLogTimeFrom(defaultRecentFrom(30)); setLogTimeTo(defaultNowLocal()); }}>{t('log_quick_30d')}</Button>
         </Space>
         <Select
           value={logLevelFilter}

@@ -17,6 +17,14 @@
 
 ## 安裝方式（開發人員模式）
 
+載入 extension 前，先打包 WebLLM runtime：
+
+```bash
+cd browser-extension
+npm install
+npm run build:webllm
+```
+
 1. 開啟 Chrome，前往 `chrome://extensions`。
 2. 開啟「開發人員模式」。
 3. 點「載入未封裝項目」，選取本資料夾 `browser-extension/`。
@@ -66,13 +74,13 @@
 - 本地規則過濾：已實作。
 - Side Panel 規則新增 / 編輯：已實作，且表單說明支援英文與繁體中文。
 - 語氣設定與允許動作的說明 / 選項：已支援英文與繁體中文。
-- Gmail 可見清單掃描與高亮：已實作。
-- Gmail 目前開啟信件的回覆草稿插入：已補強，會優先嘗試開啟該信件的回覆編輯框再插入草稿。
-- WebLLM 實際推論整合：目前為 `background.js` 內本地 placeholder，後續需替換為 extension 內打包的 WebLLM runtime。
+- Gmail 可見清單掃描與高亮：已針對 inbox/search 類型的可見結果列補強。
+- Gmail 目前開啟信件的回覆草稿插入：已補強，會等待該信件的回覆編輯框建立後再插入草稿。
+- WebLLM 實際推論整合：已透過 `@mlc-ai/web-llm` 打包後的 `vendor/web-llm/index.js` 載入。若尚未打包 runtime 或瀏覽器沒有 WebGPU，extension 會明確顯示狀態並改用 deterministic fallback。
 
 ## 進入正式版前建議
 
-- 將 WebLLM runtime 與模型打包進 extension（避免遠端程式碼）。
+- 上架 Chrome Web Store 前，需審查並固定 WebLLM runtime/model artifact 的打包方式。
 - 強化 Gmail DOM selector 健康檢查與 fail-closed 策略。
 - 新增 thread 冪等與冷卻時間。
 - 對敏感規則與 allowlist 使用本機加密儲存。

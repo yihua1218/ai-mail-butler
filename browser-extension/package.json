@@ -1,0 +1,15 @@
+{
+  "name": "ai-mail-butler-browser-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build:webllm": "esbuild webllm-entry.js --bundle --format=esm --target=chrome124 --external:url --outfile=vendor/web-llm/index.js"
+  },
+  "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.82"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}
