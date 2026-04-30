@@ -1,0 +1,50 @@
+smtp_security_agent:
+  enabled: true
+
+logging:
+  event_log_path: data/security/smtp-security-events.jsonl
+
+detection:
+  auth_probe_enabled: true
+  open_relay_probe_enabled: true
+  invalid_command_detection: true
+
+scoring:
+  auth_login_when_disabled: 30
+  unsupported_auth_mechanism: 20
+  invalid_command: 10
+  open_relay_attempt: 50
+  short_lived_probe: 15
+
+thresholds:
+  suspicious_score: 30
+  hostile_score: 60
+  malicious_score: 100
+
+rate_limit:
+  max_connections_per_ip_per_minute: 10
+  max_connections_per_ip_per_hour: 100
+  max_suspicious_commands_per_ip_per_hour: 20
+  max_auth_attempts_per_ip_per_day: 5
+
+blocking:
+  # disabled, host-agent, nftables, iptables, or fail2ban-log.
+  # Docker/EC2 deployments should use host-agent so the EC2 host blocks before Docker forwarding.
+  backend: disabled
+  firewall_agent_socket_path: /run/ai-mail-butler/firewall-agent.sock
+  temporary_block_enabled: false
+  permanent_block_requires_approval: true
+  hostile_block_duration: 10m
+  malicious_block_duration: 1h
+  repeated_malicious_block_duration: 24h
+
+whitelist:
+  - 127.0.0.1
+  - ::1
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+reporting:
+  daily_summary_enabled: true
+  report_path: data/security/security-summary.jsonl

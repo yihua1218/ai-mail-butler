@@ -221,6 +221,68 @@ const FinanceAnalysisPage: React.FC = () => {
     return acc;
   }, { cursor: 0, segments: [] }).segments.join(', ');
 
+  const dailyExpenseLast30Days = useMemo(() => {
+    const timezone = user?.timezone || 'UTC';
+    const dayPartsFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    const dayLabelFormatter = new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+      timeZone: timezone,
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    const getDayKey = (date: Date) => {
+      const parts = dayPartsFormatter.formatToParts(date);
+      const year = parts.find((part) => part.type === 'year')?.value || '0000';
+      const month = parts.find((part) => part.type === 'month')?.value || '01';
+      const day = parts.find((part) => part.type === 'day')?.value || '01';
+      return `${year}-${month}-${day}`;
+    };
+
+    const dayKeys = Array.from({ length: 30 }, (_, index) => {
+      const date = new Date();
+      date.setDate(date.getDate() - (29 - index));
+      return getDayKey(date);
+    });
+
+    const totals = new Map<string, number>();
+    dayKeys.forEach((key) => totals.set(key, 0));
+
+    records.forEach((row) => {
+      const isExpense = row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill';
+      if (!isExpense) return;
+      const amount = Math.abs(Number(row.amount) || 0);
+      if (!amount) return;
+      const iso = row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`;
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return;
+      const key = getDayKey(date);
+      if (!totals.has(key)) return;
+      totals.set(key, (totals.get(key) || 0) + amount);
+    });
+
+    const bars = dayKeys.map((key) => {
+      const [year, month, day] = key.split('-');
+      const labelDate = new Date(`${year}-${month}-${day}T00:00:00Z`);
+      return {
+        key,
+        label: Number.isNaN(labelDate.getTime()) ? `${month}/${day}` : dayLabelFormatter.format(labelDate),
+        value: totals.get(key) || 0,
+      };
+    });
+
+    const maxValue = bars.reduce((max, item) => Math.max(max, item.value), 0);
+    return {
+      bars,
+      maxValue,
+    };
+  }, [records, user?.timezone, i18n.language]);
+
   if (!user) {
     return (
       <Card bordered={false}>
@@ -293,6 +355,27 @@ const FinanceAnalysisPage: React.FC = () => {
           </div>
         ) : (
           <Empty description={t('finance_no_income_expense_mix')} />
+        )}
+      </CollapsibleCard>
+      <CollapsibleCard storageKey="daily-expense-30-days" title={t('finance_daily_expense_30d')}>
+        {dailyExpenseLast30Days.maxValue > 0 ? (
+          <div className="finance-bar-chart-layout">
+            {dailyExpenseLast30Days.bars.map((item, index) => {
+              const heightPercent = dailyExpenseLast30Days.maxValue > 0
+                ? Math.max(4, Math.round((item.value / dailyExpenseLast30Days.maxValue) * 100))
+                : 0;
+              return (
+                <div className="finance-bar-column" key={item.key}>
+                  <div className="finance-bar-track" title={`${item.label}: ${item.value.toLocaleString()}`}>
+                    <div className="finance-bar-fill" style={{ height: `${heightPercent}%` }} />
+                  </div>
+                  <span className="finance-bar-label">{index % 5 === 0 || index === dailyExpenseLast30Days.bars.length - 1 ? item.label : ''}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <Empty description={t('finance_no_daily_expense_30d')} />
         )}
       </CollapsibleCard>
       <CollapsibleCard storageKey="monthly-summary" title={t('finance_monthly_summary')}>

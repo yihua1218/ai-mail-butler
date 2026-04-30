@@ -26,3 +26,4 @@ mail-send = "0.4"
 lopdf = "0.33"
 regex = "1"
 clap = { version = "4.5", features = ["derive"] }
+ipnet = "2.9"

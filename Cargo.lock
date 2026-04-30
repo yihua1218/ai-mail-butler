@@ -50,6 +50,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "ipnet",
  "lettre",
  "lopdf",
  "mail-send",

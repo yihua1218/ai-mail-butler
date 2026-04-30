@@ -12,4 +12,11 @@ services:
       - .env
     volumes:
       - ./ai-mail-butler-data:/app/data
+      - /run/ai-mail-butler:/run/ai-mail-butler
+    cap_drop:
+      - ALL
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped

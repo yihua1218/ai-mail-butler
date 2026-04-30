@@ -1,9 +1,11 @@
 mod ai;
 mod config;
 mod db;
+mod firewall_agent;
 mod mail;
 mod models;
 mod services;
+mod smtp_security;
 mod web;
 
 use anyhow::Result;
@@ -46,6 +48,18 @@ struct CliArgs {
     readonly_base: Option<String>,
     #[arg(long)]
     overlay_dir: Option<String>,
+    #[arg(long)]
+    firewall_config: Option<String>,
+    #[arg(long, default_value = "health")]
+    fw_action: String,
+    #[arg(long)]
+    socket: Option<String>,
+    #[arg(long)]
+    ip: Option<String>,
+    #[arg(long)]
+    duration: Option<String>,
+    #[arg(long)]
+    reason: Option<String>,
 }
 
 fn sqlite_url_to_path(database_url: &str) -> PathBuf {
@@ -269,6 +283,38 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
 
     info!("Starting AI Mail Butler...");
+
+    if args.mode.eq_ignore_ascii_case("firewall-agent") {
+        let fw_config = firewall_agent::FirewallAgentConfig::load(args.firewall_config.as_deref()).await;
+        firewall_agent::FirewallAgent::new(fw_config).await.run().await?;
+        return Ok(());
+    }
+
+    if args.mode.eq_ignore_ascii_case("fw") {
+        let socket_path = PathBuf::from(
+            args.socket
+                .clone()
+                .unwrap_or_else(|| "/run/ai-mail-butler/firewall-agent.sock".to_string()),
+        );
+        let action = match args.fw_action.as_str() {
+            "block" | "block_ip" => "block_ip",
+            "unblock" | "unblock_ip" => "unblock_ip",
+            "list" | "list_blocks" => "list_blocks",
+            "health" => "health",
+            other => other,
+        }
+        .to_string();
+        let request = firewall_agent::FirewallRequest {
+            action,
+            ip: args.ip.clone(),
+            duration: args.duration.clone(),
+            reason: args.reason.clone().or_else(|| Some("manual CLI request".to_string())),
+            source: Some("ai-mail-butler-fw".to_string()),
+        };
+        let response = firewall_agent::send_request(&socket_path, &request).await?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
 
     let mut config = config::Config::load();
 

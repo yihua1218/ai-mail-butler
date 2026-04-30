@@ -1,0 +1,35 @@
+firewall_agent:
+  enabled: true
+  socket_path: /run/ai-mail-butler/firewall-agent.sock
+
+  backend:
+    # Current EC2 hosts can use iptables-docker-user. Future hosts can switch
+    # preferred to nftables while keeping iptables-docker-user as fallback.
+    preferred: iptables-docker-user
+    fallback: iptables-input
+
+  smtp:
+    ports:
+      - 25
+
+  blocking:
+    default_duration: 1h
+    max_duration: 24h
+    allow_cidr_blocking: false
+    allow_private_ip_blocking: false
+
+  whitelist:
+    - 127.0.0.1
+    - ::1
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+  audit:
+    log_path: /var/log/ai-mail-butler/firewall-agent.jsonl
+
+  state:
+    path: /var/lib/ai-mail-butler/firewall-state.json
+
+  cleanup:
+    interval_seconds: 60

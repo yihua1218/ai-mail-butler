@@ -35,6 +35,7 @@ For background on the creator, project motivation, and open collaboration notes:
 - **User Settings**: Toggle Auto-reply and Dry Run mode (AI replies sent to yourself for review before going to external senders).
 - **Web Dashboard**: View history of received emails and actions taken, featuring an Apple-style aesthetic inspired by Ant Design.
 - **Built-in SMTP**: Lightweight Rust-native SMTP server for easy deployment.
+- **SMTP security agent**: Detects repeated public `AUTH LOGIN` probing while SMTP AUTH is disabled, logs structured JSONL events, supports whitelist-aware temporary blocking through `nftables`, `iptables`, or fail2ban-compatible logs.
 - **Diagnostics**: Self-healing database schema verification on startup.
 - **Readonly Overlay Mode**: Run the application against a data snapshot without modifying it. All writes go to a separate overlay directory; reads transparently fall back to the base snapshot. Useful for demo, staging, and read-only mirror deployments.
 
@@ -106,6 +107,36 @@ Notes:
 Optional docs retrieval controls:
 - `DOCS_WHITELIST`: Comma-separated file names or keywords to allow for AI document references. Example: `DOCS_WHITELIST=GMAIL-SMTP-SETUP.md,zh-TW`
 - Language preference effect: logged-in users with `preferred_language=zh-TW` will prioritize matches from `*.zh-TW.md` documents.
+
+### SMTP Security Agent
+
+The SMTP listener includes an abuse guard for malicious connection attempts such as repeated `AUTH LOGIN` probes against this AUTH-disabled server.
+
+Default behavior is observe-first:
+- Config file: `config/smtp-security-agent.yaml`
+- Event log: `data/security/smtp-security-events.jsonl`
+- Summary log: `data/security/security-summary.jsonl`
+- Whitelisted IPs and CIDR ranges are logged but never blocked.
+- Temporary firewall blocking is disabled until `temporary_block_enabled: true` and a backend are configured.
+
+MVP blocking policy:
+```text
+If a non-whitelisted IP sends AUTH LOGIN more than 5 times within 1 hour, block it for 1 hour.
+```
+
+To enable `nftables` blocking, ensure the target set exists, then update the config:
+```bash
+nft add table inet filter
+nft add set inet filter smtp_blacklist '{ type ipv4_addr; flags timeout; }'
+```
+
+```yaml
+blocking:
+  backend: nftables
+  temporary_block_enabled: true
+```
+
+For Docker on EC2, prefer host-level enforcement through the Unix socket firewall agent so blocks happen before Docker forwards SMTP traffic to the container. See [EC2 Host Firewall Agent](docs/EC2-HOST-FIREWALL-AGENT.md).
 
 ### Test
 ```bash

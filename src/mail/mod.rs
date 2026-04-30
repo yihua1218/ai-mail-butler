@@ -1,5 +1,6 @@
 use crate::ai::AiClient;
 use crate::models::User;
+use crate::smtp_security::{SecurityDecision, SmtpSecurityAgent};
 use anyhow::Result;
 use chrono::Utc;
 use lettre::message::{Message, SinglePart};
@@ -928,7 +929,12 @@ async fn log_mail_event(
 /// Handle a single inbound SMTP connection.
 /// Saves a session transcript to `<spool_dir>/session_<id>.log` and the
 /// received email body to `<spool_dir>/mail_<id>.eml`.
-async fn handle_smtp_connection(stream: TcpStream, peer_addr: SocketAddr, spool_dir: String) {
+async fn handle_smtp_connection(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    spool_dir: String,
+    security_agent: SmtpSecurityAgent,
+) {
     let session_id = format!(
         "{}-{}",
         Utc::now().format("%Y%m%d%H%M%S%.3f"),
@@ -961,11 +967,22 @@ async fn handle_smtp_connection(stream: TcpStream, peer_addr: SocketAddr, spool_
         }};
     }
 
+    if let SecurityDecision::Reject421(response) =
+        security_agent.observe_connection(peer_addr).await
+    {
+        send!(response);
+        let log_path = format!("{}/session_{}.log", spool_dir, session_id);
+        let _ = fs::write(&log_path, session_log.as_bytes()).await;
+        return;
+    }
+
     // Server speaks first
     send!(format!("220 mail.local ESMTP AI Mail Butler\r\n"));
 
     let mut in_data = false;
     let mut email_data = String::new();
+    let mut command_count = 0_usize;
+    let mut mail_delivery_attempted = false;
 
     loop {
         let mut line = String::new();
@@ -1003,6 +1020,21 @@ async fn handle_smtp_connection(stream: TcpStream, peer_addr: SocketAddr, spool_
             }
         } else {
             let cmd_upper = line.trim_end().to_ascii_uppercase();
+            command_count += 1;
+
+            if let SecurityDecision::Reject421(response) = security_agent
+                .observe_command(
+                    peer_addr,
+                    &session_id,
+                    line.trim_end(),
+                    command_count,
+                    mail_delivery_attempted,
+                )
+                .await
+            {
+                send!(response);
+                break;
+            }
 
             let response = if cmd_upper.starts_with("EHLO") || cmd_upper.starts_with("HELO") {
                 info!("[SMTP {}] {}", session_id, line.trim_end());
@@ -1011,9 +1043,11 @@ async fn handle_smtp_connection(stream: TcpStream, peer_addr: SocketAddr, spool_
                     peer_addr
                 )
             } else if cmd_upper.starts_with("MAIL FROM") {
+                mail_delivery_attempted = true;
                 info!("[SMTP {}] {}", session_id, line.trim_end());
                 "250 OK\r\n".to_string()
             } else if cmd_upper.starts_with("RCPT TO") {
+                mail_delivery_attempted = true;
                 info!("[SMTP {}] {}", session_id, line.trim_end());
                 "250 OK\r\n".to_string()
             } else if cmd_upper.trim() == "DATA" {
@@ -1494,10 +1528,14 @@ impl MailService {
         fs::create_dir_all(&processed_dir).await?;
 
         let listener = TcpListener::bind("0.0.0.0:25").await?;
+        let security_agent = SmtpSecurityAgent::new().await;
         info!(
             "SMTP server listening on 0.0.0.0:25  (logical spool: {}, runtime spool: {})",
             logical_spool_dir, spool_dir
         );
+        if security_agent.is_enabled() {
+            info!("SMTP security agent enabled");
+        }
 
         let spool_owned = spool_dir.to_string();
         tokio::spawn(async move {
@@ -1505,8 +1543,9 @@ impl MailService {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
                         let spool = spool_owned.clone();
+                        let security_agent = security_agent.clone();
                         tokio::spawn(async move {
-                            handle_smtp_connection(stream, peer_addr, spool).await;
+                            handle_smtp_connection(stream, peer_addr, spool, security_agent).await;
                         });
                     }
                     Err(e) => {
