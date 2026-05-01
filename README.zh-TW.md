@@ -107,6 +107,36 @@ cargo run -- --mode cli \
 - `DOCS_WHITELIST`：以逗號分隔可被 AI 引用的文件檔名或關鍵字。例如：`DOCS_WHITELIST=GMAIL-SMTP-SETUP.md,zh-TW`
 - 語言偏好效果：登入使用者若設定 `preferred_language=zh-TW`，系統會優先命中 `*.zh-TW.md` 文件內容。
 
+### SMTP 安全防護代理程式
+
+SMTP 監聽器內建濫用防護機制，可偵測惡意連線行為，例如對本伺服器（已停用 AUTH）重複送出 `AUTH LOGIN` 探測。
+
+預設行為為「先觀察」模式：
+- 設定檔：`config/smtp-security-agent.yaml`
+- 事件記錄：`data/security/smtp-security-events.jsonl`
+- 摘要記錄：`data/security/security-summary.jsonl`
+- 白名單 IP 與 CIDR 範圍只會被記錄，不會被封鎖。
+- 暫時性防火牆封鎖功能預設關閉，需設定 `temporary_block_enabled: true` 並配置後端才會啟用。
+
+MVP 封鎖規則：
+```text
+若非白名單 IP 在 1 小時內送出超過 5 次 AUTH LOGIN，則封鎖該 IP 1 小時。
+```
+
+啟用 `nftables` 封鎖前，請先確認目標集合存在，再更新設定檔：
+```bash
+nft add table inet filter
+nft add set inet filter smtp_blacklist '{ type ipv4_addr; flags timeout; }'
+```
+
+```yaml
+blocking:
+  backend: nftables
+  temporary_block_enabled: true
+```
+
+使用 Docker 部署於 EC2 時，建議透過 Unix socket 防火牆代理程式在主機層級執行封鎖，確保在 Docker 轉發 SMTP 流量前即完成攔截。詳見 [EC2 主機防火牆代理程式](docs/EC2-HOST-FIREWALL-AGENT.md)。
+
 ### 測試
 ```bash
 cargo test

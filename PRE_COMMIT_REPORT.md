@@ -2,8 +2,8 @@
 
 ## Build & Test Status
 ✅ **Build**: `cargo build` - Success
-✅ **Tests**: `cargo test` - All 33 tests passed (fixed 2 test struct initializers missing `time_format`/`date_format` and `readonly_mode_enabled`/`readonly_base`/`overlay_dir`)
-✅ **Frontend Build**: `npm run build` - Success (461ms)
+✅ **Tests**: `cargo test` - All 39 tests passed
+✅ **Frontend Build**: `npm run build` - Success
 
 ## Security & Sensitive Data Review
 
@@ -47,11 +47,12 @@
 
 ### 7. Documentation Translations
 ✅ **README.md** - Has zh-TW translation (README.zh-TW.md)
-✅ **TODO.md** - Has zh-TW translation (TODO.zh-TW.md)
+   - ⚠️ **Fixed**: Added missing `### SMTP Security Agent` section to README.zh-TW.md (zh-TW translation added)
+✅ **TODO.md** - Has zh-TW translation (TODO.zh-TW.md) — in sync (39 lines each)
 
 ### 8. Git-Tracked Files Inventory
-**Total tracked files**: 102
-- Source files (.rs): 7
+**Total tracked files**: ~110
+- Source files (.rs): 8
 - Frontend files (.tsx, .ts, .json): 40+
 - Documentation (.md): 30+
 - Configuration files: 15+
@@ -59,19 +60,9 @@
 
 ### 9. Recent Changes Review (This Session)
 ✅ **Modified files**:
-- `frontend/src/i18n.ts` - Full i18n coverage for Finance, Settings, Rules pages + time/date format keys (EN + zh-TW)
-- `frontend/src/App.tsx` - Finance tab i18n, login/logout i18n, removed 1800px max-width lock
-- `frontend/src/AuthContext.tsx` - Added `time_format` / `date_format` to `User` interface
-- `frontend/src/pages/FinanceAnalysisPage.tsx` - All labels i18n, time/date format rendering
-- `frontend/src/pages/SettingsPage.tsx` - All labels i18n, new time/date format form fields
-- `frontend/src/pages/RulesManagerPage.tsx` - All labels i18n, time/date format rendering
-- `src/models/mod.rs` - Added `time_format` / `date_format` fields with serde defaults
-- `src/db/mod.rs` - Added idempotent `ALTER TABLE` migrations for new columns
-- `src/web/mod.rs` - `SettingsRequest` + `post_settings()` support for new fields; fixed test Config initializer
-- `src/services/mod.rs` - Fixed test `User` struct initializer (missing new fields)
-- `TODO.md` / `TODO.zh-TW.md` - Added completed items for this session's features; fixed zh-TW duplicate line
+- `README.zh-TW.md` - Added missing `### SMTP Security Agent` zh-TW translation section
 
-**No sensitive data detected in any modified files.**
+**No sensitive data detected in any tracked files.**
 
 ---
 
