@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Empty, Space, Table, Tag, Typography, type TableColumnsType } from 'antd';
+import { Alert, Button, Card, Empty, Segmented, Space, Table, Tag, Typography, type TableColumnsType } from 'antd';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -32,6 +32,8 @@ type MonthlyFinance = {
   updated_at: string;
 };
 
+type DailyFinanceChartMode = 'expense' | 'both' | 'income';
+
 const PIE_COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2', '#a0d911'];
 const FINANCE_CARD_COLLAPSE_KEY = 'ai_mail_butler_finance_collapsed_cards';
 
@@ -42,6 +44,7 @@ const FinanceAnalysisPage: React.FC = () => {
   const location = useLocation();
   const [records, setRecords] = useState<FinanceRecord[]>([]);
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
+  const [dailyChartMode, setDailyChartMode] = useState<DailyFinanceChartMode>('expense');
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(() => {
     try {
       return JSON.parse(localStorage.getItem(FINANCE_CARD_COLLAPSE_KEY) || '{}');
@@ -221,7 +224,7 @@ const FinanceAnalysisPage: React.FC = () => {
     return acc;
   }, { cursor: 0, segments: [] }).segments.join(', ');
 
-  const dailyExpenseLast30Days = useMemo(() => {
+  const dailyFinanceLast30Days = useMemo(() => {
     const timezone = user?.timezone || 'UTC';
     const dayPartsFormatter = new Intl.DateTimeFormat('en-CA', {
       timeZone: timezone,
@@ -250,12 +253,13 @@ const FinanceAnalysisPage: React.FC = () => {
       return getDayKey(date);
     });
 
-    const totals = new Map<string, number>();
-    dayKeys.forEach((key) => totals.set(key, 0));
+    const totals = new Map<string, { income: number; expense: number }>();
+    dayKeys.forEach((key) => totals.set(key, { income: 0, expense: 0 }));
 
     records.forEach((row) => {
       const isExpense = row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill';
-      if (!isExpense) return;
+      const isIncome = row.direction === 'income' || row.direction === 'deposit' || row.category === 'income' || row.category === 'deposit';
+      if (!isExpense && !isIncome) return;
       const amount = Math.abs(Number(row.amount) || 0);
       if (!amount) return;
       const iso = row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`;
@@ -263,7 +267,11 @@ const FinanceAnalysisPage: React.FC = () => {
       if (Number.isNaN(date.getTime())) return;
       const key = getDayKey(date);
       if (!totals.has(key)) return;
-      totals.set(key, (totals.get(key) || 0) + amount);
+      const current = totals.get(key) || { income: 0, expense: 0 };
+      totals.set(key, {
+        income: current.income + (isIncome ? amount : 0),
+        expense: current.expense + (isExpense ? amount : 0),
+      });
     });
 
     const bars = dayKeys.map((key) => {
@@ -272,16 +280,45 @@ const FinanceAnalysisPage: React.FC = () => {
       return {
         key,
         label: Number.isNaN(labelDate.getTime()) ? `${month}/${day}` : dayLabelFormatter.format(labelDate),
-        value: totals.get(key) || 0,
+        income: totals.get(key)?.income || 0,
+        expense: totals.get(key)?.expense || 0,
       };
     });
 
-    const maxValue = bars.reduce((max, item) => Math.max(max, item.value), 0);
+    const visibleValues = bars.flatMap((item) => {
+      if (dailyChartMode === 'income') return [item.income];
+      if (dailyChartMode === 'both') return [item.income, item.expense];
+      return [item.expense];
+    });
+    const maxValue = visibleValues.reduce((max, value) => Math.max(max, value), 0);
+    const niceMaxValue = (() => {
+      if (maxValue <= 0) return 0;
+      const exponent = Math.floor(Math.log10(maxValue));
+      const magnitude = 10 ** exponent;
+      const normalized = maxValue / magnitude;
+      const niceNormalized = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+      return niceNormalized * magnitude;
+    })();
+    const yAxisTicks = Array.from({ length: 5 }, (_, index) => Math.round(niceMaxValue * ((4 - index) / 4)));
     return {
       bars,
-      maxValue,
+      maxValue: niceMaxValue,
+      yAxisTicks,
     };
-  }, [records, user?.timezone, i18n.language]);
+  }, [records, user?.timezone, i18n.language, dailyChartMode]);
+
+  const dailyChartSeries = useMemo(() => {
+    if (dailyChartMode === 'income') {
+      return [{ key: 'income', label: t('finance_chart_income'), className: 'income' }];
+    }
+    if (dailyChartMode === 'both') {
+      return [
+        { key: 'expense', label: t('finance_chart_expense'), className: 'expense' },
+        { key: 'income', label: t('finance_chart_income'), className: 'income' },
+      ];
+    }
+    return [{ key: 'expense', label: t('finance_chart_expense'), className: 'expense' }];
+  }, [dailyChartMode, t]);
 
   if (!user) {
     return (
@@ -357,25 +394,76 @@ const FinanceAnalysisPage: React.FC = () => {
           <Empty description={t('finance_no_income_expense_mix')} />
         )}
       </CollapsibleCard>
-      <CollapsibleCard storageKey="daily-expense-30-days" title={t('finance_daily_expense_30d')}>
-        {dailyExpenseLast30Days.maxValue > 0 ? (
-          <div className="finance-bar-chart-layout">
-            {dailyExpenseLast30Days.bars.map((item, index) => {
-              const heightPercent = dailyExpenseLast30Days.maxValue > 0
-                ? Math.max(4, Math.round((item.value / dailyExpenseLast30Days.maxValue) * 100))
-                : 0;
-              return (
-                <div className="finance-bar-column" key={item.key}>
-                  <div className="finance-bar-track" title={`${item.label}: ${item.value.toLocaleString()}`}>
-                    <div className="finance-bar-fill" style={{ height: `${heightPercent}%` }} />
+      <CollapsibleCard
+        storageKey="daily-expense-30-days"
+        title={t('finance_daily_amount_30d')}
+        extra={
+          <Segmented
+            size="small"
+            value={dailyChartMode}
+            onChange={(value) => setDailyChartMode(value as DailyFinanceChartMode)}
+            options={[
+              { label: t('finance_chart_expense'), value: 'expense' },
+              { label: t('finance_chart_income_expense'), value: 'both' },
+              { label: t('finance_chart_income'), value: 'income' },
+            ]}
+          />
+        }
+      >
+        {dailyFinanceLast30Days.maxValue > 0 ? (
+          <div className="finance-bar-chart">
+            <div className="finance-bar-y-axis" aria-hidden="true">
+              {dailyFinanceLast30Days.yAxisTicks.map((tick, index) => (
+                <span key={`${tick}-${index}`}>{tick.toLocaleString()}</span>
+              ))}
+            </div>
+            <div className="finance-bar-plot">
+              <div className="finance-bar-grid" aria-hidden="true">
+                {dailyFinanceLast30Days.yAxisTicks.map((tick, index) => (
+                  <span key={`${tick}-${index}`} />
+                ))}
+              </div>
+              <div className="finance-bar-chart-layout">
+                {dailyFinanceLast30Days.bars.map((item, index) => (
+                  <div className="finance-bar-column" key={item.key}>
+                    <div className={`finance-bar-series ${dailyChartMode === 'both' ? 'is-grouped' : 'is-single'}`}>
+                      {dailyChartSeries.map((series) => {
+                        const value = series.key === 'income' ? item.income : item.expense;
+                        const heightPercent = dailyFinanceLast30Days.maxValue > 0
+                          ? Math.max(4, Math.round((value / dailyFinanceLast30Days.maxValue) * 100))
+                          : 0;
+                        const tooltip = `${item.label} ${series.label}: ${value.toLocaleString()}`;
+                        return (
+                          <div
+                            className="finance-bar-track"
+                            title={tooltip}
+                            data-tooltip={tooltip}
+                            aria-label={tooltip}
+                            key={series.key}
+                          >
+                            <div className={`finance-bar-fill ${series.className}`} style={{ height: `${heightPercent}%` }} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <span className="finance-bar-label">{index % 5 === 0 || index === dailyFinanceLast30Days.bars.length - 1 ? item.label : ''}</span>
                   </div>
-                  <span className="finance-bar-label">{index % 5 === 0 || index === dailyExpenseLast30Days.bars.length - 1 ? item.label : ''}</span>
+                ))}
+              </div>
+              {dailyChartMode === 'both' && (
+                <div className="finance-bar-legend">
+                  {dailyChartSeries.map((series) => (
+                    <span key={series.key}>
+                      <i className={`finance-bar-legend-swatch ${series.className}`} />
+                      {series.label}
+                    </span>
+                  ))}
                 </div>
-              );
-            })}
+              )}
+            </div>
           </div>
         ) : (
-          <Empty description={t('finance_no_daily_expense_30d')} />
+          <Empty description={t('finance_no_daily_amount_30d')} />
         )}
       </CollapsibleCard>
       <CollapsibleCard storageKey="monthly-summary" title={t('finance_monthly_summary')}>
