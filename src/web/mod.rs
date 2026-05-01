@@ -1285,7 +1285,7 @@ async fn readonly_write_guard(
     req: Request<Body>,
     next: Next,
 ) -> impl IntoResponse {
-    if !state.config.readonly_mode_enabled {
+    if !state.config.readonly_mode_enabled || !state.config.readonly_block_writes {
         return next.run(req).await;
     }
 
@@ -2006,6 +2006,7 @@ struct BuildInfo {
     build_disk: &'static str,
     assistant_email: String,
     readonly_mode_enabled: bool,
+    readonly_block_writes: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
     remote_debug_sshfs_enabled: bool,
@@ -2029,6 +2030,7 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
         build_disk: env!("BUILD_DISK"),
         assistant_email: state.config.assistant_email.clone(),
         readonly_mode_enabled: state.config.readonly_mode_enabled,
+        readonly_block_writes: state.config.readonly_block_writes,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
         remote_debug_sshfs_enabled: state.config.remote_debug_sshfs_enabled,
@@ -2712,6 +2714,7 @@ mod web_tests {
             assistant_email: "assistant@example.com".to_string(),
             docs_whitelist: vec![],
             readonly_mode_enabled: false,
+            readonly_block_writes: false,
             readonly_base: None,
             overlay_dir: None,
             remote_debug_sshfs_enabled: false,

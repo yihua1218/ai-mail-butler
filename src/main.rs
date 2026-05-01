@@ -78,6 +78,22 @@ fn resolve_overlay_relative_path(path: &Path) -> PathBuf {
     }
 }
 
+async fn resolve_readonly_base_path(base: &Path, relative: &Path) -> PathBuf {
+    let primary = base.join(relative);
+    if tokio::fs::try_exists(&primary).await.unwrap_or(false) {
+        return primary;
+    }
+
+    if let Ok(stripped) = relative.strip_prefix("data") {
+        let data_root_path = base.join(stripped);
+        if tokio::fs::try_exists(&data_root_path).await.unwrap_or(false) {
+            return data_root_path;
+        }
+    }
+
+    primary
+}
+
 fn resolve_runtime_dir(config: &config::Config, logical_dir: &str) -> String {
     if !config.readonly_mode_enabled {
         return logical_dir.to_string();
@@ -132,7 +148,7 @@ async fn prepare_readonly_overlay_db(config: &mut config::Config) -> Result<()> 
     }
 
     let base_db_path = if let Some(base) = config.readonly_base.as_deref() {
-        PathBuf::from(base).join(&relative_db_path)
+        resolve_readonly_base_path(&PathBuf::from(base), &relative_db_path).await
     } else {
         configured_db_path.clone()
     };

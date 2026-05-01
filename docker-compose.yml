@@ -1,22 +1,53 @@
-version: '3.8'
-
 services:
   ai-mail-butler:
     image: ${IMAGE_NAME:-ghcr.io/yihua/ai-mail-butler}:${IMAGE_TAG:-latest}
     build: .
     container_name: ai-mail-butler
     ports:
-      - "3000:3000"
-      - "25:25"
-    env_file:
-      - .env
+      - "${PORT:-3000}:${PORT:-3000}"
+      - "${SMTP_HOST_PORT:-25}:25"
+    environment:
+      PORT: ${PORT:-3000}
+      HOST: ${HOST:-0.0.0.0}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      RUST_LOG: ${RUST_LOG:-info,ai_mail_butler=debug}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:/app/data/data.sqlite}
+      READONLY_MODE: ${READONLY_MODE:-false}
+      READONLY_BLOCK_WRITES: ${READONLY_BLOCK_WRITES:-}
+      READONLY_BASE: ${READONLY_BASE:-}
+      OVERLAY_DIR: ${OVERLAY_DIR:-data/overlay}
+      REMOTE_DEBUG_SSHFS_ENABLED: ${REMOTE_DEBUG_SSHFS_ENABLED:-false}
+      REMOTE_DEBUG_MODE: ${REMOTE_DEBUG_MODE:-readonly}
+      REMOTE_DEBUG_REMOTE: ${REMOTE_DEBUG_REMOTE:-}
+      REMOTE_DEBUG_MOUNT_POINT: ${REMOTE_DEBUG_MOUNT_POINT:-}
+      REMOTE_DEBUG_OVERLAY_DIR: ${REMOTE_DEBUG_OVERLAY_DIR:-}
+      REMOTE_DEBUG_SSHFS_OPTIONS: ${REMOTE_DEBUG_SSHFS_OPTIONS:-}
+      SMTP_RELAY_HOST: ${SMTP_RELAY_HOST:-}
+      SMTP_RELAY_PORT: ${SMTP_RELAY_PORT:-587}
+      SMTP_RELAY_USER: ${SMTP_RELAY_USER:-}
+      SMTP_RELAY_PASS: ${SMTP_RELAY_PASS:-}
+      ASSISTANT_EMAIL: ${ASSISTANT_EMAIL:-assistant@example.com}
+      SMTP_SECURITY_CONFIG: ${SMTP_SECURITY_CONFIG:-config/smtp-security-agent.yaml}
+      SMTP_SECURITY_ENABLED: ${SMTP_SECURITY_ENABLED:-true}
+      SMTP_SECURITY_BLOCKING_BACKEND: ${SMTP_SECURITY_BLOCKING_BACKEND:-disabled}
+      SMTP_SECURITY_TEMP_BLOCK_ENABLED: ${SMTP_SECURITY_TEMP_BLOCK_ENABLED:-false}
+      SMTP_FIREWALL_AGENT_SOCKET: ${SMTP_FIREWALL_AGENT_SOCKET:-/run/ai-mail-butler/firewall-agent.sock}
+      FIREWALL_AGENT_CONFIG: ${FIREWALL_AGENT_CONFIG:-/etc/ai-mail-butler/firewall-agent.yaml}
+      FIREWALL_AGENT_SOCKET: ${FIREWALL_AGENT_SOCKET:-/run/ai-mail-butler/firewall-agent.sock}
+      FIREWALL_AGENT_PREFERRED_BACKEND: ${FIREWALL_AGENT_PREFERRED_BACKEND:-iptables-docker-user}
+      FIREWALL_AGENT_FALLBACK_BACKEND: ${FIREWALL_AGENT_FALLBACK_BACKEND:-iptables-input}
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-http://localhost:1234/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL_NAME: ${AI_MODEL_NAME:-}
+      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:-}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      M365_CLIENT_ID: ${M365_CLIENT_ID:-}
+      M365_CLIENT_SECRET: ${M365_CLIENT_SECRET:-}
+      M365_TENANT_ID: ${M365_TENANT_ID:-}
     volumes:
       - ./ai-mail-butler-data:/app/data
       - /run/ai-mail-butler:/run/ai-mail-butler
-    cap_drop:
-      - ALL
     sysctls:
       net.ipv4.ip_unprivileged_port_start: "0"
-    security_opt:
-      - no-new-privileges:true
     restart: unless-stopped

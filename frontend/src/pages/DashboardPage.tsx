@@ -93,7 +93,7 @@ const DashboardPage: React.FC = () => {
   const [sendingDraft, setSendingDraft] = useState(false);
   const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
-  const [cachePurgeTarget, setCachePurgeTarget] = useState<string>('webllm-local');
+  const [cachePurgeTarget, setCachePurgeTarget] = useState<string>('frontend');
   const [purgingCache, setPurgingCache] = useState(false);
 
   const loadFeedback = async () => {

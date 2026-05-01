@@ -10,6 +10,7 @@ pub struct Config {
     pub assistant_email: String,
     pub docs_whitelist: Vec<String>,
     pub readonly_mode_enabled: bool,
+    pub readonly_block_writes: bool,
     pub readonly_base: Option<String>,
     pub overlay_dir: Option<String>,
     pub remote_debug_sshfs_enabled: bool,
@@ -32,7 +33,18 @@ impl Config {
         }
     }
 
+    fn parse_optional_bool_env(name: &str) -> Option<bool> {
+        std::env::var(name).ok().map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+    }
+
     pub fn load() -> Self {
+        let readonly_mode_enabled = Self::parse_bool_env("READONLY_MODE");
+        let readonly_block_writes =
+            Self::parse_optional_bool_env("READONLY_BLOCK_WRITES").unwrap_or(readonly_mode_enabled);
+
         Self {
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "sqlite:data/data.sqlite".to_string()),
@@ -57,7 +69,8 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            readonly_mode_enabled: Self::parse_bool_env("READONLY_MODE"),
+            readonly_mode_enabled,
+            readonly_block_writes,
             readonly_base: std::env::var("READONLY_BASE")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),

@@ -1,26 +1,46 @@
-# Lightweight runtime environment
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+
+FROM rust:1-bookworm AS rust-builder
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+
+RUN cargo build --release --locked
+
+
 FROM debian:bookworm-slim
 
-# Install necessary HTTPS certificates and OpenSSL for runtime
 RUN apt-get update && \
-    apt-get install -y ca-certificates libssl3 && \
+    apt-get install -y --no-install-recommends ca-certificates dnsutils libsqlite3-0 openssh-client sshfs && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# TARGETARCH is automatically populated by Docker Buildx (e.g. amd64, arm64)
-ARG TARGETARCH
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --from=rust-builder /app/target/release/ai-mail-butler /usr/local/bin/ai-mail-butler
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Copy the pre-compiled frontend assets
-COPY frontend/dist ./frontend/dist
+RUN chmod +x /usr/local/bin/ai-mail-butler && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    mkdir -p /app/data
 
-# Copy the pre-compiled Rust executable based on architecture
-COPY bin/${TARGETARCH}/ai-mail-butler /usr/local/bin/ai-mail-butler
-RUN chmod +x /usr/local/bin/ai-mail-butler
-
-# Expose the defined ports
 EXPOSE 3000
 EXPOSE 25
 
-# Start the application
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["ai-mail-butler"]

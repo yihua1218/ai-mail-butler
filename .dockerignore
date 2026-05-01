@@ -1,6 +1,11 @@
 target/
+bin/
+frontend/node_modules/
+frontend/dist/
+browser-extension/node_modules/
+browser-extension/dist/
+browser-extension/vendor/
 **/*.rs.bk
-Cargo.lock
 .env
 .DS_Store
 *.sqlite

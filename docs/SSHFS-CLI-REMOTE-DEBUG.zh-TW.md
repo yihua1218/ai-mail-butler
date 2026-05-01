@@ -27,25 +27,54 @@ Linux：
 
 ## 掛載目錄建議
 
-只掛載必要路徑，建議直接掛 spool：
-- 遠端：`/opt/ai-mail-butler/data/mail_spool`
-- 本地掛載點：`~/mnt/ai-mail-spool`
+建議掛載遠端 data root，讓本地除錯環境同時看到資料庫和 spool：
+- 遠端：`/opt/ai-mail-butler/data`
+- 本地掛載點：`~/mnt/ai-mail-butler-data`
 
-這樣可降低風險並提升效能。
+這樣 app 啟動時可以把遠端 `data.sqlite` 複製成 local overlay DB，同時透過 SSHFS 讀取遠端 `mail_spool` 等檔案。
+
+## 容器啟動時自動掛載
+
+當 `REMOTE_DEBUG_SSHFS_ENABLED=true` 時，容器 entrypoint 會在啟動 `ai-mail-butler` 前，先把 `REMOTE_DEBUG_REMOTE` 掛載到 `REMOTE_DEBUG_MOUNT_POINT`。Web App 仍然只顯示目前設定狀態；HTTP API 不提供 mount 或 umount 操作。
+
+```bash
+REMOTE_DEBUG_SSHFS_ENABLED=true
+REMOTE_DEBUG_MODE=overlay
+REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data
+REMOTE_DEBUG_MOUNT_POINT=/mnt/ai-mail-butler-data
+REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
+```
+
+`REMOTE_DEBUG_MODE=overlay` 會由 entrypoint 強制啟用 `READONLY_MODE=true`，並在 `READONLY_BASE` 未設定時自動指向 SSHFS 掛載點。程式會先把遠端 `data.sqlite` 複製到本地 overlay DB，後續寫入留在本地 overlay，檔案讀取則可 fallback 到遠端 data root。
+
+預設情況下，`READONLY_MODE=true` 也會封鎖 Web 寫入 API。如果要維持 overlay，但允許寫入本地 overlay DB/檔案，請設定：
+
+```bash
+READONLY_BLOCK_WRITES=false
+```
+
+Docker 和 nerdctl 需要額外 FUSE 權限，請搭配 SSHFS override 檔案：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d --build
+nerdctl compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d --build
+```
+
+容器內也必須有可用的 SSH 憑證，例如唯讀 bind mount SSH key 或 agent socket。一般 production 部署建議維持 `REMOTE_DEBUG_SSHFS_ENABLED=false`。
 
 ## 1. 建立本地掛載點
 
 ```bash
-mkdir -p ~/mnt/ai-mail-spool
+mkdir -p ~/mnt/ai-mail-butler-data
 ```
 
-## 2. 使用 SSHFS 掛載遠端 Spool
+## 2. 使用 SSHFS 掛載遠端 Data Root
 
 建議先用唯讀掛載，先觀察不修改：
 
 ```bash
-sshfs devuser@your-server:/opt/ai-mail-butler/data/mail_spool \
-  ~/mnt/ai-mail-spool \
+sshfs devuser@your-server:/opt/ai-mail-butler/data \
+  ~/mnt/ai-mail-butler-data \
   -o ro,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3
 ```
 
@@ -59,7 +88,7 @@ sshfs devuser@your-server:/opt/ai-mail-butler/data/mail_spool \
 
 ```bash
 cargo run -- --mode cli \
-  --spool-dir ~/mnt/ai-mail-spool \
+  --spool-dir ~/mnt/ai-mail-butler-data/mail_spool \
   --keep-files \
   --report-json ./data/cli-remote-report.json
 ```
@@ -67,7 +96,7 @@ cargo run -- --mode cli \
 互動 REPL 模式：
 
 ```bash
-cargo run -- --mode cli --repl --spool-dir ~/mnt/ai-mail-spool --keep-files
+cargo run -- --mode cli --repl --spool-dir ~/mnt/ai-mail-butler-data/mail_spool --keep-files
 ```
 
 REPL 常用指令：
@@ -118,7 +147,7 @@ journalctl -u ai-mail-butler -f
 macOS / Linux：
 
 ```bash
-umount ~/mnt/ai-mail-spool
+umount ~/mnt/ai-mail-butler-data
 ```
 
 若顯示 busy，先關閉正在使用該路徑的終端或編輯器再重試。

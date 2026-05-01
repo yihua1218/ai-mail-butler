@@ -85,6 +85,22 @@ pub async fn list_spool_eml_files(spool_dir: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+async fn resolve_readonly_base_path(base: &Path, logical: &Path) -> PathBuf {
+    let primary = base.join(logical);
+    if fs::try_exists(&primary).await.unwrap_or(false) {
+        return primary;
+    }
+
+    if let Ok(stripped) = logical.strip_prefix("data") {
+        let data_root_path = base.join(stripped);
+        if fs::try_exists(&data_root_path).await.unwrap_or(false) {
+            return data_root_path;
+        }
+    }
+
+    primary
+}
+
 /// List all .eml files with union overlay-first + base-fallback semantics.
 /// In readonly mode the overlay spool is read first; then any files from the
 /// corresponding base spool whose filenames are not already present in the
@@ -109,7 +125,7 @@ pub async fn union_list_eml_files(
             let runtime_pb = Path::new(runtime_spool_dir);
             let overlay_pb = Path::new(overlay_root);
             let logical = runtime_pb.strip_prefix(overlay_pb).unwrap_or(runtime_pb);
-            let base_spool = Path::new(base).join(logical);
+            let base_spool = resolve_readonly_base_path(Path::new(base), logical).await;
             if let Ok(mut entries) = fs::read_dir(&base_spool).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
@@ -139,7 +155,7 @@ async fn union_read_file(config: &Config, path: &Path) -> std::io::Result<Vec<u8
             let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
             if let (Some(base), Ok(rel)) = (&config.readonly_base, path.strip_prefix(overlay_root))
             {
-                let base_path = Path::new(base).join(rel);
+                let base_path = resolve_readonly_base_path(Path::new(base), rel).await;
                 fs::read(&base_path).await
             } else {
                 Err(e)
