@@ -1,5 +1,5 @@
-use sqlx::FromRow;
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 
 #[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
 pub struct User {
@@ -41,21 +41,37 @@ pub struct User {
     pub date_format: String,
 }
 
-fn default_both() -> String { "both".to_string() }
+fn default_both() -> String {
+    "both".to_string()
+}
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
-fn default_utc() -> String { "UTC".to_string() }
+fn default_utc() -> String {
+    "UTC".to_string()
+}
 
-fn default_language() -> String { "en".to_string() }
+fn default_language() -> String {
+    "en".to_string()
+}
 
-fn default_mail_send_method() -> String { "direct_mx".to_string() }
+fn default_mail_send_method() -> String {
+    "direct_mx".to_string()
+}
 
-fn default_rule_label_mode() -> String { "ai_first".to_string() }
+fn default_rule_label_mode() -> String {
+    "ai_first".to_string()
+}
 
-fn default_time_format() -> String { "24h".to_string() }
+fn default_time_format() -> String {
+    "24h".to_string()
+}
 
-fn default_date_format() -> String { "auto".to_string() }
+fn default_date_format() -> String {
+    "auto".to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -69,7 +85,9 @@ mod tests {
             dry_run: bool,
         }
 
-        fn default_true() -> bool { true }
+        fn default_true() -> bool {
+            true
+        }
 
         let json = r#"{"dry_run":false}"#;
         let user: TestUser = serde_json::from_str(json).unwrap();
@@ -164,7 +182,11 @@ pub struct UserAgeVerification {
 pub struct FeatureWish {
     pub id: String,
     pub title: String,
+    pub title_zh: Option<String>,
+    pub title_en: Option<String>,
     pub description: Option<String>,
+    pub description_zh: Option<String>,
+    pub description_en: Option<String>,
     pub created_by: Option<String>,
     pub is_official: bool,
     pub created_at: String,
@@ -178,7 +200,11 @@ pub struct FeatureWish {
 pub struct CreateWishRequest {
     pub email: String,
     pub title: String,
+    pub title_zh: Option<String>,
+    pub title_en: Option<String>,
     pub description: Option<String>,
+    pub description_zh: Option<String>,
+    pub description_en: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

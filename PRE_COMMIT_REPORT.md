@@ -3,7 +3,6 @@
 ## Build & Test Status
 ✅ **Build**: `cargo build` - Success
 ✅ **Tests**: `cargo test` - All 39 tests passed
-✅ **Frontend Build**: `npm run build` - Success
 
 ## Security & Sensitive Data Review
 
@@ -11,58 +10,55 @@
 ✅ **Status**: CLEAR
 - No hardcoded API keys, passwords, or authentication tokens found
 - All sensitive configuration uses environment variables via `std::env::var()`
-- Example: `AI_API_KEY` properly loaded from environment, not hardcoded
+- `.env.example` uses placeholders: `your-api-key`, `your-smtp-user`, `your-client-secret`, etc.
 
-### 2. Private IP Addresses & Personal Domains
-✅ **Status**: CLEAR
+### 2. IP Addresses & Personal Domains
+⚠️ **Fixed**: Replaced real public IP `158.94.208.79` with RFC 5737 TEST-NET-2 documentation IP `198.51.100.42` in:
+  - `docs/EC2-HOST-FIREWALL-AGENT.md` (CLI usage examples)
+  - `src/firewall_agent.rs` (unit test)
 - All example configurations use `example.com` placeholder domain
-- No private IP addresses (192.168.x.x, 10.0.x.x, 172.16.x.x) found
-- No personal/development domain names exposed
-- Localhost references are only in fallback/default logic (appropriate)
+- Private CIDR ranges (10.x, 172.16.x, 192.168.x) used only in whitelist defaults — appropriate
+- No developer-personal IP addresses exposed
 
 ### 3. Absolute File Paths
 ✅ **Status**: CLEAR
 - No absolute developer file paths revealed in code or configs
 - Database paths are relative: `sqlite:data/data.sqlite`
+- Vendored library (`browser-extension/vendor/web-llm/index.js`) uses internal virtual `/home/web_user` path — not a personal path
 
-### 4. Configuration Files Review
-✅ **.env.example** - Uses placeholder credentials
-   - `SMTP_RELAY_USER=your-smtp-user`
-   - `AI_API_KEY=your-api-key`
-   - `M365_CLIENT_SECRET=your-client-secret`
+### 4. Configuration Files Review (English & Placeholder Credentials)
+✅ **docker-compose.yml** - Clean, all English comments, all credentials via `${ENV_VAR:-}` references
+✅ **Dockerfile** - Clean, English-only, no secrets embedded
+✅ **docker-entrypoint.sh** - English-only
+✅ **docker-compose.sshfs.yml** - English-only
+✅ **config/smtp-security-agent.yaml** - English comments, no credentials
+✅ **config/firewall-agent.yaml** - English comments, no credentials
+✅ **.env.example** - English comments, all values are placeholder strings
 
-✅ **docker-compose.yml** - Clean, English comments, environment-based config
-✅ **Dockerfile** - Clean, English comments, no secrets embedded
-✅ **.cargo/config.toml** - Standard Rust configuration
-
-### 5. Workflow Files
+### 5. Workflow Files (.agents/workflows/)
 ✅ **.agents/workflows/pre-commit.md** - English language ✓
 ✅ **.agents/workflows/requirements-review.md** - English language ✓
-✅ **.github/workflows/docker-publish.yml** - English language ✓
+✅ **.github/workflows/docker-publish.yml** - English language, uses `${{ secrets.* }}` refs only ✓
 
 ### 6. License
-✅ **LICENSE** - File exists
-   - License Type: Unlicense (Public Domain)
-   - Status: Matches project description
+✅ **LICENSE** - File exists (The Unlicense / Public Domain)
+   - Matches `## License` section in README.md ✓
 
-### 7. Documentation Translations
-✅ **README.md** - Has zh-TW translation (README.zh-TW.md)
-   - ⚠️ **Fixed**: Added missing `### SMTP Security Agent` section to README.zh-TW.md (zh-TW translation added)
-✅ **TODO.md** - Has zh-TW translation (TODO.zh-TW.md) — in sync (39 lines each)
+### 7. Documentation Translations (zh-TW Sync)
+✅ **README.md** ↔ **README.zh-TW.md** — Both have 21 sections, in sync ✓
+✅ **TODO.md** ↔ **TODO.zh-TW.md** — Both 39 lines, 4 sections, in sync ✓
 
 ### 8. Git-Tracked Files Inventory
 **Total tracked files**: ~110
-- Source files (.rs): 8
-- Frontend files (.tsx, .ts, .json): 40+
-- Documentation (.md): 30+
-- Configuration files: 15+
-- No sensitive files tracked
+- Rust source files (`.rs`): 8
+- Frontend files (`.tsx`, `.ts`, `.json`): 40+
+- Documentation (`.md`): 35+
+- Configuration files: 10+
+- No unintended sensitive files tracked
 
-### 9. Recent Changes Review (This Session)
-✅ **Modified files**:
-- `README.zh-TW.md` - Added missing `### SMTP Security Agent` zh-TW translation section
-
-**No sensitive data detected in any tracked files.**
+### 9. Changes Made This Session
+- `docs/EC2-HOST-FIREWALL-AGENT.md` — Replaced real public IP `158.94.208.79` → `198.51.100.42` (RFC 5737 TEST-NET-2)
+- `src/firewall_agent.rs` — Updated corresponding unit test IP to match
 
 ---
 
@@ -71,12 +67,14 @@
 **✅ PROJECT IS READY FOR GIT COMMIT**
 
 **Summary**:
-- ✅ All 33 tests passing (2 test initializers fixed)
-- ✅ Frontend builds cleanly
-- ✅ Zero sensitive data exposure
+- ✅ `cargo build` passes cleanly
+- ✅ All 39 unit tests pass
+- ✅ One real public IP sanitized to RFC 5737 documentation address
+- ✅ No hardcoded secrets, tokens, or passwords in any tracked file
+- ✅ No personal absolute paths exposed
 - ✅ All configuration files use English comments and placeholder credentials
 - ✅ All `.agents/workflows/` files are in English
-- ✅ LICENSE file present (Unlicense / CC0 1.0)
+- ✅ LICENSE file present (The Unlicense / Public Domain)
 - ✅ README.zh-TW.md and TODO.zh-TW.md synchronized with EN counterparts
 
 **Sanitizations performed**: None required — no sensitive data found.

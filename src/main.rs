@@ -72,7 +72,10 @@ fn sqlite_url_to_path(database_url: &str) -> PathBuf {
 
 fn resolve_overlay_relative_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
-        PathBuf::from(path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("data.sqlite")))
+        PathBuf::from(
+            path.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("data.sqlite")),
+        )
     } else {
         path.to_path_buf()
     }
@@ -86,7 +89,10 @@ async fn resolve_readonly_base_path(base: &Path, relative: &Path) -> PathBuf {
 
     if let Ok(stripped) = relative.strip_prefix("data") {
         let data_root_path = base.join(stripped);
-        if tokio::fs::try_exists(&data_root_path).await.unwrap_or(false) {
+        if tokio::fs::try_exists(&data_root_path)
+            .await
+            .unwrap_or(false)
+        {
             return data_root_path;
         }
     }
@@ -154,7 +160,9 @@ async fn prepare_readonly_overlay_db(config: &mut config::Config) -> Result<()> 
     };
 
     if tokio::fs::try_exists(&base_db_path).await.unwrap_or(false)
-        && !tokio::fs::try_exists(&overlay_db_path).await.unwrap_or(false)
+        && !tokio::fs::try_exists(&overlay_db_path)
+            .await
+            .unwrap_or(false)
     {
         tokio::fs::copy(&base_db_path, &overlay_db_path).await?;
     }
@@ -240,7 +248,8 @@ async fn run_cli_repl(
             }
             "show" => {
                 if let Some(target) = parts.next() {
-                    let path = mail::resolve_cli_target_path(&config, &runtime_spool_dir, target).await?;
+                    let path =
+                        mail::resolve_cli_target_path(&config, &runtime_spool_dir, target).await?;
                     let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
                     for line in content.lines().take(40) {
                         println!("{}", line);
@@ -251,7 +260,8 @@ async fn run_cli_repl(
             }
             "process" => {
                 if let Some(target) = parts.next() {
-                    let path = mail::resolve_cli_target_path(&config, &runtime_spool_dir, target).await?;
+                    let path =
+                        mail::resolve_cli_target_path(&config, &runtime_spool_dir, target).await?;
                     let result = mail::MailService::process_single_spool_file(
                         pool,
                         ai_client,
@@ -292,17 +302,21 @@ async fn run_cli_repl(
 async fn main() -> Result<()> {
     // Initialize environment variables
     dotenvy::dotenv().ok();
-    
+
     // Initialize tracing
     tracing_subscriber::fmt::init();
-    
+
     let args = CliArgs::parse();
 
     info!("Starting AI Mail Butler...");
 
     if args.mode.eq_ignore_ascii_case("firewall-agent") {
-        let fw_config = firewall_agent::FirewallAgentConfig::load(args.firewall_config.as_deref()).await;
-        firewall_agent::FirewallAgent::new(fw_config).await.run().await?;
+        let fw_config =
+            firewall_agent::FirewallAgentConfig::load(args.firewall_config.as_deref()).await;
+        firewall_agent::FirewallAgent::new(fw_config)
+            .await
+            .run()
+            .await?;
         return Ok(());
     }
 
@@ -324,7 +338,10 @@ async fn main() -> Result<()> {
             action,
             ip: args.ip.clone(),
             duration: args.duration.clone(),
-            reason: args.reason.clone().or_else(|| Some("manual CLI request".to_string())),
+            reason: args
+                .reason
+                .clone()
+                .or_else(|| Some("manual CLI request".to_string())),
             source: Some("ai-mail-butler-fw".to_string()),
         };
         let response = firewall_agent::send_request(&socket_path, &request).await?;
@@ -451,7 +468,13 @@ async fn main() -> Result<()> {
     // 4. Start Web Server
     let admin_email = std::env::var("ADMIN_EMAIL").ok();
     let developer_email = config_arc.developer_email.clone();
-    let state = web::AppState { pool, ai_client, admin_email, developer_email, config: config_arc.clone() };
+    let state = web::AppState {
+        pool,
+        ai_client,
+        admin_email,
+        developer_email,
+        config: config_arc.clone(),
+    };
     web::start_server(state.config.server_port, state).await?;
 
     Ok(())

@@ -94,8 +94,8 @@ The same binary can talk to the Unix socket:
 ```bash
 ai-mail-butler --mode fw --fw-action health
 ai-mail-butler --mode fw --fw-action list
-ai-mail-butler --mode fw --fw-action block --ip 158.94.208.79 --duration 1h --reason "AUTH probing"
-ai-mail-butler --mode fw --fw-action unblock --ip 158.94.208.79 --reason "manual review"
+ai-mail-butler --mode fw --fw-action block --ip 198.51.100.42 --duration 1h --reason "AUTH probing"
+ai-mail-butler --mode fw --fw-action unblock --ip 198.51.100.42 --reason "manual review"
 ```
 
 ## Docker Notes

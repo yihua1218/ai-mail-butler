@@ -115,7 +115,7 @@ pub async fn union_list_eml_files(
 
     // base fallback – readonly mode only
     if config.readonly_mode_enabled {
-        let seen: HashSet<String> = files
+        let mut seen: HashSet<String> = files
             .iter()
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
             .collect();
@@ -126,13 +126,32 @@ pub async fn union_list_eml_files(
             let overlay_pb = Path::new(overlay_root);
             let logical = runtime_pb.strip_prefix(overlay_pb).unwrap_or(runtime_pb);
             let base_spool = resolve_readonly_base_path(Path::new(base), logical).await;
+            let processed_dir = runtime_pb.join("processed");
             if let Ok(mut entries) = fs::read_dir(&base_spool).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
                     if path.is_file() && path.extension().map(|e| e == "eml").unwrap_or(false) {
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if !seen.contains(name) {
-                                files.push(path);
+                            if seen.contains(name) || processed_dir.join(name).exists() {
+                                continue;
+                            }
+
+                            let overlay_path = runtime_pb.join(name);
+                            if let Some(parent) = overlay_path.parent() {
+                                let _ = fs::create_dir_all(parent).await;
+                            }
+
+                            match fs::copy(&path, &overlay_path).await {
+                                Ok(_) => {
+                                    seen.insert(name.to_string());
+                                    files.push(overlay_path);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to copy remote debug spool file {:?} into overlay {:?}: {}",
+                                        path, overlay_path, e
+                                    );
+                                }
                             }
                         }
                     }
@@ -452,6 +471,19 @@ fn extract_pure_email(mailbox: &str) -> String {
         }
     }
     mailbox.to_string()
+}
+
+async fn move_processed_file(path: &Path, dest: &str) -> std::io::Result<()> {
+    match fs::rename(path, dest).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(18) => {
+            // EXDEV: remote debug can read from SSHFS and archive into a local overlay.
+            // rename(2) cannot cross filesystems, so fall back to copy + remove.
+            fs::copy(path, dest).await?;
+            fs::remove_file(path).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn build_login_url(config: &Config, token: &str) -> String {
@@ -1516,9 +1548,8 @@ impl MailService {
         if !options.keep_files {
             if let Some(fname) = path.file_name() {
                 let dest = format!("{}/{}", runtime_processed_dir, fname.to_string_lossy());
-                if let Err(e) = fs::rename(&path, &dest).await {
+                if let Err(e) = move_processed_file(&path, &dest).await {
                     error!("Failed to move {:?} to processed/: {}", path, e);
-                    let _ = fs::remove_file(&path).await;
                 } else {
                     processed_path = Some(dest);
                 }
@@ -1983,12 +2014,12 @@ impl MailService {
                                                 processed_dir,
                                                 fname.to_string_lossy()
                                             );
-                                            if let Err(e) = fs::rename(&path, &dest).await {
+                                            if let Err(e) = move_processed_file(&path, &dest).await
+                                            {
                                                 error!(
                                                     "Failed to move {:?} to processed/: {}",
                                                     path, e
                                                 );
-                                                let _ = fs::remove_file(&path).await;
                                             }
                                         }
                                         continue;
@@ -2418,9 +2449,8 @@ impl MailService {
                     // Move processed file into processed/ so it's preserved for inspection
                     if let Some(fname) = path.file_name() {
                         let dest = format!("{}/{}", processed_dir, fname.to_string_lossy());
-                        if let Err(e) = fs::rename(&path, &dest).await {
+                        if let Err(e) = move_processed_file(&path, &dest).await {
                             error!("Failed to move {:?} to processed/: {}", path, e);
-                            let _ = fs::remove_file(&path).await;
                         }
                     }
                 }

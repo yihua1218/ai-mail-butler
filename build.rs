@@ -56,7 +56,11 @@ fn main() {
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            if linux.is_empty() { "unknown".to_string() } else { linux }
+            if linux.is_empty() {
+                "unknown".to_string()
+            } else {
+                linux
+            }
         }
     };
 
@@ -88,7 +92,10 @@ fn main() {
     let total_disk = {
         // Try GNU df -BG (Linux / CI)
         let gnu = Command::new("sh")
-            .args(&["-c", "df -BG / 2>/dev/null | awk 'NR==2{gsub(/G/,\" GiB\",$2); print $2}'"])
+            .args(&[
+                "-c",
+                "df -BG / 2>/dev/null | awk 'NR==2{gsub(/G/,\" GiB\",$2); print $2}'",
+            ])
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())

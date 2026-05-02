@@ -4344,7 +4344,11 @@ async fn run_data_retention_purge(State(state): State<AppState>) -> Json<serde_j
 struct WishRow {
     id: String,
     title: String,
+    title_zh: Option<String>,
+    title_en: Option<String>,
     description: Option<String>,
+    description_zh: Option<String>,
+    description_en: Option<String>,
     created_by: Option<String>,
     is_official: bool,
     created_at: String,
@@ -4378,7 +4382,11 @@ async fn get_wishes(
         SELECT
             w.id         AS id,
             w.title      AS title,
+            w.title_zh   AS title_zh,
+            w.title_en   AS title_en,
             w.description AS description,
+            w.description_zh AS description_zh,
+            w.description_en AS description_en,
             w.created_by  AS created_by,
             w.is_official AS is_official,
             w.created_at  AS created_at,
@@ -4413,7 +4421,11 @@ async fn get_wishes(
                     user_has_voted: voted_ids.contains(&r.id),
                     id: r.id,
                     title: r.title,
+                    title_zh: r.title_zh,
+                    title_en: r.title_en,
                     description: r.description,
+                    description_zh: r.description_zh,
+                    description_en: r.description_en,
                     created_by: r.created_by,
                     is_official: r.is_official,
                     created_at: r.created_at,
@@ -4447,8 +4459,28 @@ async fn post_create_wish(
         )
             .into_response();
     }
+    let title_zh = body
+        .title_zh
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let title_en = body
+        .title_en
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
     let description = body
         .description
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let description_zh = body
+        .description_zh
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let description_en = body
+        .description_en
         .as_deref()
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty());
@@ -4471,11 +4503,15 @@ async fn post_create_wish(
 
     let id = uuid::Uuid::new_v4().to_string();
     let result = sqlx::query(
-        "INSERT INTO feature_wishes (id, title, description, created_by, is_official) VALUES (?, ?, ?, ?, 0)"
+        "INSERT INTO feature_wishes (id, title, title_zh, title_en, description, description_zh, description_en, created_by, is_official) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)"
     )
     .bind(&id)
     .bind(&title)
+    .bind(&title_zh)
+    .bind(&title_en)
     .bind(&description)
+    .bind(&description_zh)
+    .bind(&description_en)
     .bind(&user_id)
     .execute(&state.pool)
     .await;

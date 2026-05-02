@@ -279,7 +279,10 @@ impl FirewallAgent {
         if let Some(parent) = self.config.socket_path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        if fs::try_exists(&self.config.socket_path).await.unwrap_or(false) {
+        if fs::try_exists(&self.config.socket_path)
+            .await
+            .unwrap_or(false)
+        {
             fs::remove_file(&self.config.socket_path).await?;
         }
 
@@ -386,7 +389,10 @@ impl FirewallAgent {
     async fn block_ip(&self, request: FirewallRequest) -> FirewallResponse {
         let ip_raw = request.ip.clone().unwrap_or_default();
         let reason = request.reason.clone().unwrap_or_default();
-        let source = request.source.clone().unwrap_or_else(|| "unknown".to_string());
+        let source = request
+            .source
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let duration_raw = request
             .duration
             .clone()
@@ -402,11 +408,16 @@ impl FirewallAgent {
                 .await;
         }
         if self.is_whitelisted(ip) {
-            return self.rejected(request, "ip is whitelisted".to_string()).await;
+            return self
+                .rejected(request, "ip is whitelisted".to_string())
+                .await;
         }
         if !self.config.allow_private_ip_blocking && is_private_or_local(ip) {
             return self
-                .rejected(request, "private/internal IP blocking is disabled".to_string())
+                .rejected(
+                    request,
+                    "private/internal IP blocking is disabled".to_string(),
+                )
                 .await;
         }
 
@@ -414,10 +425,12 @@ impl FirewallAgent {
             Some(v) => v,
             None => return self.rejected(request, "invalid duration".to_string()).await,
         };
-        let max_duration = parse_duration(&self.config.max_duration)
-            .unwrap_or_else(|| ChronoDuration::hours(24));
+        let max_duration =
+            parse_duration(&self.config.max_duration).unwrap_or_else(|| ChronoDuration::hours(24));
         if duration > max_duration {
-            return self.rejected(request, "duration exceeds max_duration".to_string()).await;
+            return self
+                .rejected(request, "duration exceeds max_duration".to_string())
+                .await;
         }
 
         let expires_at = Utc::now() + duration;
@@ -435,7 +448,17 @@ impl FirewallAgent {
                     state.blocked.insert(ip, record);
                     let _ = save_state(&self.config.state_path, &state).await;
                 }
-                self.audit("firewall_block", Some(ip), Some(duration_raw), reason, Some(source), Some(backend), "success", Some(expires_at)).await;
+                self.audit(
+                    "firewall_block",
+                    Some(ip),
+                    Some(duration_raw),
+                    reason,
+                    Some(source),
+                    Some(backend),
+                    "success",
+                    Some(expires_at),
+                )
+                .await;
                 FirewallResponse {
                     status: "ok".to_string(),
                     ip: Some(ip.to_string()),
@@ -447,7 +470,17 @@ impl FirewallAgent {
                 }
             }
             Err(e) => {
-                self.audit("firewall_block_failed", Some(ip), Some(duration_raw), e.to_string(), Some(source), None, "error", None).await;
+                self.audit(
+                    "firewall_block_failed",
+                    Some(ip),
+                    Some(duration_raw),
+                    e.to_string(),
+                    Some(source),
+                    None,
+                    "error",
+                    None,
+                )
+                .await;
                 FirewallResponse {
                     status: "error".to_string(),
                     ip: Some(ip.to_string()),
@@ -483,7 +516,17 @@ impl FirewallAgent {
             backend
         };
         let _ = self.apply_unblock(ip, backend).await;
-        self.audit("firewall_unblock", Some(ip), None, reason, request.source, Some(backend), "success", None).await;
+        self.audit(
+            "firewall_unblock",
+            Some(ip),
+            None,
+            reason,
+            request.source,
+            Some(backend),
+            "success",
+            None,
+        )
+        .await;
         FirewallResponse {
             status: "ok".to_string(),
             ip: Some(ip.to_string()),
@@ -497,7 +540,17 @@ impl FirewallAgent {
 
     async fn rejected(&self, request: FirewallRequest, reason: String) -> FirewallResponse {
         let ip = request.ip.as_deref().and_then(|raw| raw.parse().ok());
-        self.audit("firewall_block_rejected", ip, request.duration, reason.clone(), request.source, None, "rejected", None).await;
+        self.audit(
+            "firewall_block_rejected",
+            ip,
+            request.duration,
+            reason.clone(),
+            request.source,
+            None,
+            "rejected",
+            None,
+        )
+        .await;
         FirewallResponse {
             status: "rejected".to_string(),
             ip: request.ip,
@@ -648,7 +701,11 @@ impl FirewallAgent {
     }
 
     async fn apply_iptables_rule(&self, chain: &str, ip: IpAddr) -> Result<()> {
-        let program = if ip.is_ipv4() { "iptables" } else { "ip6tables" };
+        let program = if ip.is_ipv4() {
+            "iptables"
+        } else {
+            "ip6tables"
+        };
         for port in &self.config.smtp_ports {
             run_command(
                 program,
@@ -691,14 +748,20 @@ impl FirewallAgent {
                 )
                 .await
             }
-            HostFirewallBackend::IptablesDockerUser => self.delete_iptables_rule("DOCKER-USER", ip).await,
+            HostFirewallBackend::IptablesDockerUser => {
+                self.delete_iptables_rule("DOCKER-USER", ip).await
+            }
             HostFirewallBackend::IptablesInput => self.delete_iptables_rule("INPUT", ip).await,
             HostFirewallBackend::Disabled => Ok(()),
         }
     }
 
     async fn delete_iptables_rule(&self, chain: &str, ip: IpAddr) -> Result<()> {
-        let program = if ip.is_ipv4() { "iptables" } else { "ip6tables" };
+        let program = if ip.is_ipv4() {
+            "iptables"
+        } else {
+            "ip6tables"
+        };
         for port in &self.config.smtp_ports {
             let _ = run_command(
                 program,
@@ -767,7 +830,17 @@ impl FirewallAgent {
         for record in expired {
             let backend = HostFirewallBackend::parse(&record.backend);
             let _ = self.apply_unblock(record.ip, backend).await;
-            self.audit("firewall_block_expired", Some(record.ip), None, record.reason, Some(record.source), Some(backend), "success", None).await;
+            self.audit(
+                "firewall_block_expired",
+                Some(record.ip),
+                None,
+                record.reason,
+                Some(record.source),
+                Some(backend),
+                "success",
+                None,
+            )
+            .await;
         }
     }
 
@@ -803,7 +876,10 @@ impl FirewallAgent {
     }
 }
 
-pub async fn send_request(socket_path: &Path, request: &FirewallRequest) -> Result<FirewallResponse> {
+pub async fn send_request(
+    socket_path: &Path,
+    request: &FirewallRequest,
+) -> Result<FirewallResponse> {
     let mut stream = UnixStream::connect(socket_path).await?;
     stream
         .write_all(format!("{}\n", serde_json::to_string(request)?).as_bytes())
@@ -881,7 +957,12 @@ async fn append_jsonl(path: &Path, line: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent).await;
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path).await {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+    {
         let _ = file.write_all(line.as_bytes()).await;
         let _ = file.write_all(b"\n").await;
     }
@@ -913,7 +994,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_cidr_and_hostnames() {
-        assert!(validate_ip("158.94.208.79").is_ok());
+        assert!(validate_ip("198.51.100.42").is_ok());
         assert!(validate_ip("10.0.0.0/8").is_err());
         assert!(validate_ip("mail.example.com").is_err());
     }

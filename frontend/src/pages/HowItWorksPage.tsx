@@ -43,7 +43,11 @@ const { TextArea } = Input;
 interface FeatureWish {
   id: string;
   title: string;
+  title_zh?: string;
+  title_en?: string;
   description?: string;
+  description_zh?: string;
+  description_en?: string;
   created_by?: string;
   is_official: boolean;
   created_at: string;
@@ -248,6 +252,14 @@ const HowItWorksPage: React.FC = () => {
   const [form] = Form.useForm();
   const styleInjected = useRef(false);
 
+  const localizedWishTitle = (wish: FeatureWish) => {
+    return (isZh ? wish.title_zh : wish.title_en) || wish.title;
+  };
+
+  const localizedWishDescription = (wish: FeatureWish) => {
+    return (isZh ? wish.description_zh : wish.description_en) || wish.description;
+  };
+
   // Inject CSS animations once.
   useEffect(() => {
     if (styleInjected.current) return;
@@ -311,7 +323,11 @@ const HowItWorksPage: React.FC = () => {
       await axios.post('/api/wishes', {
         email: user.email,
         title: values.title.trim(),
+        title_zh: isZh ? values.title.trim() : undefined,
+        title_en: isZh ? undefined : values.title.trim(),
         description: values.description?.trim() || undefined,
+        description_zh: isZh ? values.description?.trim() || undefined : undefined,
+        description_en: isZh ? undefined : values.description?.trim() || undefined,
       });
       message.success(isZh ? '已送出功能建議！' : 'Feature suggestion submitted!');
       form.resetFields();
@@ -691,6 +707,8 @@ const HowItWorksPage: React.FC = () => {
           locale={{ emptyText: tx.noWishes }}
           renderItem={(wish) => {
             const isVoting = votingId === wish.id;
+            const wishTitle = localizedWishTitle(wish);
+            const wishDescription = localizedWishDescription(wish);
             return (
               <List.Item
                 key={wish.id}
@@ -722,7 +740,7 @@ const HowItWorksPage: React.FC = () => {
                   title={
                     <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <Text strong style={{ fontSize: 14 }}>
-                        {wish.title}
+                        {wishTitle}
                       </Text>
                       {wish.is_official ? (
                         <Badge
@@ -738,9 +756,9 @@ const HowItWorksPage: React.FC = () => {
                     </span>
                   }
                   description={
-                    wish.description ? (
+                    wishDescription ? (
                       <Text type="secondary" style={{ fontSize: 13 }}>
-                        {wish.description}
+                        {wishDescription}
                       </Text>
                     ) : undefined
                   }
