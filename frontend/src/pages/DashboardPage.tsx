@@ -26,6 +26,129 @@ import { GUEST_NAME_KEY } from '../Chat';
 
 const { Title, Paragraph } = Typography;
 
+type EmailRow = {
+  id: string;
+  subject?: string;
+  preview?: string;
+  stored_content?: string;
+  status: string;
+  matched_rule_label?: string;
+  received_at?: string;
+};
+
+const DANGEROUS_HTML_TAGS = new Set([
+  'script',
+  'iframe',
+  'object',
+  'embed',
+  'applet',
+  'base',
+  'form',
+  'input',
+  'button',
+  'textarea',
+  'select',
+  'option',
+  'meta',
+  'link',
+]);
+
+const EMAIL_HTML_CSP = [
+  "default-src 'none'",
+  "script-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-src 'none'",
+  "connect-src 'none'",
+  "img-src data: cid: https: http:",
+  "font-src data:",
+  "style-src 'unsafe-inline'",
+].join('; ');
+
+const isLikelyHtmlEmail = (content: string) => /<\/?[a-z][\s\S]*>/i.test(content);
+
+const sanitizeCssValue = (value: string) => (
+  value
+    .replace(/expression\s*\([^)]*\)/gi, '')
+    .replace(/url\s*\(\s*(['"]?)\s*javascript:[^)]+\)/gi, '')
+);
+
+const isSafeUrl = (value: string, allowDataImage = false) => {
+  const trimmed = value
+    .trim()
+    .split('')
+    .filter((char) => {
+      const code = char.charCodeAt(0);
+      return code > 31 && code !== 127 && !/\s/.test(char);
+    })
+    .join('');
+  if (!trimmed) return true;
+  if (/^(https?:|mailto:|tel:|cid:|#|\/)/i.test(trimmed)) return true;
+  return allowDataImage && /^data:image\/(?:png|gif|jpe?g|webp);/i.test(trimmed);
+};
+
+const sanitizeEmailHtml = (html: string) => {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  doc.querySelectorAll('*').forEach((node) => {
+    const tagName = node.tagName.toLowerCase();
+    if (DANGEROUS_HTML_TAGS.has(tagName)) {
+      node.remove();
+      return;
+    }
+
+    Array.from(node.attributes).forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      const value = attr.value;
+
+      if (name.startsWith('on') || name === 'srcdoc') {
+        node.removeAttribute(attr.name);
+        return;
+      }
+
+      if (name === 'style') {
+        node.setAttribute(attr.name, sanitizeCssValue(value));
+        return;
+      }
+
+      if (['href', 'action', 'formaction', 'xlink:href'].includes(name) && !isSafeUrl(value)) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+
+      if (['src', 'poster'].includes(name) && !isSafeUrl(value, true)) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+    });
+
+    if (tagName === 'a') {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer nofollow');
+    }
+  });
+
+  return doc.body.innerHTML;
+};
+
+const buildSafeEmailSrcDoc = (html: string) => `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="${EMAIL_HTML_CSP}" />
+    <style>
+      html, body { margin: 0; padding: 0; background: #fff; color: #1d1d1f; font-family: Georgia, 'Times New Roman', serif; line-height: 1.55; }
+      body { padding: 16px; overflow-wrap: anywhere; }
+      img { max-width: 100%; height: auto; }
+      table { max-width: 100%; border-collapse: collapse; }
+      a { color: #0071e3; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>${sanitizeEmailHtml(html)}</body>
+</html>`;
+
 const DashboardPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
@@ -65,7 +188,7 @@ const DashboardPage: React.FC = () => {
     }).format(date);
   };
 
-  const [personalEmails, setPersonalEmails] = useState<any[]>([]);
+  const [personalEmails, setPersonalEmails] = useState<EmailRow[]>([]);
   const [globalStats, setGlobalStats] = useState<any>(null);
   const [personalStats, setPersonalStats] = useState<any>(null);
   const [mailErrors, setMailErrors] = useState<any[]>([]);
@@ -95,6 +218,7 @@ const DashboardPage: React.FC = () => {
   const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
   const [cachePurgeTarget, setCachePurgeTarget] = useState<string>('frontend');
   const [purgingCache, setPurgingCache] = useState(false);
+  const [viewingEmail, setViewingEmail] = useState<EmailRow | null>(null);
 
   const loadFeedback = async () => {
     if (!user?.email) return;
@@ -199,7 +323,14 @@ const DashboardPage: React.FC = () => {
 
   const filteredEmails = statusFilter === 'all'
     ? personalEmails
-    : personalEmails.filter((e: any) => e.status === statusFilter);
+    : personalEmails.filter((e) => e.status === statusFilter);
+
+  const emailTablePagination = {
+    defaultPageSize: 10,
+    showSizeChanger: true,
+    pageSizeOptions: [5, 10, 20, 50, 100],
+    showTotal: (total: number, range: [number, number]) => t('pagination_total', { from: range[0], to: range[1], total }),
+  };
 
   const columns = [
     { title: t('col_subject'), dataIndex: 'subject', key: 'subject' },
@@ -236,6 +367,9 @@ const DashboardPage: React.FC = () => {
       width: 320,
       render: (_: unknown, record: any) => (
         <Space wrap>
+          <Button size="small" onClick={() => setViewingEmail(record)}>
+            {t('view_email')}
+          </Button>
           <Button size="small" onClick={() => navigate(`/finance?emailId=${encodeURIComponent(record.id)}&subject=${encodeURIComponent(record.subject || '')}`)}>
             {t('view_finance')}
           </Button>
@@ -798,6 +932,72 @@ const DashboardPage: React.FC = () => {
     </Modal>
   );
 
+  const EmailViewerModal = () => {
+    const content = viewingEmail?.stored_content || viewingEmail?.preview || '';
+    const isHtml = !!content && isLikelyHtmlEmail(content);
+
+    return (
+      <Modal
+        title={viewingEmail?.subject || t('email_no_subject')}
+        open={!!viewingEmail}
+        onCancel={() => setViewingEmail(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setViewingEmail(null)}>
+            {t('close')}
+          </Button>,
+        ]}
+        width={900}
+      >
+        {viewingEmail && (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Space wrap>
+              <Tag>{t('email_received_at')}: {formatInUserTimezone(viewingEmail.received_at)}</Tag>
+              <Tag color={isHtml ? 'blue' : 'green'}>{isHtml ? t('email_format_html') : t('email_format_plain')}</Tag>
+              <Tag color="gold">{t('email_safe_view')}</Tag>
+            </Space>
+            {content ? (
+              isHtml ? (
+                <iframe
+                  title={t('email_content')}
+                  sandbox=""
+                  referrerPolicy="no-referrer"
+                  srcDoc={buildSafeEmailSrcDoc(content)}
+                  style={{
+                    width: '100%',
+                    minHeight: 520,
+                    border: '1px solid #f0f0f0',
+                    borderRadius: 12,
+                    background: '#fff',
+                  }}
+                />
+              ) : (
+                <pre style={{
+                  minHeight: 320,
+                  maxHeight: '65vh',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  margin: 0,
+                  padding: 16,
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 12,
+                  background: '#fbfbfd',
+                  color: '#1d1d1f',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                  fontSize: 13,
+                }}>
+                  {content}
+                </pre>
+              )
+            ) : (
+              <Alert message={t('email_no_content')} type="info" showIcon />
+            )}
+          </Space>
+        )}
+      </Modal>
+    );
+  };
+
   const EmailTableWithFilter = () => (
     <Card bordered={false} title={t('your_emails')}>
       <Space direction="vertical" style={{ width: '100%', marginBottom: 12 }}>
@@ -846,7 +1046,7 @@ const DashboardPage: React.FC = () => {
         rowKey="id"
         columns={columns}
         scroll={{ x: 'max-content' }}
-        pagination={{ pageSize: 5 }}
+        pagination={emailTablePagination}
         rowSelection={{
           selectedRowKeys: selectedEmailRowKeys,
           onChange: (keys) => setSelectedEmailRowKeys(keys),
@@ -923,6 +1123,7 @@ const DashboardPage: React.FC = () => {
 
         <ResultsModal />
         <DraftEditorModal />
+        <EmailViewerModal />
       </div>
     );
   }
@@ -964,6 +1165,7 @@ const DashboardPage: React.FC = () => {
 
         <ResultsModal />
         <DraftEditorModal />
+        <EmailViewerModal />
       </div>
     );
   }

@@ -1439,7 +1439,7 @@ async fn get_dashboard(
                 .unwrap_or(None);
 
             if let Some((uid,)) = user_id {
-                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
 
