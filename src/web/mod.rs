@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{Method, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
@@ -1347,7 +1347,12 @@ fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<Pat
     }
 
     let mut candidates = vec![PathBuf::from(trimmed)];
+    candidates.push(resolve_runtime_mail_path(state, trimmed));
     if let Some(file_name) = PathBuf::from(trimmed).file_name().and_then(|s| s.to_str()) {
+        candidates.push(resolve_runtime_mail_path(
+            state,
+            &format!("data/mail_spool/unknown_sender/{}", file_name),
+        ));
         candidates.push(resolve_runtime_mail_path(
             state,
             &format!("data/mail_spool/processed/{}", file_name),
@@ -1359,6 +1364,105 @@ fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<Pat
     }
 
     candidates.into_iter().find(|p| p.is_file())
+}
+
+async fn find_mail_error_source_path(state: &AppState, context: &str) -> Option<PathBuf> {
+    if let Some(path) = resolve_mail_error_source_path(state, context) {
+        return Some(path);
+    }
+
+    let file_name = PathBuf::from(context)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)?;
+    let file_stem = PathBuf::from(&file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    let root = resolve_runtime_mail_path(state, "data/mail_spool");
+    let mut stack = vec![root];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = fs::read_dir(&dir).await else {
+            continue;
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name == file_name {
+                return Some(path);
+            }
+            if name == "raw.eml" {
+                if let (Some(stem), Some(parent_name)) = (
+                    file_stem.as_deref(),
+                    path.parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str()),
+                ) {
+                    if parent_name == stem {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn mail_header_value(parsed: &mailparse::ParsedMail<'_>, key: &str) -> Option<String> {
+    parsed
+        .headers
+        .iter()
+        .find(|h| h.get_key().eq_ignore_ascii_case(key))
+        .map(|h| h.get_value())
+}
+
+fn collect_mail_body_parts(
+    part: &mailparse::ParsedMail<'_>,
+    plain: &mut Vec<String>,
+    html: &mut Vec<String>,
+) {
+    if part.subparts.is_empty() {
+        let body = part.get_body().unwrap_or_default();
+        if body.trim().is_empty() {
+            return;
+        }
+
+        let mime = part.ctype.mimetype.to_ascii_lowercase();
+        if mime == "text/html" {
+            html.push(body);
+        } else if mime == "text/plain" || mime.starts_with("text/") {
+            plain.push(body);
+        }
+        return;
+    }
+
+    for subpart in &part.subparts {
+        collect_mail_body_parts(subpart, plain, html);
+    }
+}
+
+fn render_mail_content(parsed: &mailparse::ParsedMail<'_>) -> (String, String) {
+    let mut plain = Vec::new();
+    let mut html = Vec::new();
+    collect_mail_body_parts(parsed, &mut plain, &mut html);
+
+    if !html.is_empty() {
+        ("html".to_string(), html.join("\n\n"))
+    } else if !plain.is_empty() {
+        ("plain".to_string(), plain.join("\n\n"))
+    } else {
+        ("plain".to_string(), parsed.get_body().unwrap_or_default())
+    }
 }
 
 async fn get_me(
@@ -3095,7 +3199,7 @@ async fn post_retry_mail_error(
         );
     };
 
-    let Some(source_path) = resolve_mail_error_source_path(&state, &context_path) else {
+    let Some(source_path) = find_mail_error_source_path(&state, &context_path).await else {
         return Json(
             serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }),
         );
@@ -3139,6 +3243,84 @@ async fn post_retry_mail_error(
         "message": "Retry queued. The spool worker will re-check Delivered-To / X-Original-To and candidate owner headers.",
         "queued_path": retry_path.to_string_lossy(),
     }))
+}
+
+async fn get_mail_error_message(
+    State(state): State<AppState>,
+    AxumPath(error_id): AxumPath<i64>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let requester_email = query.email.unwrap_or_default().trim().to_lowercase();
+    if requester_email.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    }
+
+    let requester_user_id = get_user_id_by_email(&state.pool, &requester_email).await;
+    let is_privileged = is_admin_or_developer(&state, &requester_email);
+
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT error_type, context, user_id, message FROM mail_errors WHERE id = ?",
+    )
+    .bind(error_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some((_error_type, context, error_user_id, _message)) = row else {
+        return Json(serde_json::json!({ "status": "error", "message": "Error log not found" }));
+    };
+
+    if !is_privileged {
+        let Some(uid) = requester_user_id.as_ref() else {
+            return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+        };
+        if error_user_id.as_deref() != Some(uid.as_str()) {
+            return Json(serde_json::json!({ "status": "error", "message": "Unauthorized" }));
+        }
+    }
+
+    let Some(context_path) = context else {
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Missing log context path" }),
+        );
+    };
+
+    let Some(source_path) = find_mail_error_source_path(&state, &context_path).await else {
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }),
+        );
+    };
+
+    let bytes = match fs::read(&source_path).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to read .eml file: {}", e)
+            }));
+        }
+    };
+
+    match mailparse::parse_mail(&bytes) {
+        Ok(parsed) => {
+            let (content_format, content) = render_mail_content(&parsed);
+            Json(serde_json::json!({
+                "status": "success",
+                "path": source_path.to_string_lossy(),
+                "subject": mail_header_value(&parsed, "Subject").unwrap_or_else(|| "No Subject".to_string()),
+                "from": mail_header_value(&parsed, "From").unwrap_or_default(),
+                "to": mail_header_value(&parsed, "To").unwrap_or_default(),
+                "received_at": mail_header_value(&parsed, "Date").unwrap_or_default(),
+                "content_format": content_format,
+                "content": content,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to parse .eml file: {}", e),
+            "path": source_path.to_string_lossy(),
+        })),
+    }
 }
 
 async fn get_rules(
@@ -4771,6 +4953,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
+        .route("/errors/:id/message", get(get_mail_error_message))
         .route("/errors/retry", post(post_retry_mail_error))
         .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))

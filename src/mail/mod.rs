@@ -222,10 +222,10 @@ pub async fn requeue_unknown_sender_errors(pool: &SqlitePool, spool_dir: &str) -
 
     let mut copied = 0_usize;
     for context in rows {
-        let source = PathBuf::from(context);
-        if !source.exists() {
-            continue;
-        }
+        let source = match resolve_mail_artifact_path(spool_dir, &context).await {
+            Some(path) => path,
+            None => continue,
+        };
         let file_name = source
             .file_name()
             .and_then(|s| s.to_str())
@@ -238,6 +238,29 @@ pub async fn requeue_unknown_sender_errors(pool: &SqlitePool, spool_dir: &str) -
     }
 
     Ok(copied)
+}
+
+async fn resolve_mail_artifact_path(spool_dir: &str, context: &str) -> Option<PathBuf> {
+    let trimmed = context.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut candidates = vec![PathBuf::from(trimmed)];
+    if let Some(file_name) = PathBuf::from(trimmed).file_name().and_then(|s| s.to_str()) {
+        let spool = Path::new(spool_dir);
+        candidates.push(spool.join("unknown_sender").join(file_name));
+        candidates.push(spool.join("processed").join(file_name));
+        candidates.push(spool.join(file_name));
+    }
+
+    for candidate in candidates {
+        if fs::try_exists(&candidate).await.unwrap_or(false) && candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 fn first_email_address(raw: &str) -> Option<String> {
@@ -974,8 +997,91 @@ async fn log_mail_event(
     .await;
 }
 
+async fn save_smtp_session_log(spool_dir: &str, session_id: &str, session_log: &str) {
+    let log_dir = Path::new(spool_dir).join("session_logs");
+    if let Err(e) = fs::create_dir_all(&log_dir).await {
+        error!(
+            "[SMTP {}] Failed to create session log dir: {}",
+            session_id, e
+        );
+        return;
+    }
+
+    let log_path = log_dir.join(format!("session_{}.log", session_id));
+    match fs::write(&log_path, session_log.as_bytes()).await {
+        Ok(_) => info!(
+            "[SMTP {}] Session log saved -> {}",
+            session_id,
+            log_path.display()
+        ),
+        Err(e) => error!("[SMTP {}] Failed to save session log: {}", session_id, e),
+    }
+}
+
+async fn organize_legacy_session_logs(spool_dir: &str) {
+    let log_dir = Path::new(spool_dir).join("session_logs");
+    if fs::create_dir_all(&log_dir).await.is_err() {
+        return;
+    }
+
+    let Ok(mut entries) = fs::read_dir(spool_dir).await else {
+        return;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !path.is_file() || !file_name.starts_with("session_") || !file_name.ends_with(".log") {
+            continue;
+        }
+
+        let dest = log_dir.join(file_name);
+        if let Err(e) = move_processed_file(&path, &dest.to_string_lossy()).await {
+            warn!(
+                "Failed to organize legacy SMTP session log {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+}
+
+async fn archive_unknown_sender_mail(
+    spool_dir: &str,
+    source_path: &Path,
+    contents: &[u8],
+) -> Option<PathBuf> {
+    let archive_dir = Path::new(spool_dir).join("unknown_sender");
+    if let Err(e) = fs::create_dir_all(&archive_dir).await {
+        error!("Failed to create unknown_sender archive dir: {}", e);
+        return None;
+    }
+
+    let file_name = source_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("mail_{}.eml", Utc::now().timestamp_millis()));
+    let archive_path = archive_dir.join(file_name);
+
+    match fs::write(&archive_path, contents).await {
+        Ok(_) => Some(archive_path),
+        Err(e) => {
+            error!(
+                "Failed to archive unknown_sender mail {:?} to {}: {}",
+                source_path,
+                archive_path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
 /// Handle a single inbound SMTP connection.
-/// Saves a session transcript to `<spool_dir>/session_<id>.log` and the
+/// Saves a session transcript to `<spool_dir>/session_logs/session_<id>.log` and the
 /// received email body to `<spool_dir>/mail_<id>.eml`.
 async fn handle_smtp_connection(
     stream: TcpStream,
@@ -1008,8 +1114,7 @@ async fn handle_smtp_connection(
             session_log.push_str(&format!("S: {}", r));
             if let Err(e) = writer.write_all(r.as_bytes()).await {
                 error!("[SMTP {}] Write error: {}", session_id, e);
-                let log_path = format!("{}/session_{}.log", spool_dir, session_id);
-                let _ = fs::write(&log_path, session_log.as_bytes()).await;
+                save_smtp_session_log(&spool_dir, &session_id, &session_log).await;
                 return;
             }
         }};
@@ -1019,8 +1124,7 @@ async fn handle_smtp_connection(
         security_agent.observe_connection(peer_addr).await
     {
         send!(response);
-        let log_path = format!("{}/session_{}.log", spool_dir, session_id);
-        let _ = fs::write(&log_path, session_log.as_bytes()).await;
+        save_smtp_session_log(&spool_dir, &session_id, &session_log).await;
         return;
     }
 
@@ -1123,11 +1227,7 @@ async fn handle_smtp_connection(
     }
 
     // Always persist the session transcript
-    let log_path = format!("{}/session_{}.log", spool_dir, session_id);
-    match fs::write(&log_path, session_log.as_bytes()).await {
-        Ok(_) => info!("[SMTP {}] Session log saved → {}", session_id, log_path),
-        Err(e) => error!("[SMTP {}] Failed to save session log: {}", session_id, e),
-    }
+    save_smtp_session_log(&spool_dir, &session_id, &session_log).await;
 }
 
 impl MailService {
@@ -1209,7 +1309,7 @@ impl MailService {
         pool: &SqlitePool,
         ai_client: &AiClient,
         config: Arc<Config>,
-        _spool_dir: &str,
+        spool_dir: &str,
         processed_dir: &str,
         path: PathBuf,
         options: &CliProcessOptions,
@@ -1533,15 +1633,12 @@ impl MailService {
                 from_clean, to_clean, owner_candidates
             );
             warn!("{}", warn_msg);
-            log_mail_event(
-                pool,
-                "WARN",
-                "unknown_sender",
-                &warn_msg,
-                path.to_str(),
-                None,
-            )
-            .await;
+            let archived_path = archive_unknown_sender_mail(spool_dir, &path, &contents).await;
+            let context = archived_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .or_else(|| path.to_str());
+            log_mail_event(pool, "WARN", "unknown_sender", &warn_msg, context, None).await;
         }
 
         let mut processed_path = None;
@@ -1573,6 +1670,7 @@ impl MailService {
         let processed_dir = resolve_runtime_dir(&config, logical_processed_dir);
         fs::create_dir_all(&spool_dir).await?;
         fs::create_dir_all(&processed_dir).await?;
+        organize_legacy_session_logs(&spool_dir).await;
 
         let listener = TcpListener::bind("0.0.0.0:25").await?;
         let security_agent = SmtpSecurityAgent::new().await;
@@ -2432,12 +2530,19 @@ impl MailService {
                                         from_clean, to_clean, owner_candidates
                                     );
                                     warn!("{}", warn_msg);
+                                    let archived_path =
+                                        archive_unknown_sender_mail(spool_dir, &path, &contents)
+                                            .await;
+                                    let context = archived_path
+                                        .as_ref()
+                                        .and_then(|p| p.to_str())
+                                        .or_else(|| path.to_str());
                                     log_mail_event(
                                         &pool,
                                         "WARN",
                                         "unknown_sender",
                                         &warn_msg,
-                                        path.to_str(),
+                                        context,
                                         None,
                                     )
                                     .await;

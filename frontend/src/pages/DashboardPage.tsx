@@ -205,6 +205,7 @@ const DashboardPage: React.FC = () => {
   const [selectedEmailRowKeys, setSelectedEmailRowKeys] = useState<React.Key[]>([]);
   const [processingSelected, setProcessingSelected] = useState(false);
   const [retryingErrorId, setRetryingErrorId] = useState<number | null>(null);
+  const [viewingErrorId, setViewingErrorId] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [resultsModalVisible, setResultsModalVisible] = useState(false);
   const [resultsData, setResultsData] = useState<any>(null);
@@ -227,6 +228,31 @@ const DashboardPage: React.FC = () => {
       setFeedbackRows(res.data.feedback || []);
     } catch {
       setFeedbackRows([]);
+    }
+  };
+
+  const viewMailErrorMessage = async (record: any) => {
+    if (!user?.email) return;
+    setViewingErrorId(record.id);
+    try {
+      const res = await axios.get(`/api/errors/${record.id}/message?email=${encodeURIComponent(user.email)}`);
+      if (res.data?.status !== 'success') {
+        message.error(res.data?.message || 'Cannot open message.');
+        return;
+      }
+      setViewingEmail({
+        id: `mail-error-${record.id}`,
+        subject: res.data.subject || record.error_type || t('email_no_subject'),
+        preview: res.data.content || '',
+        stored_content: res.data.content || '',
+        status: record.error_type,
+        matched_rule_label: res.data.path,
+        received_at: res.data.received_at || record.occurred_at,
+      });
+    } catch {
+      message.error('Cannot open message.');
+    } finally {
+      setViewingErrorId(null);
     }
   };
 
@@ -426,42 +452,55 @@ const DashboardPage: React.FC = () => {
     {
       title: t('col_action'),
       key: 'action',
-      width: 120,
+      width: 210,
       render: (_: unknown, record: any) => {
         const canRetry = record.error_type === 'unknown_sender' && !!record.context;
-        if (!canRetry) return '-';
         return (
-          <Button
-            size="small"
-            loading={retryingErrorId === record.id}
-            onClick={async () => {
-              if (!user?.email) return;
-              setRetryingErrorId(record.id);
-              try {
-                const res = await axios.post('/api/errors/retry', {
-                  email: user.email,
-                  error_id: record.id,
-                });
-                if (res.data?.status === 'success') {
-                  message.success(res.data?.message || 'Queued for retry. The spool worker will reprocess it shortly.');
-                } else {
-                  message.error(res.data?.message || 'Retry failed.');
-                }
+          <Space>
+            {record.context ? (
+              <Button
+                size="small"
+                loading={viewingErrorId === record.id}
+                onClick={() => viewMailErrorMessage(record)}
+              >
+                View
+              </Button>
+            ) : null}
+            {canRetry ? (
+              <Button
+                size="small"
+                loading={retryingErrorId === record.id}
+                onClick={async () => {
+                  if (!user?.email) return;
+                  setRetryingErrorId(record.id);
+                  try {
+                    const res = await axios.post('/api/errors/retry', {
+                      email: user.email,
+                      error_id: record.id,
+                    });
+                    if (res.data?.status === 'success') {
+                      message.success(res.data?.message || 'Queued for retry. The spool worker will reprocess it shortly.');
+                    } else {
+                      message.error(res.data?.message || 'Retry failed.');
+                    }
 
-                const url = isPrivileged
-                  ? `/api/admin/errors?email=${encodeURIComponent(user.email)}`
-                  : `/api/errors?email=${encodeURIComponent(user.email)}`;
-                const refreshed = await axios.get(url);
-                setMailErrors(refreshed.data.errors || []);
-              } catch {
-                message.error('Retry failed.');
-              } finally {
-                setRetryingErrorId(null);
-              }
-            }}
-          >
-            Recheck Delivered-To
-          </Button>
+                    const url = isPrivileged
+                      ? `/api/admin/errors?email=${encodeURIComponent(user.email)}`
+                      : `/api/errors?email=${encodeURIComponent(user.email)}`;
+                    const refreshed = await axios.get(url);
+                    setMailErrors(refreshed.data.errors || []);
+                  } catch {
+                    message.error('Retry failed.');
+                  } finally {
+                    setRetryingErrorId(null);
+                  }
+                }}
+              >
+                Recheck Delivered-To
+              </Button>
+            ) : null}
+            {!record.context ? '-' : null}
+          </Space>
         );
       },
     },
