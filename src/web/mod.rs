@@ -1340,6 +1340,95 @@ struct RetryMailErrorRequest {
     error_id: i64,
 }
 
+async fn count_financial_records(pool: &SqlitePool, user_id: &str, email_id: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM email_financial_records WHERE user_id = ? AND email_id = ?",
+    )
+    .bind(user_id)
+    .bind(email_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+}
+
+async fn rollback_financial_records_for_email(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+) -> i64 {
+    let rows = sqlx::query_as::<_, (String, String, f64)>(
+        "SELECT month_key, category, SUM(amount) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
+    )
+    .bind(user_id)
+    .bind(email_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for (month_key, category, amount) in rows {
+        let _ = sqlx::query(
+            "UPDATE monthly_finance_summary
+             SET total_amount = MAX(total_amount - ?, 0), updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND month_key = ? AND category = ?",
+        )
+        .bind(amount)
+        .bind(user_id)
+        .bind(&month_key)
+        .bind(&category)
+        .execute(pool)
+        .await;
+
+        let _ = sqlx::query(
+            "DELETE FROM monthly_finance_summary
+             WHERE user_id = ? AND month_key = ? AND category = ? AND total_amount <= 0.000001",
+        )
+        .bind(user_id)
+        .bind(&month_key)
+        .bind(&category)
+        .execute(pool)
+        .await;
+    }
+
+    sqlx::query("DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?")
+        .bind(user_id)
+        .bind(email_id)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected() as i64)
+        .unwrap_or(0)
+}
+
+async fn log_email_processing(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+    process_method: &str,
+    status_before: Option<&str>,
+    status_after: Option<&str>,
+    result: &str,
+    finance_records_before: i64,
+    finance_records_after: i64,
+    details: serde_json::Value,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO email_processing_logs
+         (id, user_id, email_id, process_method, status_before, status_after, result, finance_records_before, finance_records_after, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(user_id)
+    .bind(email_id)
+    .bind(process_method)
+    .bind(status_before)
+    .bind(status_after)
+    .bind(result)
+    .bind(finance_records_before)
+    .bind(finance_records_after)
+    .bind(details.to_string())
+    .execute(pool)
+    .await;
+}
+
 fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<PathBuf> {
     let trimmed = context.trim();
     if trimmed.is_empty() {
@@ -3389,20 +3478,36 @@ async fn post_manual_process_emails(
             continue;
         };
 
+        let finance_records_before = count_financial_records(&state.pool, &user.id, &id).await;
+        let process_method = if force_reextract {
+            "manual_reprocess"
+        } else {
+            "manual_process"
+        };
+
         if status != "pending" && !force_reextract {
             skipped += 1;
             results.push(serde_json::json!({ "email_id": id, "result": "skipped", "reason": "Status is not pending" }));
+            log_email_processing(
+                &state.pool,
+                &user.id,
+                &id,
+                process_method,
+                Some(&status),
+                Some(&status),
+                "skipped",
+                finance_records_before,
+                finance_records_before,
+                serde_json::json!({ "reason": "Status is not pending" }),
+            )
+            .await;
             continue;
         }
 
+        let mut removed_finance_records = 0_i64;
         if force_reextract {
-            let _ = sqlx::query(
-                "DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?",
-            )
-            .bind(&user.id)
-            .bind(&id)
-            .execute(&state.pool)
-            .await;
+            removed_finance_records =
+                rollback_financial_records_for_email(&state.pool, &user.id, &id).await;
             let _ = sqlx::query("DELETE FROM auto_replies WHERE user_id = ? AND source_email_id = ? AND reply_status = 'draft'")
                 .bind(&user.id)
                 .bind(&id)
@@ -3410,11 +3515,20 @@ async fn post_manual_process_emails(
                 .await;
         }
 
+        let source_name = if stored_content
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "stored_content"
+        } else {
+            "preview"
+        };
         let source_text = stored_content
             .filter(|s| !s.trim().is_empty())
             .or(preview)
             .unwrap_or_default();
-        crate::mail::analyze_and_store_financial_records(
+        let extracted_finance_records = crate::mail::analyze_and_store_financial_records(
             &state.pool,
             &state.ai_client,
             &user,
@@ -3423,14 +3537,51 @@ async fn post_manual_process_emails(
             &source_text,
         )
         .await;
+        let finance_records_after = count_financial_records(&state.pool, &user.id, &id).await;
 
-        let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+        let status_after = if status == "replied" {
+            "replied"
+        } else if finance_records_after > 0 {
+            "processed"
+        } else {
+            "drafted"
+        };
+
+        let _ = sqlx::query("UPDATE emails SET status = ? WHERE id = ?")
+            .bind(status_after)
             .bind(&id)
             .execute(&state.pool)
             .await;
 
         processed += 1;
-        results.push(serde_json::json!({ "email_id": id, "result": "processed" }));
+        log_email_processing(
+            &state.pool,
+            &user.id,
+            &id,
+            process_method,
+            Some(&status),
+            Some(status_after),
+            "processed",
+            finance_records_before,
+            finance_records_after,
+            serde_json::json!({
+                "force_reextract": force_reextract,
+                "removed_finance_records": removed_finance_records,
+                "extracted_finance_records": extracted_finance_records,
+                "source": source_name,
+            }),
+        )
+        .await;
+        results.push(serde_json::json!({
+            "email_id": id,
+            "result": "processed",
+            "status_before": status,
+            "status_after": status_after,
+            "finance_records_before": finance_records_before,
+            "finance_records_after": finance_records_after,
+            "removed_finance_records": removed_finance_records,
+            "extracted_finance_records": extracted_finance_records,
+        }));
     }
 
     Json(serde_json::json!({

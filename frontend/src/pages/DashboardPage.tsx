@@ -374,6 +374,7 @@ const DashboardPage: React.FC = () => {
       render: (value: string) => {
         const statusColor: Record<string, string> = {
           pending: 'gold',
+          processed: 'green',
           drafted: 'blue',
           replied: 'green',
         };
@@ -610,6 +611,7 @@ const DashboardPage: React.FC = () => {
       const res = await axios.post('/api/emails/process-manual', {
         email: user.email,
         email_ids: emailIds,
+        force_reextract: true,
       });
       setResultsData(res.data);
       setResultsModalVisible(true);
@@ -1060,6 +1062,12 @@ const DashboardPage: React.FC = () => {
             {t('filter_drafted')}
           </Button>
           <Button
+            type={statusFilter === 'processed' ? 'primary' : 'default'}
+            onClick={() => setStatusFilter('processed')}
+          >
+            {t('filter_processed')}
+          </Button>
+          <Button
             type={statusFilter === 'replied' ? 'primary' : 'default'}
             onClick={() => setStatusFilter('replied')}
           >
@@ -1089,9 +1097,6 @@ const DashboardPage: React.FC = () => {
         rowSelection={{
           selectedRowKeys: selectedEmailRowKeys,
           onChange: (keys) => setSelectedEmailRowKeys(keys),
-          getCheckboxProps: (record: any) => ({
-            disabled: record.status !== 'pending',
-          }),
         }}
         rowClassName={(record: any) => (emailIdFromQuery && record.id === emailIdFromQuery ? 'finance-linked-row' : '')}
       />

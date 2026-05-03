@@ -725,9 +725,9 @@ pub(crate) async fn analyze_and_store_financial_records(
     email_id: &str,
     subject: &str,
     decoded_content: &str,
-) {
+) -> i64 {
     if decoded_content.trim().is_empty() {
-        return;
+        return 0;
     }
 
     let snippet = if decoded_content.chars().count() > 6000 {
@@ -746,7 +746,7 @@ pub(crate) async fn analyze_and_store_financial_records(
                 "Financial extraction AI call failed for email {}: {}",
                 email_id, e
             );
-            return;
+            return 0;
         }
     };
 
@@ -764,10 +764,11 @@ pub(crate) async fn analyze_and_store_financial_records(
         .unwrap_or_default();
 
     if parsed.is_empty() {
-        return;
+        return 0;
     }
 
     let month_key = Utc::now().format("%Y-%m").to_string();
+    let mut inserted = 0_i64;
 
     for item in parsed {
         let amount = item.amount.unwrap_or(0.0);
@@ -801,7 +802,7 @@ pub(crate) async fn analyze_and_store_financial_records(
         .await
         .unwrap_or(amount);
 
-        let _ = sqlx::query(
+        if sqlx::query(
             "INSERT INTO email_financial_records (id, user_id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
@@ -817,8 +818,14 @@ pub(crate) async fn analyze_and_store_financial_records(
         .bind(&month_key)
         .bind(month_total_after)
         .execute(pool)
-        .await;
+        .await
+        .is_ok()
+        {
+            inserted += 1;
+        }
     }
+
+    inserted
 }
 
 #[cfg(test)]
@@ -993,6 +1000,35 @@ async fn log_mail_event(
     .bind(msg)
     .bind(context)
     .bind(user_id)
+    .execute(pool)
+    .await;
+}
+
+async fn log_email_processing_event(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+    process_method: &str,
+    status_before: Option<&str>,
+    status_after: Option<&str>,
+    result: &str,
+    finance_records_after: i64,
+    details: serde_json::Value,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO email_processing_logs
+         (id, user_id, email_id, process_method, status_before, status_after, result, finance_records_before, finance_records_after, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(user_id)
+    .bind(email_id)
+    .bind(process_method)
+    .bind(status_before)
+    .bind(status_after)
+    .bind(result)
+    .bind(finance_records_after)
+    .bind(details.to_string())
     .execute(pool)
     .await;
 }
@@ -1484,12 +1520,32 @@ impl MailService {
                 .await;
 
             push_step(&mut simulation_logs, options, "Run financial extraction");
-            analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body).await;
+            let financial_record_count =
+                analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body)
+                    .await;
 
-            let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+            let status_after = if financial_record_count > 0 {
+                "processed"
+            } else {
+                "drafted"
+            };
+            let _ = sqlx::query("UPDATE emails SET status = ? WHERE id = ?")
+                .bind(status_after)
                 .bind(&id)
                 .execute(pool)
                 .await;
+            log_email_processing_event(
+                pool,
+                &u.id,
+                &id,
+                "cli_process",
+                Some("pending"),
+                Some(status_after),
+                "processed",
+                financial_record_count,
+                serde_json::json!({ "extracted_finance_records": financial_record_count }),
+            )
+            .await;
 
             if options.simulate_agent {
                 push_step(&mut simulation_logs, options, "Start agent simulation");
@@ -2038,13 +2094,42 @@ impl MailService {
                                     .execute(&pool)
                                     .await;
 
-                                    analyze_and_store_financial_records(
+                                    let financial_record_count =
+                                        analyze_and_store_financial_records(
+                                            &pool,
+                                            &ai_client,
+                                            &u,
+                                            &id,
+                                            &subject,
+                                            &stored_content,
+                                        )
+                                        .await;
+
+                                    if financial_record_count > 0 {
+                                        let _ = sqlx::query(
+                                            "UPDATE emails SET status = 'processed' WHERE id = ?",
+                                        )
+                                        .bind(&id)
+                                        .execute(&pool)
+                                        .await;
+                                    }
+                                    log_email_processing_event(
                                         &pool,
-                                        &ai_client,
-                                        &u,
+                                        &u.id,
                                         &id,
-                                        &subject,
-                                        &stored_content,
+                                        "mail_spool",
+                                        Some("pending"),
+                                        Some(if financial_record_count > 0 {
+                                            "processed"
+                                        } else {
+                                            "pending"
+                                        }),
+                                        "processed",
+                                        financial_record_count,
+                                        serde_json::json!({
+                                            "extracted_finance_records": financial_record_count,
+                                            "source": "stored_content",
+                                        }),
                                     )
                                     .await;
 
