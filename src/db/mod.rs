@@ -1,5 +1,8 @@
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
 use anyhow::Result;
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use std::str::FromStr;
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool> {
@@ -14,8 +17,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         }
     }
 
-    let options = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true);
+    let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -28,32 +30,89 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             email TEXT UNIQUE NOT NULL,
             is_onboarded BOOLEAN NOT NULL DEFAULT 0,
             preferences TEXT
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
     // Safely add columns if they don't exist (idempotent migrations)
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN magic_token TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN auto_reply BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 1").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN display_name TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN role TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN email_format TEXT NOT NULL DEFAULT 'both'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_name_zh TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_name_en TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_zh TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_en TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN onboarding_step INTEGER NOT NULL DEFAULT 0").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN pdf_passwords TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN preferred_language TEXT NOT NULL DEFAULT 'en'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_data_consent BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_consent_updated_at DATETIME").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN mail_send_method TEXT NOT NULL DEFAULT 'direct_mx'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN rule_label_mode TEXT NOT NULL DEFAULT 'ai_first'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN time_format TEXT NOT NULL DEFAULT '24h'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT 'auto'").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN magic_token TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN auto_reply BOOLEAN NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 1")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN display_name TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN role TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN email_format TEXT NOT NULL DEFAULT 'both'")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_name_zh TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_name_en TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_zh TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN assistant_tone_en TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN onboarding_step INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN pdf_passwords TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'")
+        .execute(&pool)
+        .await;
+    let _ =
+        sqlx::query("ALTER TABLE users ADD COLUMN preferred_language TEXT NOT NULL DEFAULT 'en'")
+            .execute(&pool)
+            .await;
+    let _ = sqlx::query(
+        "ALTER TABLE users ADD COLUMN training_data_consent BOOLEAN NOT NULL DEFAULT 0",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN training_consent_updated_at DATETIME")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE users ADD COLUMN mail_send_method TEXT NOT NULL DEFAULT 'direct_mx'",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE users ADD COLUMN rule_label_mode TEXT NOT NULL DEFAULT 'ai_first'",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN time_format TEXT NOT NULL DEFAULT '24h'")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT 'auto'")
+        .execute(&pool)
+        .await;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
+    .execute(&pool)
+    .await?;
 
     // Table for tracking repetitive behaviors/questions for analytics
     sqlx::query(
@@ -63,7 +122,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             count INTEGER NOT NULL DEFAULT 1,
             last_occurred DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(user_id, activity_key)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -77,13 +136,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             status TEXT NOT NULL,
             received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN stored_content TEXT").execute(&pool).await;
-    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_emails_user_received ON emails(user_id, received_at DESC)").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN stored_content TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_emails_user_received ON emails(user_id, received_at DESC)",
+    )
+    .execute(&pool)
+    .await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_emails_user_status_received ON emails(user_id, status, received_at DESC)").execute(&pool).await;
 
     // User-defined and chat-captured email processing rules.
@@ -99,13 +164,19 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE email_rules ADD COLUMN rule_label TEXT NOT NULL DEFAULT 'RULE'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_rules ADD COLUMN matched_count INTEGER NOT NULL DEFAULT 0").execute(&pool).await;
+    let _ =
+        sqlx::query("ALTER TABLE email_rules ADD COLUMN rule_label TEXT NOT NULL DEFAULT 'RULE'")
+            .execute(&pool)
+            .await;
+    let _ =
+        sqlx::query("ALTER TABLE email_rules ADD COLUMN matched_count INTEGER NOT NULL DEFAULT 0")
+            .execute(&pool)
+            .await;
 
     // Track AI assistant chat replies (anonymous + logged-in)
     sqlx::query(
@@ -113,7 +184,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_email TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -126,7 +197,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             user_message TEXT NOT NULL,
             ai_reply TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -145,18 +216,30 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             replied_at DATETIME,
             replied_by TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN is_read BOOLEAN NOT NULL DEFAULT 0").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN read_at DATETIME").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN admin_reply TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_at DATETIME").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_by TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN is_read BOOLEAN NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN read_at DATETIME")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN admin_reply TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_at DATETIME")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE chat_feedback ADD COLUMN replied_by TEXT")
+        .execute(&pool)
+        .await;
 
-    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN matched_rule_label TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN matched_rule_label TEXT")
+        .execute(&pool)
+        .await;
 
     // User long-term memory for AI personalization
     sqlx::query(
@@ -166,7 +249,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             content TEXT NOT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -181,13 +264,17 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             context TEXT,
             user_id TEXT,
             occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN level TEXT NOT NULL DEFAULT 'ERROR'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN user_id TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN level TEXT NOT NULL DEFAULT 'ERROR'")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE mail_errors ADD COLUMN user_id TEXT")
+        .execute(&pool)
+        .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS data_deletion_requests (
@@ -200,13 +287,18 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             email_confirmed_at DATETIME,
             finalized_at DATETIME,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN email_confirmed_at DATETIME").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN finalized_at DATETIME").execute(&pool).await;
+    let _ =
+        sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN email_confirmed_at DATETIME")
+            .execute(&pool)
+            .await;
+    let _ = sqlx::query("ALTER TABLE data_deletion_requests ADD COLUMN finalized_at DATETIME")
+        .execute(&pool)
+        .await;
 
     // Auto-generated email replies based on rules (drafts or sent)
     sqlx::query(
@@ -225,11 +317,13 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id),
             FOREIGN KEY(email_rule_id) REFERENCES email_rules(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
-    let _ = sqlx::query("ALTER TABLE auto_replies ADD COLUMN source_email_id TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE auto_replies ADD COLUMN source_email_id TEXT")
+        .execute(&pool)
+        .await;
 
     // AI-extracted financial entries from decoded emails.
     sqlx::query(
@@ -254,7 +348,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id),
             FOREIGN KEY(email_id) REFERENCES emails(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -269,19 +363,40 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(user_id, month_key, category),
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
 
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN month_total_after REAL NOT NULL DEFAULT 0").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN currency TEXT NOT NULL DEFAULT 'TWD'").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN finance_type TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN due_date TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN statement_amount REAL").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN issuing_bank TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN card_last4 TEXT").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN transaction_month_key TEXT").execute(&pool).await;
+    let _ = sqlx::query(
+        "ALTER TABLE email_financial_records ADD COLUMN month_total_after REAL NOT NULL DEFAULT 0",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE email_financial_records ADD COLUMN currency TEXT NOT NULL DEFAULT 'TWD'",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN finance_type TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN due_date TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN statement_amount REAL")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN issuing_bank TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN card_last4 TEXT")
+        .execute(&pool)
+        .await;
+    let _ =
+        sqlx::query("ALTER TABLE email_financial_records ADD COLUMN transaction_month_key TEXT")
+            .execute(&pool)
+            .await;
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
@@ -299,7 +414,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             user_agent TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -315,7 +430,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             completed_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -328,7 +443,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             retention_days INTEGER NOT NULL,
             is_active BOOLEAN NOT NULL DEFAULT 1,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -342,7 +457,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             data_location_preference TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -357,7 +472,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             age_verified_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -371,7 +486,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             created_by TEXT,
             is_official BOOLEAN NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -386,7 +501,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             UNIQUE(wish_id, user_id),
             FOREIGN KEY(wish_id) REFERENCES feature_wishes(id),
             FOREIGN KEY(user_id) REFERENCES users(id)
-        );"
+        );",
     )
     .execute(&pool)
     .await?;
@@ -446,7 +561,10 @@ pub async fn run_startup_diagnostics(pool: &SqlitePool) -> Result<()> {
     match test_user {
         Ok(_) => tracing::info!("Startup Diagnostic: User model mapping verified successfully."),
         Err(e) => {
-            tracing::error!("Startup Diagnostic FAILED: Database schema mismatch with User model: {:?}", e);
+            tracing::error!(
+                "Startup Diagnostic FAILED: Database schema mismatch with User model: {:?}",
+                e
+            );
             return Err(anyhow::anyhow!("Database schema mismatch: {}", e));
         }
     }

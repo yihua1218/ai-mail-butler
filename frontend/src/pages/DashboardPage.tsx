@@ -32,6 +32,7 @@ const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const isPrivileged = user?.role === 'admin' || user?.role === 'developer';
+  const isAdmin = user?.role === 'admin';
   const screens = Grid.useBreakpoint();
   const isUltraWide = !!screens.xxl;
 
@@ -93,6 +94,7 @@ const DashboardPage: React.FC = () => {
   const [sendingDraft, setSendingDraft] = useState(false);
   const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
+  const [savingRemoteDebugMode, setSavingRemoteDebugMode] = useState(false);
   const [cachePurgeTarget, setCachePurgeTarget] = useState<string>('webllm-local');
   const [purgingCache, setPurgingCache] = useState(false);
 
@@ -169,9 +171,13 @@ const DashboardPage: React.FC = () => {
       axios.get(`/api/admin/errors?email=${user.email}`).then((res) => {
         setMailErrors(res.data.errors || []);
       }).catch(() => {});
-      axios.get('/api/about').then((res) => {
-        setRuntimeInfo(res.data || null);
-      }).catch(() => setRuntimeInfo(null));
+      if (isAdmin) {
+        axios.get(`/api/admin/runtime?email=${encodeURIComponent(user.email)}`).then((res) => {
+          setRuntimeInfo(res.data || null);
+        }).catch(() => setRuntimeInfo(null));
+      } else {
+        setRuntimeInfo(null);
+      }
     } else if (user?.role === 'user' && user.email) {
       axios.get(`/api/errors?email=${user.email}`).then((res) => {
         setMailErrors(res.data.errors || []);
@@ -180,7 +186,7 @@ const DashboardPage: React.FC = () => {
 
     loadFeedback();
     loadDraftReplies();
-  }, [user, isPrivileged]);
+  }, [user, isPrivileged, isAdmin]);
 
   const emailIdFromQuery = useMemo(() => {
     const params = new URLSearchParams(location.search);
@@ -544,6 +550,26 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  const updateRemoteDebugAccessMode = async (accessMode: string) => {
+    if (!user?.email || !isAdmin) return;
+    setSavingRemoteDebugMode(true);
+    try {
+      const res = await axios.post('/api/admin/remote-debug/access-mode', {
+        email: user.email,
+        access_mode: accessMode,
+      });
+      setRuntimeInfo((current: any) => ({
+        ...(current || {}),
+        remote_debug_access_mode: res.data.remote_debug_access_mode || accessMode,
+      }));
+      message.success(t('remote_debug_mode_saved'));
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || t('remote_debug_mode_save_failed'));
+    } finally {
+      setSavingRemoteDebugMode(false);
+    }
+  };
+
   const LogFilterBar = () => (
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
@@ -651,10 +677,11 @@ const DashboardPage: React.FC = () => {
   );
 
   const RemoteDebugDisplay = () => {
-    if (!runtimeInfo) return null;
+    if (!isAdmin || !runtimeInfo) return null;
     const enabled = !!runtimeInfo.remote_debug_sshfs_enabled;
     const mode = runtimeInfo.remote_debug_mode || 'readonly';
     const isOverlay = mode === 'overlay';
+    const accessMode = runtimeInfo.remote_debug_access_mode || 'readonly';
     return (
       <Card
         bordered={false}
@@ -668,10 +695,26 @@ const DashboardPage: React.FC = () => {
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space wrap>
             <Tag color={enabled ? 'green' : 'default'}>{enabled ? t('remote_debug_enabled') : t('remote_debug_disabled')}</Tag>
-            <Tag color={isOverlay ? 'blue' : 'gold'}>{isOverlay ? t('remote_debug_overlay') : t('remote_debug_readonly')}</Tag>
+            <Tag color={accessMode === 'readwrite' ? 'red' : 'gold'}>
+              {accessMode === 'readwrite' ? t('remote_debug_readwrite') : t('remote_debug_readonly')}
+            </Tag>
+            {isOverlay && <Tag color="blue">{t('remote_debug_overlay')}</Tag>}
             {runtimeInfo.readonly_mode_enabled && <Tag color="orange">{t('remote_debug_app_readonly')}</Tag>}
           </Space>
           <div style={{ color: '#86868b' }}>{t('remote_debug_desc')}</div>
+          <Space wrap>
+            <span>{t('remote_debug_access_mode')}</span>
+            <Select
+              value={accessMode}
+              loading={savingRemoteDebugMode}
+              style={{ minWidth: 180 }}
+              onChange={updateRemoteDebugAccessMode}
+              options={[
+                { value: 'readonly', label: t('remote_debug_readonly') },
+                { value: 'readwrite', label: t('remote_debug_readwrite') },
+              ]}
+            />
+          </Space>
           <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', rowGap: 8, columnGap: 12 }}>
             <span>{t('remote_debug_remote')}</span>
             <code>{runtimeInfo.remote_debug_remote || '-'}</code>

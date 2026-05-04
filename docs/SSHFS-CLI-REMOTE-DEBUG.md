@@ -40,12 +40,14 @@ Admin Dashboard can display the intended remote-debug posture from environment v
 ```bash
 REMOTE_DEBUG_SSHFS_ENABLED=true
 REMOTE_DEBUG_MODE=readonly
+REMOTE_DEBUG_ACCESS_MODE=readonly
 REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data/mail_spool
 REMOTE_DEBUG_MOUNT_POINT=~/mnt/ai-mail-spool
 REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
 ```
 
 Use `REMOTE_DEBUG_MODE=readonly` for inspection-only mounts. Use `REMOTE_DEBUG_MODE=overlay` together with `READONLY_MODE=true`, `READONLY_BASE=<mounted-data-root>`, and `OVERLAY_DIR=<local-overlay-dir>` when you want writes to stay local while reads fall back to the mounted remote snapshot.
+The Admin Dashboard also stores an admin-selected access posture (`readonly` by default, or `readwrite` for controlled retry windows). It reports intent only; the actual SSHFS mount/remount still happens outside the web app.
 
 ## 1. Create Local Mount Point
 

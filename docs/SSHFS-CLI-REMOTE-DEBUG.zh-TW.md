@@ -33,6 +33,21 @@ Linux：
 
 這樣可降低風險並提升效能。
 
+## Dashboard 環境狀態
+
+Admin Dashboard 會顯示遠端除錯掛載的狀態，且只有 admin 能看到與調整。Web App 只記錄與顯示狀態，不會執行 `sshfs`、`mount` 或 `umount`。
+
+```bash
+REMOTE_DEBUG_SSHFS_ENABLED=true
+REMOTE_DEBUG_MODE=readonly
+REMOTE_DEBUG_ACCESS_MODE=readonly
+REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data/mail_spool
+REMOTE_DEBUG_MOUNT_POINT=~/mnt/ai-mail-spool
+REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
+```
+
+`REMOTE_DEBUG_ACCESS_MODE` 預設為 `readonly`；admin 可在 Dashboard 暫時切成 `readwrite` 以標示受控的重試/修復窗口。實際 SSHFS 重新掛載仍需在 Web App 外完成。
+
 ## 1. 建立本地掛載點
 
 ```bash

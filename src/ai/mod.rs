@@ -1,7 +1,7 @@
+use crate::config::Config;
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use crate::config::Config;
 
 #[derive(Clone)]
 pub struct AiClient {
@@ -60,9 +60,11 @@ impl AiClient {
     pub fn new(config: &Config) -> Self {
         Self {
             client: Client::new(),
-            base_url: std::env::var("AI_API_BASE_URL").unwrap_or_else(|_| "http://localhost:1234/v1".to_string()),
+            base_url: std::env::var("AI_API_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:1234/v1".to_string()),
             api_key: config.ai_api_key.clone(),
-            model_name: std::env::var("AI_MODEL_NAME").unwrap_or_else(|_| "local-model".to_string()),
+            model_name: std::env::var("AI_MODEL_NAME")
+                .unwrap_or_else(|_| "local-model".to_string()),
         }
     }
 
@@ -70,14 +72,20 @@ impl AiClient {
         let req_body = ChatRequest {
             model: self.model_name.clone(),
             messages: vec![
-                ChatMessage { role: "system".to_string(), content: system_prompt.to_string() },
-                ChatMessage { role: "user".to_string(), content: user_message.to_string() },
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user_message.to_string(),
+                },
             ],
         };
 
         let url = format!("{}/chat/completions", self.base_url);
         let mut req = self.client.post(&url).json(&req_body);
-        
+
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
         }
@@ -85,7 +93,7 @@ impl AiClient {
         let start = std::time::Instant::now();
         let res = req.send().await?.json::<ChatResponse>().await?;
         let duration = start.elapsed().as_millis() as u64;
-        
+
         if let Some(choice) = res.choices.first() {
             let total_tokens = res.usage.map(|u| u.total_tokens).unwrap_or(0);
             Ok(ChatResult {

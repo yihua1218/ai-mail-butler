@@ -1297,7 +1297,10 @@ async fn readonly_write_guard(
     }
 
     // Allow authentication bootstrap while all other writes are blocked.
-    if path == "/api/auth/magic-link" || path == "/api/auth/verify" {
+    if path == "/api/auth/magic-link"
+        || path == "/api/auth/verify"
+        || path == "/api/admin/remote-debug/access-mode"
+    {
         return next.run(req).await;
     }
 
@@ -1310,6 +1313,10 @@ async fn readonly_write_guard(
 
 fn is_admin_or_developer(state: &AppState, email: &str) -> bool {
     Some(email) == state.admin_email.as_deref() || Some(email) == state.developer_email.as_deref()
+}
+
+fn is_admin(state: &AppState, email: &str) -> bool {
+    Some(email) == state.admin_email.as_deref()
 }
 
 fn role_for_email(state: &AppState, email: &str) -> String {
@@ -2008,11 +2015,6 @@ struct BuildInfo {
     readonly_mode_enabled: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
-    remote_debug_sshfs_enabled: bool,
-    remote_debug_mode: String,
-    remote_debug_remote: Option<String>,
-    remote_debug_mount_point: Option<String>,
-    remote_debug_overlay_dir: Option<String>,
 }
 
 async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
@@ -2031,12 +2033,114 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
         readonly_mode_enabled: state.config.readonly_mode_enabled,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
+    })
+}
+
+#[derive(Serialize)]
+struct AdminRuntimeInfo {
+    readonly_mode_enabled: bool,
+    readonly_base: Option<String>,
+    overlay_dir: Option<String>,
+    remote_debug_sshfs_enabled: bool,
+    remote_debug_mode: String,
+    remote_debug_access_mode: String,
+    remote_debug_remote: Option<String>,
+    remote_debug_mount_point: Option<String>,
+    remote_debug_overlay_dir: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AdminRuntimeQuery {
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct RemoteDebugAccessModeRequest {
+    email: String,
+    access_mode: String,
+}
+
+async fn load_remote_debug_access_mode(state: &AppState) -> String {
+    let configured = normalize_remote_debug_access_mode(&state.config.remote_debug_access_mode);
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM app_settings WHERE key = 'remote_debug_access_mode'",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|value| normalize_remote_debug_access_mode(&value))
+    .unwrap_or(configured)
+}
+
+fn normalize_remote_debug_access_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "readwrite" | "read-write" | "rw" | "writable" => "readwrite".to_string(),
+        _ => "readonly".to_string(),
+    }
+}
+
+async fn get_admin_runtime_info(
+    State(state): State<AppState>,
+    Query(query): Query<AdminRuntimeQuery>,
+) -> impl IntoResponse {
+    if !is_admin(&state, &query.email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "status": "error", "message": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    Json(AdminRuntimeInfo {
+        readonly_mode_enabled: state.config.readonly_mode_enabled,
+        readonly_base: state.config.readonly_base.clone(),
+        overlay_dir: state.config.overlay_dir.clone(),
         remote_debug_sshfs_enabled: state.config.remote_debug_sshfs_enabled,
         remote_debug_mode: state.config.remote_debug_mode.clone(),
+        remote_debug_access_mode: load_remote_debug_access_mode(&state).await,
         remote_debug_remote: state.config.remote_debug_remote.clone(),
         remote_debug_mount_point: state.config.remote_debug_mount_point.clone(),
         remote_debug_overlay_dir: state.config.remote_debug_overlay_dir.clone(),
     })
+    .into_response()
+}
+
+async fn post_admin_remote_debug_access_mode(
+    State(state): State<AppState>,
+    Json(payload): Json<RemoteDebugAccessModeRequest>,
+) -> impl IntoResponse {
+    if !is_admin(&state, &payload.email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "status": "error", "message": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    let access_mode = normalize_remote_debug_access_mode(&payload.access_mode);
+    let result = sqlx::query(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ('remote_debug_access_mode', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(&access_mode)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Json(
+            serde_json::json!({ "status": "success", "remote_debug_access_mode": access_mode }),
+        )
+        .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update remote debug access mode: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": "Failed to update remote debug access mode" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2716,6 +2820,7 @@ mod web_tests {
             overlay_dir: None,
             remote_debug_sshfs_enabled: false,
             remote_debug_mode: "readonly".to_string(),
+            remote_debug_access_mode: "readonly".to_string(),
             remote_debug_remote: None,
             remote_debug_mount_point: None,
             remote_debug_overlay_dir: None,
@@ -4732,6 +4837,11 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/dashboard", get(get_dashboard))
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
+        .route("/admin/runtime", get(get_admin_runtime_info))
+        .route(
+            "/admin/remote-debug/access-mode",
+            post(post_admin_remote_debug_access_mode),
+        )
         .route("/errors/retry", post(post_retry_mail_error))
         .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))

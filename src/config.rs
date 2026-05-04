@@ -14,6 +14,7 @@ pub struct Config {
     pub overlay_dir: Option<String>,
     pub remote_debug_sshfs_enabled: bool,
     pub remote_debug_mode: String,
+    pub remote_debug_access_mode: String,
     pub remote_debug_remote: Option<String>,
     pub remote_debug_mount_point: Option<String>,
     pub remote_debug_overlay_dir: Option<String>,
@@ -66,6 +67,8 @@ impl Config {
                 .filter(|s| !s.trim().is_empty()),
             remote_debug_sshfs_enabled: Self::parse_bool_env("REMOTE_DEBUG_SSHFS_ENABLED"),
             remote_debug_mode: std::env::var("REMOTE_DEBUG_MODE")
+                .unwrap_or_else(|_| "readonly".to_string()),
+            remote_debug_access_mode: std::env::var("REMOTE_DEBUG_ACCESS_MODE")
                 .unwrap_or_else(|_| "readonly".to_string()),
             remote_debug_remote: std::env::var("REMOTE_DEBUG_REMOTE")
                 .ok()
