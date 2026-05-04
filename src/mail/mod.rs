@@ -85,6 +85,22 @@ pub async fn list_spool_eml_files(spool_dir: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+async fn resolve_readonly_base_path(base: &Path, logical: &Path) -> PathBuf {
+    let primary = base.join(logical);
+    if fs::try_exists(&primary).await.unwrap_or(false) {
+        return primary;
+    }
+
+    if let Ok(stripped) = logical.strip_prefix("data") {
+        let data_root_path = base.join(stripped);
+        if fs::try_exists(&data_root_path).await.unwrap_or(false) {
+            return data_root_path;
+        }
+    }
+
+    primary
+}
+
 /// List all .eml files with union overlay-first + base-fallback semantics.
 /// In readonly mode the overlay spool is read first; then any files from the
 /// corresponding base spool whose filenames are not already present in the
@@ -99,7 +115,7 @@ pub async fn union_list_eml_files(
 
     // base fallback – readonly mode only
     if config.readonly_mode_enabled {
-        let seen: HashSet<String> = files
+        let mut seen: HashSet<String> = files
             .iter()
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
             .collect();
@@ -109,14 +125,33 @@ pub async fn union_list_eml_files(
             let runtime_pb = Path::new(runtime_spool_dir);
             let overlay_pb = Path::new(overlay_root);
             let logical = runtime_pb.strip_prefix(overlay_pb).unwrap_or(runtime_pb);
-            let base_spool = Path::new(base).join(logical);
+            let base_spool = resolve_readonly_base_path(Path::new(base), logical).await;
+            let processed_dir = runtime_pb.join("processed");
             if let Ok(mut entries) = fs::read_dir(&base_spool).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
                     if path.is_file() && path.extension().map(|e| e == "eml").unwrap_or(false) {
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if !seen.contains(name) {
-                                files.push(path);
+                            if seen.contains(name) || processed_dir.join(name).exists() {
+                                continue;
+                            }
+
+                            let overlay_path = runtime_pb.join(name);
+                            if let Some(parent) = overlay_path.parent() {
+                                let _ = fs::create_dir_all(parent).await;
+                            }
+
+                            match fs::copy(&path, &overlay_path).await {
+                                Ok(_) => {
+                                    seen.insert(name.to_string());
+                                    files.push(overlay_path);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to copy remote debug spool file {:?} into overlay {:?}: {}",
+                                        path, overlay_path, e
+                                    );
+                                }
                             }
                         }
                     }
@@ -139,7 +174,7 @@ async fn union_read_file(config: &Config, path: &Path) -> std::io::Result<Vec<u8
             let overlay_root = config.overlay_dir.as_deref().unwrap_or("data/overlay");
             if let (Some(base), Ok(rel)) = (&config.readonly_base, path.strip_prefix(overlay_root))
             {
-                let base_path = Path::new(base).join(rel);
+                let base_path = resolve_readonly_base_path(Path::new(base), rel).await;
                 fs::read(&base_path).await
             } else {
                 Err(e)
@@ -187,10 +222,10 @@ pub async fn requeue_unknown_sender_errors(pool: &SqlitePool, spool_dir: &str) -
 
     let mut copied = 0_usize;
     for context in rows {
-        let source = PathBuf::from(context);
-        if !source.exists() {
-            continue;
-        }
+        let source = match resolve_mail_artifact_path(spool_dir, &context).await {
+            Some(path) => path,
+            None => continue,
+        };
         let file_name = source
             .file_name()
             .and_then(|s| s.to_str())
@@ -203,6 +238,29 @@ pub async fn requeue_unknown_sender_errors(pool: &SqlitePool, spool_dir: &str) -
     }
 
     Ok(copied)
+}
+
+async fn resolve_mail_artifact_path(spool_dir: &str, context: &str) -> Option<PathBuf> {
+    let trimmed = context.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut candidates = vec![PathBuf::from(trimmed)];
+    if let Some(file_name) = PathBuf::from(trimmed).file_name().and_then(|s| s.to_str()) {
+        let spool = Path::new(spool_dir);
+        candidates.push(spool.join("unknown_sender").join(file_name));
+        candidates.push(spool.join("processed").join(file_name));
+        candidates.push(spool.join(file_name));
+    }
+
+    for candidate in candidates {
+        if fs::try_exists(&candidate).await.unwrap_or(false) && candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 fn first_email_address(raw: &str) -> Option<String> {
@@ -438,6 +496,19 @@ fn extract_pure_email(mailbox: &str) -> String {
     mailbox.to_string()
 }
 
+async fn move_processed_file(path: &Path, dest: &str) -> std::io::Result<()> {
+    match fs::rename(path, dest).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(18) => {
+            // EXDEV: remote debug can read from SSHFS and archive into a local overlay.
+            // rename(2) cannot cross filesystems, so fall back to copy + remove.
+            fs::copy(path, dest).await?;
+            fs::remove_file(path).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn build_login_url(config: &Config, token: &str) -> String {
     let base_url = std::env::var("PUBLIC_URL")
         .unwrap_or_else(|_| format!("http://localhost:{}", config.server_port));
@@ -654,9 +725,9 @@ pub(crate) async fn analyze_and_store_financial_records(
     email_id: &str,
     subject: &str,
     decoded_content: &str,
-) {
+) -> i64 {
     if decoded_content.trim().is_empty() {
-        return;
+        return 0;
     }
 
     let snippet = if decoded_content.chars().count() > 6000 {
@@ -675,7 +746,7 @@ pub(crate) async fn analyze_and_store_financial_records(
                 "Financial extraction AI call failed for email {}: {}",
                 email_id, e
             );
-            return;
+            return 0;
         }
     };
 
@@ -693,10 +764,11 @@ pub(crate) async fn analyze_and_store_financial_records(
         .unwrap_or_default();
 
     if parsed.is_empty() {
-        return;
+        return 0;
     }
 
     let month_key = Utc::now().format("%Y-%m").to_string();
+    let mut inserted = 0_i64;
 
     for item in parsed {
         let amount = item.amount.unwrap_or(0.0);
@@ -730,7 +802,7 @@ pub(crate) async fn analyze_and_store_financial_records(
         .await
         .unwrap_or(amount);
 
-        let _ = sqlx::query(
+        if sqlx::query(
             "INSERT INTO email_financial_records (id, user_id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
@@ -746,8 +818,14 @@ pub(crate) async fn analyze_and_store_financial_records(
         .bind(&month_key)
         .bind(month_total_after)
         .execute(pool)
-        .await;
+        .await
+        .is_ok()
+        {
+            inserted += 1;
+        }
     }
+
+    inserted
 }
 
 #[cfg(test)]
@@ -926,8 +1004,120 @@ async fn log_mail_event(
     .await;
 }
 
+async fn log_email_processing_event(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+    process_method: &str,
+    status_before: Option<&str>,
+    status_after: Option<&str>,
+    result: &str,
+    finance_records_after: i64,
+    details: serde_json::Value,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO email_processing_logs
+         (id, user_id, email_id, process_method, status_before, status_after, result, finance_records_before, finance_records_after, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(user_id)
+    .bind(email_id)
+    .bind(process_method)
+    .bind(status_before)
+    .bind(status_after)
+    .bind(result)
+    .bind(finance_records_after)
+    .bind(details.to_string())
+    .execute(pool)
+    .await;
+}
+
+async fn save_smtp_session_log(spool_dir: &str, session_id: &str, session_log: &str) {
+    let log_dir = Path::new(spool_dir).join("session_logs");
+    if let Err(e) = fs::create_dir_all(&log_dir).await {
+        error!(
+            "[SMTP {}] Failed to create session log dir: {}",
+            session_id, e
+        );
+        return;
+    }
+
+    let log_path = log_dir.join(format!("session_{}.log", session_id));
+    match fs::write(&log_path, session_log.as_bytes()).await {
+        Ok(_) => info!(
+            "[SMTP {}] Session log saved -> {}",
+            session_id,
+            log_path.display()
+        ),
+        Err(e) => error!("[SMTP {}] Failed to save session log: {}", session_id, e),
+    }
+}
+
+async fn organize_legacy_session_logs(spool_dir: &str) {
+    let log_dir = Path::new(spool_dir).join("session_logs");
+    if fs::create_dir_all(&log_dir).await.is_err() {
+        return;
+    }
+
+    let Ok(mut entries) = fs::read_dir(spool_dir).await else {
+        return;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !path.is_file() || !file_name.starts_with("session_") || !file_name.ends_with(".log") {
+            continue;
+        }
+
+        let dest = log_dir.join(file_name);
+        if let Err(e) = move_processed_file(&path, &dest.to_string_lossy()).await {
+            warn!(
+                "Failed to organize legacy SMTP session log {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+}
+
+async fn archive_unknown_sender_mail(
+    spool_dir: &str,
+    source_path: &Path,
+    contents: &[u8],
+) -> Option<PathBuf> {
+    let archive_dir = Path::new(spool_dir).join("unknown_sender");
+    if let Err(e) = fs::create_dir_all(&archive_dir).await {
+        error!("Failed to create unknown_sender archive dir: {}", e);
+        return None;
+    }
+
+    let file_name = source_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("mail_{}.eml", Utc::now().timestamp_millis()));
+    let archive_path = archive_dir.join(file_name);
+
+    match fs::write(&archive_path, contents).await {
+        Ok(_) => Some(archive_path),
+        Err(e) => {
+            error!(
+                "Failed to archive unknown_sender mail {:?} to {}: {}",
+                source_path,
+                archive_path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
 /// Handle a single inbound SMTP connection.
-/// Saves a session transcript to `<spool_dir>/session_<id>.log` and the
+/// Saves a session transcript to `<spool_dir>/session_logs/session_<id>.log` and the
 /// received email body to `<spool_dir>/mail_<id>.eml`.
 async fn handle_smtp_connection(
     stream: TcpStream,
@@ -960,8 +1150,7 @@ async fn handle_smtp_connection(
             session_log.push_str(&format!("S: {}", r));
             if let Err(e) = writer.write_all(r.as_bytes()).await {
                 error!("[SMTP {}] Write error: {}", session_id, e);
-                let log_path = format!("{}/session_{}.log", spool_dir, session_id);
-                let _ = fs::write(&log_path, session_log.as_bytes()).await;
+                save_smtp_session_log(&spool_dir, &session_id, &session_log).await;
                 return;
             }
         }};
@@ -971,8 +1160,7 @@ async fn handle_smtp_connection(
         security_agent.observe_connection(peer_addr).await
     {
         send!(response);
-        let log_path = format!("{}/session_{}.log", spool_dir, session_id);
-        let _ = fs::write(&log_path, session_log.as_bytes()).await;
+        save_smtp_session_log(&spool_dir, &session_id, &session_log).await;
         return;
     }
 
@@ -1075,11 +1263,7 @@ async fn handle_smtp_connection(
     }
 
     // Always persist the session transcript
-    let log_path = format!("{}/session_{}.log", spool_dir, session_id);
-    match fs::write(&log_path, session_log.as_bytes()).await {
-        Ok(_) => info!("[SMTP {}] Session log saved → {}", session_id, log_path),
-        Err(e) => error!("[SMTP {}] Failed to save session log: {}", session_id, e),
-    }
+    save_smtp_session_log(&spool_dir, &session_id, &session_log).await;
 }
 
 impl MailService {
@@ -1161,7 +1345,7 @@ impl MailService {
         pool: &SqlitePool,
         ai_client: &AiClient,
         config: Arc<Config>,
-        _spool_dir: &str,
+        spool_dir: &str,
         processed_dir: &str,
         path: PathBuf,
         options: &CliProcessOptions,
@@ -1336,12 +1520,32 @@ impl MailService {
                 .await;
 
             push_step(&mut simulation_logs, options, "Run financial extraction");
-            analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body).await;
+            let financial_record_count =
+                analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body)
+                    .await;
 
-            let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+            let status_after = if financial_record_count > 0 {
+                "processed"
+            } else {
+                "drafted"
+            };
+            let _ = sqlx::query("UPDATE emails SET status = ? WHERE id = ?")
+                .bind(status_after)
                 .bind(&id)
                 .execute(pool)
                 .await;
+            log_email_processing_event(
+                pool,
+                &u.id,
+                &id,
+                "cli_process",
+                Some("pending"),
+                Some(status_after),
+                "processed",
+                financial_record_count,
+                serde_json::json!({ "extracted_finance_records": financial_record_count }),
+            )
+            .await;
 
             if options.simulate_agent {
                 push_step(&mut simulation_logs, options, "Start agent simulation");
@@ -1485,24 +1689,20 @@ impl MailService {
                 from_clean, to_clean, owner_candidates
             );
             warn!("{}", warn_msg);
-            log_mail_event(
-                pool,
-                "WARN",
-                "unknown_sender",
-                &warn_msg,
-                path.to_str(),
-                None,
-            )
-            .await;
+            let archived_path = archive_unknown_sender_mail(spool_dir, &path, &contents).await;
+            let context = archived_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .or_else(|| path.to_str());
+            log_mail_event(pool, "WARN", "unknown_sender", &warn_msg, context, None).await;
         }
 
         let mut processed_path = None;
         if !options.keep_files {
             if let Some(fname) = path.file_name() {
                 let dest = format!("{}/{}", runtime_processed_dir, fname.to_string_lossy());
-                if let Err(e) = fs::rename(&path, &dest).await {
+                if let Err(e) = move_processed_file(&path, &dest).await {
                     error!("Failed to move {:?} to processed/: {}", path, e);
-                    let _ = fs::remove_file(&path).await;
                 } else {
                     processed_path = Some(dest);
                 }
@@ -1526,6 +1726,7 @@ impl MailService {
         let processed_dir = resolve_runtime_dir(&config, logical_processed_dir);
         fs::create_dir_all(&spool_dir).await?;
         fs::create_dir_all(&processed_dir).await?;
+        organize_legacy_session_logs(&spool_dir).await;
 
         let listener = TcpListener::bind("0.0.0.0:25").await?;
         let security_agent = SmtpSecurityAgent::new().await;
@@ -1893,13 +2094,42 @@ impl MailService {
                                     .execute(&pool)
                                     .await;
 
-                                    analyze_and_store_financial_records(
+                                    let financial_record_count =
+                                        analyze_and_store_financial_records(
+                                            &pool,
+                                            &ai_client,
+                                            &u,
+                                            &id,
+                                            &subject,
+                                            &stored_content,
+                                        )
+                                        .await;
+
+                                    if financial_record_count > 0 {
+                                        let _ = sqlx::query(
+                                            "UPDATE emails SET status = 'processed' WHERE id = ?",
+                                        )
+                                        .bind(&id)
+                                        .execute(&pool)
+                                        .await;
+                                    }
+                                    log_email_processing_event(
                                         &pool,
-                                        &ai_client,
-                                        &u,
+                                        &u.id,
                                         &id,
-                                        &subject,
-                                        &stored_content,
+                                        "mail_spool",
+                                        Some("pending"),
+                                        Some(if financial_record_count > 0 {
+                                            "processed"
+                                        } else {
+                                            "pending"
+                                        }),
+                                        "processed",
+                                        financial_record_count,
+                                        serde_json::json!({
+                                            "extracted_finance_records": financial_record_count,
+                                            "source": "stored_content",
+                                        }),
                                     )
                                     .await;
 
@@ -1967,12 +2197,12 @@ impl MailService {
                                                 processed_dir,
                                                 fname.to_string_lossy()
                                             );
-                                            if let Err(e) = fs::rename(&path, &dest).await {
+                                            if let Err(e) = move_processed_file(&path, &dest).await
+                                            {
                                                 error!(
                                                     "Failed to move {:?} to processed/: {}",
                                                     path, e
                                                 );
-                                                let _ = fs::remove_file(&path).await;
                                             }
                                         }
                                         continue;
@@ -2385,12 +2615,19 @@ impl MailService {
                                         from_clean, to_clean, owner_candidates
                                     );
                                     warn!("{}", warn_msg);
+                                    let archived_path =
+                                        archive_unknown_sender_mail(spool_dir, &path, &contents)
+                                            .await;
+                                    let context = archived_path
+                                        .as_ref()
+                                        .and_then(|p| p.to_str())
+                                        .or_else(|| path.to_str());
                                     log_mail_event(
                                         &pool,
                                         "WARN",
                                         "unknown_sender",
                                         &warn_msg,
-                                        path.to_str(),
+                                        context,
                                         None,
                                     )
                                     .await;
@@ -2402,9 +2639,8 @@ impl MailService {
                     // Move processed file into processed/ so it's preserved for inspection
                     if let Some(fname) = path.file_name() {
                         let dest = format!("{}/{}", processed_dir, fname.to_string_lossy());
-                        if let Err(e) = fs::rename(&path, &dest).await {
+                        if let Err(e) = move_processed_file(&path, &dest).await {
                             error!("Failed to move {:?} to processed/: {}", path, e);
-                            let _ = fs::remove_file(&path).await;
                         }
                     }
                 }

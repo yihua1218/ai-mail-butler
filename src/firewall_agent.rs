@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_cidr_and_hostnames() {
-        assert!(validate_ip("158.94.208.79").is_ok());
+        assert!(validate_ip("198.51.100.42").is_ok());
         assert!(validate_ip("10.0.0.0/8").is_err());
         assert!(validate_ip("mail.example.com").is_err());
     }

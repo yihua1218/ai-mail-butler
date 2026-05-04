@@ -27,32 +27,47 @@ Linux:
 
 ## Directory Strategy
 
-Mount only what you need, usually the spool path:
-- Remote: `/opt/ai-mail-butler/data/mail_spool`
-- Local mount point: `~/mnt/ai-mail-spool`
+Mount the remote data root so the local debug runtime can see both the database and spool:
+- Remote: `/opt/ai-mail-butler/data`
+- Local mount point: `~/mnt/ai-mail-butler-data`
 
-This reduces risk and improves performance.
+This lets the app copy the remote `data.sqlite` into the local overlay database while reading remote files such as `mail_spool` through SSHFS.
 
-## Dashboard Environment Indicators
+## Container Startup Mount
 
-Admin Dashboard can display the intended remote-debug posture from environment variables. The web app only reports these values; it does not run `sshfs`, `mount`, or `umount`.
+When `REMOTE_DEBUG_SSHFS_ENABLED=true`, the container entrypoint mounts `REMOTE_DEBUG_REMOTE` at `REMOTE_DEBUG_MOUNT_POINT` before starting `ai-mail-butler`. The web app still only reports the configured posture; mount and unmount operations are not exposed through HTTP APIs.
 
 ```bash
 REMOTE_DEBUG_SSHFS_ENABLED=true
-REMOTE_DEBUG_MODE=readonly
+REMOTE_DEBUG_MODE=overlay
 REMOTE_DEBUG_ACCESS_MODE=readonly
-REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data/mail_spool
-REMOTE_DEBUG_MOUNT_POINT=~/mnt/ai-mail-spool
+REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data
+REMOTE_DEBUG_MOUNT_POINT=/mnt/ai-mail-butler-data
 REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
 ```
 
-Use `REMOTE_DEBUG_MODE=readonly` for inspection-only mounts. Use `REMOTE_DEBUG_MODE=overlay` together with `READONLY_MODE=true`, `READONLY_BASE=<mounted-data-root>`, and `OVERLAY_DIR=<local-overlay-dir>` when you want writes to stay local while reads fall back to the mounted remote snapshot.
+Use `REMOTE_DEBUG_MODE=overlay` for full remote-data debugging. The entrypoint sets `READONLY_MODE=true` and defaults `READONLY_BASE` to the SSHFS mount point, so `data.sqlite` is copied into the local overlay before startup and file reads fall back to the mounted remote data root. Use `REMOTE_DEBUG_MODE=readonly` only when you want the mount indicator without enabling the app overlay workflow.
 The Admin Dashboard also stores an admin-selected access posture (`readonly` by default, or `readwrite` for controlled retry windows). It reports intent only; the actual SSHFS mount/remount still happens outside the web app.
+
+By default, `READONLY_MODE=true` also blocks write APIs. To keep overlay enabled while allowing writes into the local overlay database/files, set:
+
+```bash
+READONLY_BLOCK_WRITES=false
+```
+
+Docker and nerdctl need FUSE permissions for in-container SSHFS:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d --build
+nerdctl compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d --build
+```
+
+Mounting also requires SSH credentials inside the container, for example by bind-mounting a read-only key or agent socket. Keep SSHFS disabled for normal production deployments.
 
 ## 1. Create Local Mount Point
 
 ```bash
-mkdir -p ~/mnt/ai-mail-spool
+mkdir -p ~/mnt/ai-mail-butler-data
 ```
 
 ## 2. Mount Remote Spool with SSHFS
@@ -60,8 +75,8 @@ mkdir -p ~/mnt/ai-mail-spool
 Start with read-only mount for safe inspection:
 
 ```bash
-sshfs devuser@your-server:/opt/ai-mail-butler/data/mail_spool \
-  ~/mnt/ai-mail-spool \
+sshfs devuser@your-server:/opt/ai-mail-butler/data \
+  ~/mnt/ai-mail-butler-data \
   -o ro,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3
 ```
 
@@ -75,7 +90,7 @@ Single-pass debug run:
 
 ```bash
 cargo run -- --mode cli \
-  --spool-dir ~/mnt/ai-mail-spool \
+  --spool-dir ~/mnt/ai-mail-butler-data/mail_spool \
   --keep-files \
   --report-json ./data/cli-remote-report.json
 ```
@@ -83,7 +98,7 @@ cargo run -- --mode cli \
 Interactive REPL debug:
 
 ```bash
-cargo run -- --mode cli --repl --spool-dir ~/mnt/ai-mail-spool --keep-files
+cargo run -- --mode cli --repl --spool-dir ~/mnt/ai-mail-butler-data/mail_spool --keep-files
 ```
 
 Useful REPL commands:
@@ -134,7 +149,7 @@ This prevents accidental mass edits in production spool.
 macOS / Linux:
 
 ```bash
-umount ~/mnt/ai-mail-spool
+umount ~/mnt/ai-mail-butler-data
 ```
 
 If busy, close open terminals/editors using that path and retry.

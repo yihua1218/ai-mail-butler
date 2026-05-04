@@ -104,6 +104,7 @@ mod tests {
             id: "id1".to_string(),
             subject: Some("Test".to_string()),
             preview: Some("Preview".to_string()),
+            stored_content: Some("Full message".to_string()),
             status: "pending".to_string(),
             matched_rule_label: Some("label".to_string()),
             received_at: Some("2024-01-01".to_string()),
@@ -120,6 +121,7 @@ pub struct EmailRecord {
     pub id: String,
     pub subject: Option<String>,
     pub preview: Option<String>,
+    pub stored_content: Option<String>,
     pub status: String,
     pub matched_rule_label: Option<String>,
     pub received_at: Option<String>,
@@ -182,7 +184,11 @@ pub struct UserAgeVerification {
 pub struct FeatureWish {
     pub id: String,
     pub title: String,
+    pub title_zh: Option<String>,
+    pub title_en: Option<String>,
     pub description: Option<String>,
+    pub description_zh: Option<String>,
+    pub description_en: Option<String>,
     pub created_by: Option<String>,
     pub is_official: bool,
     pub created_at: String,
@@ -196,7 +202,11 @@ pub struct FeatureWish {
 pub struct CreateWishRequest {
     pub email: String,
     pub title: String,
+    pub title_zh: Option<String>,
+    pub title_en: Option<String>,
     pub description: Option<String>,
+    pub description_zh: Option<String>,
+    pub description_en: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

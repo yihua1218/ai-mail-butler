@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{Method, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
@@ -1285,7 +1285,7 @@ async fn readonly_write_guard(
     req: Request<Body>,
     next: Next,
 ) -> impl IntoResponse {
-    if !state.config.readonly_mode_enabled {
+    if !state.config.readonly_mode_enabled || !state.config.readonly_block_writes {
         return next.run(req).await;
     }
 
@@ -1347,6 +1347,95 @@ struct RetryMailErrorRequest {
     error_id: i64,
 }
 
+async fn count_financial_records(pool: &SqlitePool, user_id: &str, email_id: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM email_financial_records WHERE user_id = ? AND email_id = ?",
+    )
+    .bind(user_id)
+    .bind(email_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+}
+
+async fn rollback_financial_records_for_email(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+) -> i64 {
+    let rows = sqlx::query_as::<_, (String, String, f64)>(
+        "SELECT month_key, category, SUM(amount) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
+    )
+    .bind(user_id)
+    .bind(email_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for (month_key, category, amount) in rows {
+        let _ = sqlx::query(
+            "UPDATE monthly_finance_summary
+             SET total_amount = MAX(total_amount - ?, 0), updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND month_key = ? AND category = ?",
+        )
+        .bind(amount)
+        .bind(user_id)
+        .bind(&month_key)
+        .bind(&category)
+        .execute(pool)
+        .await;
+
+        let _ = sqlx::query(
+            "DELETE FROM monthly_finance_summary
+             WHERE user_id = ? AND month_key = ? AND category = ? AND total_amount <= 0.000001",
+        )
+        .bind(user_id)
+        .bind(&month_key)
+        .bind(&category)
+        .execute(pool)
+        .await;
+    }
+
+    sqlx::query("DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?")
+        .bind(user_id)
+        .bind(email_id)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected() as i64)
+        .unwrap_or(0)
+}
+
+async fn log_email_processing(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+    process_method: &str,
+    status_before: Option<&str>,
+    status_after: Option<&str>,
+    result: &str,
+    finance_records_before: i64,
+    finance_records_after: i64,
+    details: serde_json::Value,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO email_processing_logs
+         (id, user_id, email_id, process_method, status_before, status_after, result, finance_records_before, finance_records_after, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(user_id)
+    .bind(email_id)
+    .bind(process_method)
+    .bind(status_before)
+    .bind(status_after)
+    .bind(result)
+    .bind(finance_records_before)
+    .bind(finance_records_after)
+    .bind(details.to_string())
+    .execute(pool)
+    .await;
+}
+
 fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<PathBuf> {
     let trimmed = context.trim();
     if trimmed.is_empty() {
@@ -1354,7 +1443,12 @@ fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<Pat
     }
 
     let mut candidates = vec![PathBuf::from(trimmed)];
+    candidates.push(resolve_runtime_mail_path(state, trimmed));
     if let Some(file_name) = PathBuf::from(trimmed).file_name().and_then(|s| s.to_str()) {
+        candidates.push(resolve_runtime_mail_path(
+            state,
+            &format!("data/mail_spool/unknown_sender/{}", file_name),
+        ));
         candidates.push(resolve_runtime_mail_path(
             state,
             &format!("data/mail_spool/processed/{}", file_name),
@@ -1366,6 +1460,105 @@ fn resolve_mail_error_source_path(state: &AppState, context: &str) -> Option<Pat
     }
 
     candidates.into_iter().find(|p| p.is_file())
+}
+
+async fn find_mail_error_source_path(state: &AppState, context: &str) -> Option<PathBuf> {
+    if let Some(path) = resolve_mail_error_source_path(state, context) {
+        return Some(path);
+    }
+
+    let file_name = PathBuf::from(context)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)?;
+    let file_stem = PathBuf::from(&file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    let root = resolve_runtime_mail_path(state, "data/mail_spool");
+    let mut stack = vec![root];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = fs::read_dir(&dir).await else {
+            continue;
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name == file_name {
+                return Some(path);
+            }
+            if name == "raw.eml" {
+                if let (Some(stem), Some(parent_name)) = (
+                    file_stem.as_deref(),
+                    path.parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str()),
+                ) {
+                    if parent_name == stem {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn mail_header_value(parsed: &mailparse::ParsedMail<'_>, key: &str) -> Option<String> {
+    parsed
+        .headers
+        .iter()
+        .find(|h| h.get_key().eq_ignore_ascii_case(key))
+        .map(|h| h.get_value())
+}
+
+fn collect_mail_body_parts(
+    part: &mailparse::ParsedMail<'_>,
+    plain: &mut Vec<String>,
+    html: &mut Vec<String>,
+) {
+    if part.subparts.is_empty() {
+        let body = part.get_body().unwrap_or_default();
+        if body.trim().is_empty() {
+            return;
+        }
+
+        let mime = part.ctype.mimetype.to_ascii_lowercase();
+        if mime == "text/html" {
+            html.push(body);
+        } else if mime == "text/plain" || mime.starts_with("text/") {
+            plain.push(body);
+        }
+        return;
+    }
+
+    for subpart in &part.subparts {
+        collect_mail_body_parts(subpart, plain, html);
+    }
+}
+
+fn render_mail_content(parsed: &mailparse::ParsedMail<'_>) -> (String, String) {
+    let mut plain = Vec::new();
+    let mut html = Vec::new();
+    collect_mail_body_parts(parsed, &mut plain, &mut html);
+
+    if !html.is_empty() {
+        ("html".to_string(), html.join("\n\n"))
+    } else if !plain.is_empty() {
+        ("plain".to_string(), plain.join("\n\n"))
+    } else {
+        ("plain".to_string(), parsed.get_body().unwrap_or_default())
+    }
 }
 
 async fn get_me(
@@ -1446,7 +1639,7 @@ async fn get_dashboard(
                 .unwrap_or(None);
 
             if let Some((uid,)) = user_id {
-                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
 
@@ -2013,6 +2206,7 @@ struct BuildInfo {
     build_disk: &'static str,
     assistant_email: String,
     readonly_mode_enabled: bool,
+    readonly_block_writes: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
 }
@@ -2031,6 +2225,7 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
         build_disk: env!("BUILD_DISK"),
         assistant_email: state.config.assistant_email.clone(),
         readonly_mode_enabled: state.config.readonly_mode_enabled,
+        readonly_block_writes: state.config.readonly_block_writes,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
     })
@@ -2816,6 +3011,7 @@ mod web_tests {
             assistant_email: "assistant@example.com".to_string(),
             docs_whitelist: vec![],
             readonly_mode_enabled: false,
+            readonly_block_writes: false,
             readonly_base: None,
             overlay_dir: None,
             remote_debug_sshfs_enabled: false,
@@ -3197,7 +3393,7 @@ async fn post_retry_mail_error(
         );
     };
 
-    let Some(source_path) = resolve_mail_error_source_path(&state, &context_path) else {
+    let Some(source_path) = find_mail_error_source_path(&state, &context_path).await else {
         return Json(
             serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }),
         );
@@ -3241,6 +3437,84 @@ async fn post_retry_mail_error(
         "message": "Retry queued. The spool worker will re-check Delivered-To / X-Original-To and candidate owner headers.",
         "queued_path": retry_path.to_string_lossy(),
     }))
+}
+
+async fn get_mail_error_message(
+    State(state): State<AppState>,
+    AxumPath(error_id): AxumPath<i64>,
+    Query(query): Query<AuthQuery>,
+) -> Json<serde_json::Value> {
+    let requester_email = query.email.unwrap_or_default().trim().to_lowercase();
+    if requester_email.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    }
+
+    let requester_user_id = get_user_id_by_email(&state.pool, &requester_email).await;
+    let is_privileged = is_admin_or_developer(&state, &requester_email);
+
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT error_type, context, user_id, message FROM mail_errors WHERE id = ?",
+    )
+    .bind(error_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let Some((_error_type, context, error_user_id, _message)) = row else {
+        return Json(serde_json::json!({ "status": "error", "message": "Error log not found" }));
+    };
+
+    if !is_privileged {
+        let Some(uid) = requester_user_id.as_ref() else {
+            return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+        };
+        if error_user_id.as_deref() != Some(uid.as_str()) {
+            return Json(serde_json::json!({ "status": "error", "message": "Unauthorized" }));
+        }
+    }
+
+    let Some(context_path) = context else {
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Missing log context path" }),
+        );
+    };
+
+    let Some(source_path) = find_mail_error_source_path(&state, &context_path).await else {
+        return Json(
+            serde_json::json!({ "status": "error", "message": "Cannot locate original .eml file" }),
+        );
+    };
+
+    let bytes = match fs::read(&source_path).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to read .eml file: {}", e)
+            }));
+        }
+    };
+
+    match mailparse::parse_mail(&bytes) {
+        Ok(parsed) => {
+            let (content_format, content) = render_mail_content(&parsed);
+            Json(serde_json::json!({
+                "status": "success",
+                "path": source_path.to_string_lossy(),
+                "subject": mail_header_value(&parsed, "Subject").unwrap_or_else(|| "No Subject".to_string()),
+                "from": mail_header_value(&parsed, "From").unwrap_or_default(),
+                "to": mail_header_value(&parsed, "To").unwrap_or_default(),
+                "received_at": mail_header_value(&parsed, "Date").unwrap_or_default(),
+                "content_format": content_format,
+                "content": content,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to parse .eml file: {}", e),
+            "path": source_path.to_string_lossy(),
+        })),
+    }
 }
 
 async fn get_rules(
@@ -3309,20 +3583,36 @@ async fn post_manual_process_emails(
             continue;
         };
 
+        let finance_records_before = count_financial_records(&state.pool, &user.id, &id).await;
+        let process_method = if force_reextract {
+            "manual_reprocess"
+        } else {
+            "manual_process"
+        };
+
         if status != "pending" && !force_reextract {
             skipped += 1;
             results.push(serde_json::json!({ "email_id": id, "result": "skipped", "reason": "Status is not pending" }));
+            log_email_processing(
+                &state.pool,
+                &user.id,
+                &id,
+                process_method,
+                Some(&status),
+                Some(&status),
+                "skipped",
+                finance_records_before,
+                finance_records_before,
+                serde_json::json!({ "reason": "Status is not pending" }),
+            )
+            .await;
             continue;
         }
 
+        let mut removed_finance_records = 0_i64;
         if force_reextract {
-            let _ = sqlx::query(
-                "DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?",
-            )
-            .bind(&user.id)
-            .bind(&id)
-            .execute(&state.pool)
-            .await;
+            removed_finance_records =
+                rollback_financial_records_for_email(&state.pool, &user.id, &id).await;
             let _ = sqlx::query("DELETE FROM auto_replies WHERE user_id = ? AND source_email_id = ? AND reply_status = 'draft'")
                 .bind(&user.id)
                 .bind(&id)
@@ -3330,11 +3620,20 @@ async fn post_manual_process_emails(
                 .await;
         }
 
+        let source_name = if stored_content
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "stored_content"
+        } else {
+            "preview"
+        };
         let source_text = stored_content
             .filter(|s| !s.trim().is_empty())
             .or(preview)
             .unwrap_or_default();
-        crate::mail::analyze_and_store_financial_records(
+        let extracted_finance_records = crate::mail::analyze_and_store_financial_records(
             &state.pool,
             &state.ai_client,
             &user,
@@ -3343,14 +3642,51 @@ async fn post_manual_process_emails(
             &source_text,
         )
         .await;
+        let finance_records_after = count_financial_records(&state.pool, &user.id, &id).await;
 
-        let _ = sqlx::query("UPDATE emails SET status = 'drafted' WHERE id = ?")
+        let status_after = if status == "replied" {
+            "replied"
+        } else if finance_records_after > 0 {
+            "processed"
+        } else {
+            "drafted"
+        };
+
+        let _ = sqlx::query("UPDATE emails SET status = ? WHERE id = ?")
+            .bind(status_after)
             .bind(&id)
             .execute(&state.pool)
             .await;
 
         processed += 1;
-        results.push(serde_json::json!({ "email_id": id, "result": "processed" }));
+        log_email_processing(
+            &state.pool,
+            &user.id,
+            &id,
+            process_method,
+            Some(&status),
+            Some(status_after),
+            "processed",
+            finance_records_before,
+            finance_records_after,
+            serde_json::json!({
+                "force_reextract": force_reextract,
+                "removed_finance_records": removed_finance_records,
+                "extracted_finance_records": extracted_finance_records,
+                "source": source_name,
+            }),
+        )
+        .await;
+        results.push(serde_json::json!({
+            "email_id": id,
+            "result": "processed",
+            "status_before": status,
+            "status_after": status_after,
+            "finance_records_before": finance_records_before,
+            "finance_records_after": finance_records_after,
+            "removed_finance_records": removed_finance_records,
+            "extracted_finance_records": extracted_finance_records,
+        }));
     }
 
     Json(serde_json::json!({
@@ -4446,7 +4782,11 @@ async fn run_data_retention_purge(State(state): State<AppState>) -> Json<serde_j
 struct WishRow {
     id: String,
     title: String,
+    title_zh: Option<String>,
+    title_en: Option<String>,
     description: Option<String>,
+    description_zh: Option<String>,
+    description_en: Option<String>,
     created_by: Option<String>,
     is_official: bool,
     created_at: String,
@@ -4480,7 +4820,11 @@ async fn get_wishes(
         SELECT
             w.id         AS id,
             w.title      AS title,
+            w.title_zh   AS title_zh,
+            w.title_en   AS title_en,
             w.description AS description,
+            w.description_zh AS description_zh,
+            w.description_en AS description_en,
             w.created_by  AS created_by,
             w.is_official AS is_official,
             w.created_at  AS created_at,
@@ -4515,7 +4859,11 @@ async fn get_wishes(
                     user_has_voted: voted_ids.contains(&r.id),
                     id: r.id,
                     title: r.title,
+                    title_zh: r.title_zh,
+                    title_en: r.title_en,
                     description: r.description,
+                    description_zh: r.description_zh,
+                    description_en: r.description_en,
                     created_by: r.created_by,
                     is_official: r.is_official,
                     created_at: r.created_at,
@@ -4549,8 +4897,28 @@ async fn post_create_wish(
         )
             .into_response();
     }
+    let title_zh = body
+        .title_zh
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let title_en = body
+        .title_en
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
     let description = body
         .description
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let description_zh = body
+        .description_zh
+        .as_deref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let description_en = body
+        .description_en
         .as_deref()
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty());
@@ -4573,11 +4941,15 @@ async fn post_create_wish(
 
     let id = uuid::Uuid::new_v4().to_string();
     let result = sqlx::query(
-        "INSERT INTO feature_wishes (id, title, description, created_by, is_official) VALUES (?, ?, ?, ?, 0)"
+        "INSERT INTO feature_wishes (id, title, title_zh, title_en, description, description_zh, description_en, created_by, is_official) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)"
     )
     .bind(&id)
     .bind(&title)
+    .bind(&title_zh)
+    .bind(&title_en)
     .bind(&description)
+    .bind(&description_zh)
+    .bind(&description_en)
     .bind(&user_id)
     .execute(&state.pool)
     .await;
@@ -4842,6 +5214,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
             "/admin/remote-debug/access-mode",
             post(post_admin_remote_debug_access_mode),
         )
+        .route("/errors/:id/message", get(get_mail_error_message))
         .route("/errors/retry", post(post_retry_mail_error))
         .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))

@@ -2,6 +2,7 @@ use crate::config::Config;
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone)]
 pub struct AiClient {
@@ -46,7 +47,7 @@ struct ChatChoice {
 
 #[derive(Deserialize)]
 struct ChatMessageResponse {
-    content: String,
+    content: Option<String>,
 }
 
 pub struct ChatResult {
@@ -91,13 +92,30 @@ impl AiClient {
         }
 
         let start = std::time::Instant::now();
-        let res = req.send().await?.json::<ChatResponse>().await?;
+        let response = req.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "AI API returned HTTP {}: {}",
+                status,
+                summarize_body(&body)
+            ));
+        }
+
+        let res = parse_chat_response(&body).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to decode AI response body: {}; body={}",
+                e,
+                summarize_body(&body)
+            )
+        })?;
         let duration = start.elapsed().as_millis() as u64;
 
         if let Some(choice) = res.choices.first() {
             let total_tokens = res.usage.map(|u| u.total_tokens).unwrap_or(0);
             Ok(ChatResult {
-                content: choice.message.content.clone(),
+                content: choice.message.content.clone().unwrap_or_default(),
                 total_tokens,
                 duration_ms: duration,
                 finish_reason: choice.finish_reason.clone(),
@@ -106,4 +124,86 @@ impl AiClient {
             Err(anyhow::anyhow!("No choices returned from AI API"))
         }
     }
+}
+
+fn summarize_body(body: &str) -> String {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let summary: String = normalized.chars().take(800).collect();
+    if normalized.chars().count() > 800 {
+        format!("{summary}...")
+    } else {
+        summary
+    }
+}
+
+fn parse_chat_response(body: &str) -> Result<ChatResponse, serde_json::Error> {
+    match serde_json::from_str::<ChatResponse>(body) {
+        Ok(res) => Ok(res),
+        Err(first_err) => {
+            if let Some(json) = extract_sse_chat_json(body) {
+                serde_json::from_str::<ChatResponse>(&json)
+            } else if let Ok(value) = serde_json::from_str::<Value>(body) {
+                parse_compatible_chat_response(value).map_err(|_| first_err)
+            } else {
+                Err(first_err)
+            }
+        }
+    }
+}
+
+fn extract_sse_chat_json(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        if data.starts_with('{') {
+            return Some(data.to_string());
+        }
+    }
+    None
+}
+
+fn parse_compatible_chat_response(value: Value) -> Result<ChatResponse> {
+    if let Some(content) = value.get("content").and_then(Value::as_str) {
+        return Ok(ChatResponse {
+            choices: vec![ChatChoice {
+                message: ChatMessageResponse {
+                    content: Some(content.to_string()),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        });
+    }
+
+    if let Some(response) = value.get("response").and_then(Value::as_str) {
+        return Ok(ChatResponse {
+            choices: vec![ChatChoice {
+                message: ChatMessageResponse {
+                    content: Some(response.to_string()),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        });
+    }
+
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return Ok(ChatResponse {
+            choices: vec![ChatChoice {
+                message: ChatMessageResponse {
+                    content: Some(text.to_string()),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        });
+    }
+
+    serde_json::from_value(value).map_err(anyhow::Error::from)
 }

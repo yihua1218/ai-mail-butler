@@ -1,0 +1,8 @@
+services:
+  ai-mail-butler:
+    devices:
+      - /dev/fuse:/dev/fuse
+    volumes:
+      - ${HOME}/.ssh:/root/.ssh:ro
+    cap_add:
+      - SYS_ADMIN

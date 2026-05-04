@@ -401,6 +401,29 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
 
+    // Append-only processing history for manual checks/reprocessing.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS email_processing_logs (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            email_id TEXT NOT NULL,
+            process_method TEXT NOT NULL,
+            status_before TEXT,
+            status_after TEXT,
+            result TEXT NOT NULL,
+            finance_records_before INTEGER NOT NULL DEFAULT 0,
+            finance_records_after INTEGER NOT NULL DEFAULT 0,
+            details TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(email_id) REFERENCES emails(id)
+        );",
+    )
+    .execute(&pool)
+    .await?;
+
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_logs_user_email_created ON email_processing_logs(user_id, email_id, created_at DESC)").execute(&pool).await;
+
     // Consent audit trail for legal proof (GDPR/CCPA compliance)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS consent_audit_trail (
@@ -482,7 +505,11 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         "CREATE TABLE IF NOT EXISTS feature_wishes (
             id TEXT PRIMARY KEY NOT NULL,
             title TEXT NOT NULL,
+            title_zh TEXT,
+            title_en TEXT,
             description TEXT,
+            description_zh TEXT,
+            description_en TEXT,
             created_by TEXT,
             is_official BOOLEAN NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -490,6 +517,18 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    let _ = sqlx::query("ALTER TABLE feature_wishes ADD COLUMN title_zh TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE feature_wishes ADD COLUMN title_en TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE feature_wishes ADD COLUMN description_zh TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE feature_wishes ADD COLUMN description_en TEXT")
+        .execute(&pool)
+        .await;
 
     // One vote per user per wish (unique constraint enforces this).
     sqlx::query(
@@ -507,41 +546,69 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .await?;
 
     // Seed official wishes (idempotent — ignored if they already exist).
-    let official_wishes: &[(&str, &str, &str)] = &[
+    let official_wishes: &[(&str, &str, &str, &str, &str)] = &[
         (
             "official-auto-reply",
-            "自動回信 / Auto Reply",
-            "根據您的規則自動產生並寄出回信。AI 助理會分析來信內容，套用您定義的回覆規則，自動草擬或直接寄出回覆。\nAutomatically draft and send replies based on your rules. The AI assistant analyzes incoming messages and applies your defined reply rules.",
+            "自動回信",
+            "Auto Reply",
+            "根據您的規則自動產生並寄出回信。AI 助理會分析來信內容，套用您定義的回覆規則，自動草擬或直接寄出回覆。",
+            "Automatically draft and send replies based on your rules. The AI assistant analyzes incoming messages and applies your defined reply rules.",
         ),
         (
             "official-bill-accounting",
-            "帳務整理 / Bill & Finance Accounting",
-            "自動從信件中萃取帳單、交易、繳費通知等財務資訊，彙整為月度報表。\nAutomatically extract billing, transaction, and payment notices from emails and aggregate them into monthly finance summaries.",
+            "帳務整理",
+            "Bill & Finance Accounting",
+            "自動從信件中萃取帳單、交易、繳費通知等財務資訊，彙整為月度報表。",
+            "Automatically extract billing, transaction, and payment notices from emails and aggregate them into monthly finance summaries.",
         ),
         (
             "wish-smart-labels",
-            "智慧分類標籤 / Smart Label Classification",
-            "讓 AI 依信件內容自動建立分類標籤，不再需要手動整理收件匣。\nLet the AI automatically create classification labels based on email content, keeping your inbox organized without manual effort.",
+            "智慧分類標籤",
+            "Smart Label Classification",
+            "讓 AI 依信件內容自動建立分類標籤，不再需要手動整理收件匣。",
+            "Let the AI automatically create classification labels based on email content, keeping your inbox organized without manual effort.",
         ),
         (
             "wish-meeting-summary",
-            "會議邀請摘要 / Meeting Invitation Summary",
-            "自動解析信件中的會議邀請，摘要時間、地點、議程，並可匯出至日曆。\nAutomatically parse meeting invitations from emails, summarize time, location, and agenda, with calendar export support.",
+            "會議邀請摘要",
+            "Meeting Invitation Summary",
+            "自動解析信件中的會議邀請，摘要時間、地點、議程，並可匯出至日曆。",
+            "Automatically parse meeting invitations from emails, summarize time, location, and agenda, with calendar export support.",
         ),
         (
             "wish-subscription-tracker",
-            "訂閱追蹤 / Subscription Tracker",
-            "偵測並追蹤所有訂閱通知與定期扣款，彙整成訂閱管理清單。\nDetect and track all subscription notifications and recurring charges, aggregated into a subscription management list.",
+            "訂閱追蹤",
+            "Subscription Tracker",
+            "偵測並追蹤所有訂閱通知與定期扣款，彙整成訂閱管理清單。",
+            "Detect and track all subscription notifications and recurring charges, aggregated into a subscription management list.",
         ),
     ];
 
-    for (id, title, description) in official_wishes {
+    for (id, title_zh, title_en, description_zh, description_en) in official_wishes {
+        let title = format!("{title_zh} / {title_en}");
+        let description = format!("{description_zh}\n{description_en}");
         let _ = sqlx::query(
-            "INSERT OR IGNORE INTO feature_wishes (id, title, description, created_by, is_official) VALUES (?, ?, ?, NULL, 1)"
+            "INSERT OR IGNORE INTO feature_wishes (id, title, title_zh, title_en, description, description_zh, description_en, created_by, is_official) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1)"
         )
         .bind(id)
-        .bind(title)
-        .bind(description)
+        .bind(&title)
+        .bind(title_zh)
+        .bind(title_en)
+        .bind(&description)
+        .bind(description_zh)
+        .bind(description_en)
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query(
+            "UPDATE feature_wishes
+             SET title_zh = ?, title_en = ?, description_zh = ?, description_en = ?
+             WHERE id = ? AND is_official = 1",
+        )
+        .bind(title_zh)
+        .bind(title_en)
+        .bind(description_zh)
+        .bind(description_en)
+        .bind(id)
         .execute(&pool)
         .await;
     }
