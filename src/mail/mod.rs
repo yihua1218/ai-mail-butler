@@ -471,6 +471,54 @@ fn collect_inline_text_parts<'a>(
     out.push(part);
 }
 
+#[derive(Debug, Clone, Default)]
+struct DecodedMailBodies {
+    plain: Option<String>,
+    html: Option<String>,
+}
+
+impl DecodedMailBodies {
+    fn preferred_preview_source(&self, fallback: &str) -> String {
+        self.plain
+            .as_ref()
+            .or(self.html.as_ref())
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn ai_source(&self, fallback: &str) -> String {
+        self.preferred_preview_source(fallback)
+    }
+}
+
+fn collect_inline_text_bodies(parsed: &mailparse::ParsedMail<'_>) -> DecodedMailBodies {
+    let mut parts = Vec::new();
+    collect_inline_text_parts(parsed, &mut parts);
+
+    let mut plain = Vec::new();
+    let mut html = Vec::new();
+    for part in parts {
+        let Ok(decoded) = part.get_body() else {
+            continue;
+        };
+        if decoded.trim().is_empty() {
+            continue;
+        }
+
+        if part.ctype.mimetype.eq_ignore_ascii_case("text/html") {
+            html.push(decoded);
+        } else {
+            plain.push(decoded);
+        }
+    }
+
+    DecodedMailBodies {
+        plain: (!plain.is_empty()).then(|| plain.join("\n\n")),
+        html: (!html.is_empty()).then(|| html.join("\n\n")),
+    }
+}
+
 fn infer_attachment_filename(part: &mailparse::ParsedMail<'_>, index: usize) -> String {
     let disposition = part.get_content_disposition();
     if let Some(name) = disposition.params.get("filename") {
@@ -1451,6 +1499,7 @@ impl MailService {
             .map(|h| h.get_value())
             .unwrap_or_default();
         let body = parsed.get_body().unwrap_or_default();
+        let decoded_bodies = collect_inline_text_bodies(&parsed);
 
         let to_clean =
             first_email_address(&to_addr).unwrap_or_else(|| to_addr.trim().to_ascii_lowercase());
@@ -1524,7 +1573,8 @@ impl MailService {
                 format!("Resolved user {}", u.email),
             );
             let id = Uuid::new_v4().to_string();
-            let preview = body.chars().take(100).collect::<String>();
+            let preferred_content = decoded_bodies.preferred_preview_source(&body);
+            let preview = preferred_content.chars().take(100).collect::<String>();
             let _ = sqlx::query(
                 "INSERT INTO emails (id, user_id, subject, preview, status) VALUES (?, ?, ?, ?, 'pending')",
             )
@@ -1535,16 +1585,27 @@ impl MailService {
             .execute(pool)
             .await;
 
-            let _ = sqlx::query("UPDATE emails SET stored_content = ? WHERE id = ?")
-                .bind(&body)
+            let _ = sqlx::query(
+                "UPDATE emails SET stored_content = ?, plain_content = ?, html_content = ? WHERE id = ?",
+            )
+                .bind(&preferred_content)
+                .bind(decoded_bodies.plain.as_deref())
+                .bind(decoded_bodies.html.as_deref())
                 .bind(&id)
                 .execute(pool)
                 .await;
 
             push_step(&mut simulation_logs, options, "Run financial extraction");
-            let financial_record_count =
-                analyze_and_store_financial_records(pool, ai_client, &u, &id, &subject, &body)
-                    .await;
+            let ai_content = decoded_bodies.ai_source(&body);
+            let financial_record_count = analyze_and_store_financial_records(
+                pool,
+                ai_client,
+                &u,
+                &id,
+                &subject,
+                &ai_content,
+            )
+            .await;
 
             let status_after = if financial_record_count > 0 {
                 "processed"
@@ -2084,7 +2145,11 @@ impl MailService {
                                         );
                                     }
                                     let id = Uuid::new_v4().to_string();
-                                    let preview = body.chars().take(100).collect::<String>();
+                                    let decoded_bodies = collect_inline_text_bodies(&parsed);
+                                    let preferred_content =
+                                        decoded_bodies.preferred_preview_source(&body);
+                                    let preview =
+                                        preferred_content.chars().take(100).collect::<String>();
 
                                     sqlx::query(
                                         "INSERT INTO emails (id, user_id, subject, preview, status) \
@@ -2099,19 +2164,21 @@ impl MailService {
                                     .unwrap_or_default();
 
                                     let stored_content = if pdf_texts.is_empty() {
-                                        body.clone()
+                                        preferred_content.clone()
                                     } else {
                                         format!(
                                             "{}\n\n[PDF Extracted]\n{}",
-                                            body,
+                                            preferred_content,
                                             pdf_texts.join("\n---\n")
                                         )
                                     };
 
                                     let _ = sqlx::query(
-                                        "UPDATE emails SET stored_content = ? WHERE id = ?",
+                                        "UPDATE emails SET stored_content = ?, plain_content = ?, html_content = ? WHERE id = ?",
                                     )
                                     .bind(&stored_content)
+                                    .bind(decoded_bodies.plain.as_deref())
+                                    .bind(decoded_bodies.html.as_deref())
                                     .bind(&id)
                                     .execute(&pool)
                                     .await;

@@ -13,6 +13,7 @@ import {
   Space,
   Statistic,
   Table,
+  Tabs,
   Tag,
   Typography,
   message,
@@ -31,6 +32,8 @@ type EmailRow = {
   subject?: string;
   preview?: string;
   stored_content?: string;
+  plain_content?: string;
+  html_content?: string;
   status: string;
   matched_rule_label?: string;
   received_at?: string;
@@ -247,6 +250,8 @@ const DashboardPage: React.FC = () => {
         subject: res.data.subject || record.error_type || t('email_no_subject'),
         preview: res.data.content || '',
         stored_content: res.data.content || '',
+        plain_content: res.data.plain_content || '',
+        html_content: res.data.html_content || '',
         status: record.error_type,
         matched_rule_label: res.data.path,
         received_at: res.data.received_at || record.occurred_at,
@@ -1017,8 +1022,59 @@ const DashboardPage: React.FC = () => {
   );
 
   const EmailViewerModal = () => {
-    const content = viewingEmail?.stored_content || viewingEmail?.preview || '';
-    const isHtml = !!content && isLikelyHtmlEmail(content);
+    const htmlContent = viewingEmail?.html_content || '';
+    const plainContent = viewingEmail?.plain_content || '';
+    const legacyContent = viewingEmail?.stored_content || viewingEmail?.preview || '';
+    const legacyIsHtml = !!legacyContent && isLikelyHtmlEmail(legacyContent);
+    const effectiveHtml = htmlContent || (legacyIsHtml ? legacyContent : '');
+    const effectivePlain = plainContent || (!legacyIsHtml ? legacyContent : '');
+    const hasHtml = !!effectiveHtml.trim();
+    const hasPlain = !!effectivePlain.trim();
+    const defaultContentKey = hasHtml ? 'html' : 'plain';
+    const tabs = [
+      ...(hasHtml ? [{
+        key: 'html',
+        label: t('email_format_html'),
+        children: (
+          <iframe
+            title={t('email_content')}
+            sandbox=""
+            referrerPolicy="no-referrer"
+            srcDoc={buildSafeEmailSrcDoc(effectiveHtml)}
+            style={{
+              width: '100%',
+              minHeight: 520,
+              border: '1px solid #f0f0f0',
+              borderRadius: 12,
+              background: '#fff',
+            }}
+          />
+        ),
+      }] : []),
+      ...(hasPlain ? [{
+        key: 'plain',
+        label: t('email_format_plain'),
+        children: (
+          <pre style={{
+            minHeight: 320,
+            maxHeight: '65vh',
+            overflow: 'auto',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            margin: 0,
+            padding: 16,
+            border: '1px solid #f0f0f0',
+            borderRadius: 12,
+            background: '#fbfbfd',
+            color: '#1d1d1f',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontSize: 13,
+          }}>
+            {effectivePlain}
+          </pre>
+        ),
+      }] : []),
+    ];
 
     return (
       <Modal
@@ -1036,43 +1092,16 @@ const DashboardPage: React.FC = () => {
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
             <Space wrap>
               <Tag>{t('email_received_at')}: {formatInUserTimezone(viewingEmail.received_at)}</Tag>
-              <Tag color={isHtml ? 'blue' : 'green'}>{isHtml ? t('email_format_html') : t('email_format_plain')}</Tag>
+              {hasHtml ? <Tag color="blue">{t('email_format_html')}</Tag> : null}
+              {hasPlain ? <Tag color="green">{t('email_format_plain')}</Tag> : null}
               <Tag color="gold">{t('email_safe_view')}</Tag>
             </Space>
-            {content ? (
-              isHtml ? (
-                <iframe
-                  title={t('email_content')}
-                  sandbox=""
-                  referrerPolicy="no-referrer"
-                  srcDoc={buildSafeEmailSrcDoc(content)}
-                  style={{
-                    width: '100%',
-                    minHeight: 520,
-                    border: '1px solid #f0f0f0',
-                    borderRadius: 12,
-                    background: '#fff',
-                  }}
-                />
-              ) : (
-                <pre style={{
-                  minHeight: 320,
-                  maxHeight: '65vh',
-                  overflow: 'auto',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  margin: 0,
-                  padding: 16,
-                  border: '1px solid #f0f0f0',
-                  borderRadius: 12,
-                  background: '#fbfbfd',
-                  color: '#1d1d1f',
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                  fontSize: 13,
-                }}>
-                  {content}
-                </pre>
-              )
+            {tabs.length ? (
+              <Tabs
+                key={viewingEmail.id}
+                defaultActiveKey={defaultContentKey}
+                items={tabs}
+              />
             ) : (
               <Alert message={t('email_no_content')} type="info" showIcon />
             )}

@@ -1522,12 +1522,28 @@ fn mail_header_value(parsed: &mailparse::ParsedMail<'_>, key: &str) -> Option<St
         .map(|h| h.get_value())
 }
 
+#[derive(Debug, Clone, Default)]
+struct RenderedMailContent {
+    content_format: String,
+    content: String,
+    plain_content: Option<String>,
+    html_content: Option<String>,
+}
+
 fn collect_mail_body_parts(
     part: &mailparse::ParsedMail<'_>,
     plain: &mut Vec<String>,
     html: &mut Vec<String>,
 ) {
     if part.subparts.is_empty() {
+        let disposition = part.get_content_disposition();
+        if matches!(
+            disposition.disposition,
+            mailparse::DispositionType::Attachment
+        ) {
+            return;
+        }
+
         let body = part.get_body().unwrap_or_default();
         if body.trim().is_empty() {
             return;
@@ -1547,17 +1563,36 @@ fn collect_mail_body_parts(
     }
 }
 
-fn render_mail_content(parsed: &mailparse::ParsedMail<'_>) -> (String, String) {
+fn render_mail_content(parsed: &mailparse::ParsedMail<'_>) -> RenderedMailContent {
     let mut plain = Vec::new();
     let mut html = Vec::new();
     collect_mail_body_parts(parsed, &mut plain, &mut html);
 
+    let plain_content = (!plain.is_empty()).then(|| plain.join("\n\n"));
+    let html_content = (!html.is_empty()).then(|| html.join("\n\n"));
+
     if !html.is_empty() {
-        ("html".to_string(), html.join("\n\n"))
+        RenderedMailContent {
+            content_format: "html".to_string(),
+            content: html_content.clone().unwrap_or_default(),
+            plain_content,
+            html_content,
+        }
     } else if !plain.is_empty() {
-        ("plain".to_string(), plain.join("\n\n"))
+        RenderedMailContent {
+            content_format: "plain".to_string(),
+            content: plain_content.clone().unwrap_or_default(),
+            plain_content,
+            html_content,
+        }
     } else {
-        ("plain".to_string(), parsed.get_body().unwrap_or_default())
+        let content = parsed.get_body().unwrap_or_default();
+        RenderedMailContent {
+            content_format: "plain".to_string(),
+            content: content.clone(),
+            plain_content: (!content.trim().is_empty()).then_some(content),
+            html_content,
+        }
     }
 }
 
@@ -1639,7 +1674,7 @@ async fn get_dashboard(
                 .unwrap_or(None);
 
             if let Some((uid,)) = user_id {
-                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
 
@@ -3497,7 +3532,7 @@ async fn get_mail_error_message(
 
     match mailparse::parse_mail(&bytes) {
         Ok(parsed) => {
-            let (content_format, content) = render_mail_content(&parsed);
+            let rendered = render_mail_content(&parsed);
             Json(serde_json::json!({
                 "status": "success",
                 "path": source_path.to_string_lossy(),
@@ -3505,8 +3540,10 @@ async fn get_mail_error_message(
                 "from": mail_header_value(&parsed, "From").unwrap_or_default(),
                 "to": mail_header_value(&parsed, "To").unwrap_or_default(),
                 "received_at": mail_header_value(&parsed, "Date").unwrap_or_default(),
-                "content_format": content_format,
-                "content": content,
+                "content_format": rendered.content_format,
+                "content": rendered.content,
+                "plain_content": rendered.plain_content,
+                "html_content": rendered.html_content,
             }))
         }
         Err(e) => Json(serde_json::json!({
@@ -3568,8 +3605,8 @@ async fn post_manual_process_emails(
     let mut results = Vec::new();
 
     for email_id in payload.email_ids {
-        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, String)>(
-            "SELECT id, subject, preview, stored_content, status FROM emails WHERE id = ? AND user_id = ?"
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String)>(
+            "SELECT id, subject, preview, stored_content, plain_content, html_content, status FROM emails WHERE id = ? AND user_id = ?"
         )
         .bind(&email_id)
         .bind(&user.id)
@@ -3577,7 +3614,8 @@ async fn post_manual_process_emails(
         .await
         .unwrap_or(None);
 
-        let Some((id, subject, preview, stored_content, status)) = row else {
+        let Some((id, subject, preview, stored_content, plain_content, html_content, status)) = row
+        else {
             failed += 1;
             results.push(serde_json::json!({ "email_id": email_id, "result": "failed", "reason": "Email not found" }));
             continue;
@@ -3620,16 +3658,31 @@ async fn post_manual_process_emails(
                 .await;
         }
 
-        let source_name = if stored_content
+        let source_name = if plain_content
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "plain_content"
+        } else if stored_content
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
         {
             "stored_content"
+        } else if html_content
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "html_content"
         } else {
             "preview"
         };
-        let source_text = stored_content
+        let source_text = plain_content
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| stored_content.filter(|s| !s.trim().is_empty()))
+            .or_else(|| html_content.filter(|s| !s.trim().is_empty()))
             .filter(|s| !s.trim().is_empty())
             .or(preview)
             .unwrap_or_default();
