@@ -718,6 +718,13 @@ fn extract_json_segment(raw: &str) -> String {
     raw.trim().to_string()
 }
 
+fn should_send_unmatched_rule_guidance(
+    financial_record_count: i64,
+    handled_by_ai_rule: bool,
+) -> bool {
+    financial_record_count == 0 && !handled_by_ai_rule
+}
+
 pub(crate) async fn analyze_and_store_financial_records(
     pool: &SqlitePool,
     ai_client: &AiClient,
@@ -969,6 +976,21 @@ mod tests {
             normalize_finance_direction(Some("支出"), "expense"),
             "expense"
         );
+    }
+
+    #[test]
+    fn unmatched_rule_guidance_is_skipped_after_financial_processing() {
+        assert!(!should_send_unmatched_rule_guidance(1, false));
+    }
+
+    #[test]
+    fn unmatched_rule_guidance_is_skipped_after_ai_rule_processing() {
+        assert!(!should_send_unmatched_rule_guidance(0, true));
+    }
+
+    #[test]
+    fn unmatched_rule_guidance_is_sent_only_when_unhandled() {
+        assert!(should_send_unmatched_rule_guidance(0, false));
     }
 
     #[test]
@@ -2555,7 +2577,10 @@ impl MailService {
                                                 .await;
                                             }
                                         }
-                                    } else if !matched_rule {
+                                    } else if should_send_unmatched_rule_guidance(
+                                        financial_record_count,
+                                        matched_rule,
+                                    ) {
                                         let token = Uuid::new_v4().to_string();
                                         let _ = sqlx::query(
                                             "UPDATE users SET magic_token = ? WHERE id = ?",
