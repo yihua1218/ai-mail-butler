@@ -1305,6 +1305,10 @@ async fn readonly_write_guard(
         return next.run(req).await;
     }
 
+    if remote_debug_api_writes_enabled(&state).await {
+        return next.run(req).await;
+    }
+
     let payload = serde_json::json!({
         "status": "error",
         "message": "Read-only overlay mode is enabled. Write operations are blocked.",
@@ -2321,6 +2325,18 @@ fn normalize_remote_debug_access_mode(value: &str) -> String {
         "readwrite" | "read-write" | "rw" | "writable" => "readwrite".to_string(),
         _ => "readonly".to_string(),
     }
+}
+
+async fn remote_debug_api_writes_enabled(state: &AppState) -> bool {
+    state.config.readonly_mode_enabled
+        && state.config.readonly_block_writes
+        && state.config.remote_debug_sshfs_enabled
+        && state
+            .config
+            .remote_debug_mode
+            .trim()
+            .eq_ignore_ascii_case("overlay")
+        && load_remote_debug_access_mode(state).await == "readwrite"
 }
 
 async fn get_admin_runtime_info(

@@ -912,6 +912,13 @@ const DashboardPage: React.FC = () => {
             {runtimeInfo.readonly_mode_enabled && <Tag color="orange">{t('remote_debug_app_readonly')}</Tag>}
           </Space>
           <div style={{ color: '#86868b' }}>{t('remote_debug_desc')}</div>
+          {accessMode === 'readwrite' && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t('remote_debug_api_write_enabled')}
+            />
+          )}
           <Space wrap>
             <span>{t('remote_debug_access_mode')}</span>
             <Select
@@ -934,7 +941,11 @@ const DashboardPage: React.FC = () => {
             </Button>
           </Space>
           <div style={{ color: canSyncSnapshot ? '#86868b' : '#bf8700' }}>
-            {canSyncSnapshot ? t('remote_debug_sync_desc') : t('remote_debug_sync_disabled_desc')}
+            {accessMode === 'readwrite'
+              ? t('remote_debug_api_write_desc')
+              : canSyncSnapshot
+                ? t('remote_debug_sync_desc')
+                : t('remote_debug_sync_disabled_desc')}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', rowGap: 8, columnGap: 12 }}>
             <span>{t('remote_debug_remote')}</span>
