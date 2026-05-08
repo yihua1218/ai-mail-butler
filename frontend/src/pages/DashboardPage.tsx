@@ -18,7 +18,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { CloudServerOutlined, MailOutlined, MessageOutlined, RobotOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
+import { CloudServerOutlined, MailOutlined, MessageOutlined, RobotOutlined, SyncOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -222,6 +222,7 @@ const DashboardPage: React.FC = () => {
   const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
   const [savingRemoteDebugMode, setSavingRemoteDebugMode] = useState(false);
+  const [syncingRemoteDebug, setSyncingRemoteDebug] = useState(false);
   const [cachePurgeTarget, setCachePurgeTarget] = useState<string>('frontend');
   const [purgingCache, setPurgingCache] = useState(false);
   const [viewingEmail, setViewingEmail] = useState<EmailRow | null>(null);
@@ -750,6 +751,34 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  const syncRemoteDebugSnapshot = async () => {
+    if (!user?.email || !isAdmin) return;
+    Modal.confirm({
+      title: t('remote_debug_sync_confirm_title'),
+      content: t('remote_debug_sync_confirm_desc'),
+      okText: t('remote_debug_sync_run'),
+      cancelText: t('btn_cancel'),
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setSyncingRemoteDebug(true);
+        try {
+          const res = await axios.post('/api/admin/remote-debug/sync', {
+            email: user.email,
+          });
+          message.success(t('remote_debug_sync_success', { rows: res.data?.total_rows ?? 0 }));
+          await reloadDashboard();
+          await loadDraftReplies();
+          const runtime = await axios.get(`/api/admin/runtime?email=${encodeURIComponent(user.email)}`);
+          setRuntimeInfo(runtime.data || null);
+        } catch (error: any) {
+          message.error(error?.response?.data?.message || t('remote_debug_sync_failed'));
+        } finally {
+          setSyncingRemoteDebug(false);
+        }
+      },
+    });
+  };
+
   const LogFilterBar = () => (
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
@@ -862,6 +891,7 @@ const DashboardPage: React.FC = () => {
     const mode = runtimeInfo.remote_debug_mode || 'readonly';
     const isOverlay = mode === 'overlay';
     const accessMode = runtimeInfo.remote_debug_access_mode || 'readonly';
+    const canSyncSnapshot = enabled && isOverlay && runtimeInfo.readonly_mode_enabled && accessMode === 'readonly';
     return (
       <Card
         bordered={false}
@@ -894,7 +924,18 @@ const DashboardPage: React.FC = () => {
                 { value: 'readwrite', label: t('remote_debug_readwrite') },
               ]}
             />
+            <Button
+              icon={<SyncOutlined />}
+              loading={syncingRemoteDebug}
+              disabled={!canSyncSnapshot}
+              onClick={syncRemoteDebugSnapshot}
+            >
+              {t('remote_debug_sync_run')}
+            </Button>
           </Space>
+          <div style={{ color: canSyncSnapshot ? '#86868b' : '#bf8700' }}>
+            {canSyncSnapshot ? t('remote_debug_sync_desc') : t('remote_debug_sync_disabled_desc')}
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', rowGap: 8, columnGap: 12 }}>
             <span>{t('remote_debug_remote')}</span>
             <code>{runtimeInfo.remote_debug_remote || '-'}</code>

@@ -17,7 +17,7 @@ use tracing::info;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -1300,6 +1300,7 @@ async fn readonly_write_guard(
     if path == "/api/auth/magic-link"
         || path == "/api/auth/verify"
         || path == "/api/admin/remote-debug/access-mode"
+        || path == "/api/admin/remote-debug/sync"
     {
         return next.run(req).await;
     }
@@ -2290,6 +2291,18 @@ struct RemoteDebugAccessModeRequest {
     access_mode: String,
 }
 
+#[derive(Serialize)]
+struct RemoteDebugSyncResult {
+    table: String,
+    columns: usize,
+    rows: i64,
+}
+
+#[derive(Deserialize)]
+struct RemoteDebugSyncRequest {
+    email: String,
+}
+
 async fn load_remote_debug_access_mode(state: &AppState) -> String {
     let configured = normalize_remote_debug_access_mode(&state.config.remote_debug_access_mode);
     sqlx::query_scalar::<_, String>(
@@ -2334,6 +2347,241 @@ async fn get_admin_runtime_info(
         remote_debug_overlay_dir: state.config.remote_debug_overlay_dir.clone(),
     })
     .into_response()
+}
+
+fn sqlite_url_to_path(database_url: &str) -> PathBuf {
+    PathBuf::from(
+        database_url
+            .trim_start_matches("sqlite:")
+            .trim_start_matches("//"),
+    )
+}
+
+fn resolve_overlay_relative_path(path: &std::path::Path) -> PathBuf {
+    if path.is_absolute() {
+        PathBuf::from(
+            path.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("data.sqlite")),
+        )
+    } else {
+        path.to_path_buf()
+    }
+}
+
+async fn resolve_remote_debug_base_db_path(state: &AppState) -> Option<PathBuf> {
+    let base = state
+        .config
+        .readonly_base
+        .as_deref()
+        .or(state.config.remote_debug_mount_point.as_deref())?;
+    let configured_db_path = sqlite_url_to_path(&state.config.database_url);
+    let relative_db_path = resolve_overlay_relative_path(&configured_db_path);
+
+    let primary = PathBuf::from(base).join(&relative_db_path);
+    if fs::try_exists(&primary).await.unwrap_or(false) {
+        return Some(primary);
+    }
+
+    if let Ok(stripped) = relative_db_path.strip_prefix("data") {
+        let data_root_path = PathBuf::from(base).join(stripped);
+        if fs::try_exists(&data_root_path).await.unwrap_or(false) {
+            return Some(data_root_path);
+        }
+    }
+
+    Some(primary)
+}
+
+fn quote_sqlite_ident(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+async fn sqlite_table_columns(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    schema: &str,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let query = format!(
+        "PRAGMA {}.table_info({})",
+        quote_sqlite_ident(schema),
+        quote_sqlite_ident(table)
+    );
+    let rows = sqlx::query(&query).fetch_all(&mut **conn).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("name").ok())
+        .collect())
+}
+
+async fn sync_remote_debug_snapshot(
+    state: &AppState,
+    remote_db_path: &std::path::Path,
+) -> anyhow::Result<(Vec<RemoteDebugSyncResult>, i64)> {
+    let mut conn = state.pool.acquire().await?;
+    let current_access_mode = load_remote_debug_access_mode(state).await;
+    let mut results = Vec::new();
+
+    sqlx::query("ATTACH DATABASE ? AS remote_snapshot")
+        .bind(remote_db_path.to_string_lossy().as_ref())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await?;
+
+    let sync_result = async {
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+        let table_rows = sqlx::query(
+            "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+
+        for row in table_rows {
+            let table = row.try_get::<String, _>("name")?;
+            let remote_exists: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM remote_snapshot.sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(&table)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if remote_exists.is_none() {
+                continue;
+            }
+
+            let main_columns = sqlite_table_columns(&mut conn, "main", &table).await?;
+            let remote_columns = sqlite_table_columns(&mut conn, "remote_snapshot", &table).await?;
+            let common_columns = main_columns
+                .into_iter()
+                .filter(|column| remote_columns.iter().any(|remote| remote == column))
+                .collect::<Vec<_>>();
+            if common_columns.is_empty() {
+                continue;
+            }
+
+            let table_ident = quote_sqlite_ident(&table);
+            let column_list = common_columns
+                .iter()
+                .map(|column| quote_sqlite_ident(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            sqlx::query(&format!("DELETE FROM main.{table_ident}"))
+                .execute(&mut *conn)
+                .await?;
+            let inserted = sqlx::query(&format!(
+                "INSERT INTO main.{table_ident} ({column_list}) SELECT {column_list} FROM remote_snapshot.{table_ident}"
+            ))
+            .execute(&mut *conn)
+            .await?
+            .rows_affected() as i64;
+
+            results.push(RemoteDebugSyncResult {
+                table,
+                columns: common_columns.len(),
+                rows: inserted,
+            });
+        }
+
+        sqlx::query(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('remote_debug_access_mode', ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(&current_access_mode)
+        .execute(&mut *conn)
+        .await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if sync_result.is_err() {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+    }
+    let _ = sqlx::query("DETACH DATABASE remote_snapshot")
+        .execute(&mut *conn)
+        .await;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await?;
+
+    sync_result?;
+    let total_rows = results.iter().map(|r| r.rows).sum();
+    Ok((results, total_rows))
+}
+
+async fn post_admin_remote_debug_sync(
+    State(state): State<AppState>,
+    Json(payload): Json<RemoteDebugSyncRequest>,
+) -> impl IntoResponse {
+    if !is_admin(&state, &payload.email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "status": "error", "message": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    let remote_debug_mode = state.config.remote_debug_mode.trim().to_ascii_lowercase();
+    if !state.config.remote_debug_sshfs_enabled
+        || remote_debug_mode != "overlay"
+        || !state.config.readonly_mode_enabled
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "status": "error", "message": "Remote debug sync requires overlay readonly mode" })),
+        )
+            .into_response();
+    }
+
+    let access_mode = load_remote_debug_access_mode(&state).await;
+    if access_mode != "readonly" {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "status": "error", "message": "Switch remote debug access to readonly before syncing" })),
+        )
+            .into_response();
+    }
+
+    let Some(remote_db_path) = resolve_remote_debug_base_db_path(&state).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "status": "error", "message": "Remote debug base database path is not configured" })),
+        )
+            .into_response();
+    };
+    if !fs::try_exists(&remote_db_path).await.unwrap_or(false) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": "Remote debug base database was not found",
+                "remote_db_path": remote_db_path.to_string_lossy(),
+            })),
+        )
+            .into_response();
+    }
+
+    match sync_remote_debug_snapshot(&state, &remote_db_path).await {
+        Ok((tables, total_rows)) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Remote debug snapshot synced",
+            "remote_db_path": remote_db_path.to_string_lossy(),
+            "tables": tables,
+            "total_rows": total_rows,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::error!("Remote debug sync failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": format!("Remote debug sync failed: {}", e) })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn post_admin_remote_debug_access_mode(
@@ -5266,6 +5514,10 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route(
             "/admin/remote-debug/access-mode",
             post(post_admin_remote_debug_access_mode),
+        )
+        .route(
+            "/admin/remote-debug/sync",
+            post(post_admin_remote_debug_sync),
         )
         .route("/errors/:id/message", get(get_mail_error_message))
         .route("/errors/retry", post(post_retry_mail_error))
