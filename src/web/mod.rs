@@ -2568,7 +2568,20 @@ async fn resolve_remote_debug_base_db_path(state: &AppState) -> Option<PathBuf> 
         .as_deref()
         .or(state.config.remote_debug_mount_point.as_deref())?;
     let configured_db_path = sqlite_url_to_path(&state.config.database_url);
-    let relative_db_path = resolve_overlay_relative_path(&configured_db_path);
+    let overlay_root = state
+        .config
+        .overlay_dir
+        .as_deref()
+        .unwrap_or("data/overlay");
+    let overlay_root_path = PathBuf::from(overlay_root);
+    let relative_db_path = if configured_db_path.starts_with(&overlay_root_path) {
+        configured_db_path
+            .strip_prefix(&overlay_root_path)
+            .unwrap_or(&configured_db_path)
+            .to_path_buf()
+    } else {
+        resolve_overlay_relative_path(&configured_db_path)
+    };
 
     let primary = PathBuf::from(base).join(&relative_db_path);
     if fs::try_exists(&primary).await.unwrap_or(false) {
