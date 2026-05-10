@@ -45,6 +45,7 @@ const FinanceAnalysisPage: React.FC = () => {
   const [records, setRecords] = useState<FinanceRecord[]>([]);
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
   const [dailyChartMode, setDailyChartMode] = useState<DailyFinanceChartMode>('expense');
+  const [selectedDailyKey, setSelectedDailyKey] = useState<string>('');
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(() => {
     try {
       return JSON.parse(localStorage.getItem(FINANCE_CARD_COLLAPSE_KEY) || '{}');
@@ -120,6 +121,40 @@ const FinanceAnalysisPage: React.FC = () => {
     }).format(date);
   };
 
+  const dayKeyFormatter = useMemo(() => new Intl.DateTimeFormat('en-CA', {
+    timeZone: user?.timezone || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }), [user?.timezone]);
+
+  const getDayKey = (date: Date) => {
+    const parts = dayKeyFormatter.formatToParts(date);
+    const year = parts.find((part) => part.type === 'year')?.value || '0000';
+    const month = parts.find((part) => part.type === 'month')?.value || '01';
+    const day = parts.find((part) => part.type === 'day')?.value || '01';
+    return `${year}-${month}-${day}`;
+  };
+
+  const getRecordDayKey = (row: FinanceRecord) => {
+    const iso = row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`;
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '' : getDayKey(date);
+  };
+
+  const formatDayKey = (dayKey: string) => {
+    if (!dayKey) return '';
+    const [year, month, day] = dayKey.split('-');
+    const date = new Date(`${year}-${month}-${day}T00:00:00Z`);
+    if (Number.isNaN(date.getTime())) return dayKey;
+    return new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  };
+
   const emailIdFromQuery = useMemo(() => {
     const params = new URLSearchParams(location.search);
     return params.get('emailId') || '';
@@ -174,6 +209,8 @@ const FinanceAnalysisPage: React.FC = () => {
     navigate(buildFinanceLink({ highlightEmailId: linkedEmailId, subject: linkedSubject }));
   };
 
+  const clearDailyFilter = () => setSelectedDailyKey('');
+
   const backToDashboard = () => {
     navigate(linkedEmailId ? `/dashboard?emailId=${encodeURIComponent(linkedEmailId)}` : '/dashboard');
   };
@@ -226,26 +263,11 @@ const FinanceAnalysisPage: React.FC = () => {
 
   const dailyFinanceLast30Days = useMemo(() => {
     const timezone = user?.timezone || 'UTC';
-    const dayPartsFormatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-
     const dayLabelFormatter = new Intl.DateTimeFormat(i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US', {
       timeZone: timezone,
       month: '2-digit',
       day: '2-digit',
     });
-
-    const getDayKey = (date: Date) => {
-      const parts = dayPartsFormatter.formatToParts(date);
-      const year = parts.find((part) => part.type === 'year')?.value || '0000';
-      const month = parts.find((part) => part.type === 'month')?.value || '01';
-      const day = parts.find((part) => part.type === 'day')?.value || '01';
-      return `${year}-${month}-${day}`;
-    };
 
     const dayKeys = Array.from({ length: 30 }, (_, index) => {
       const date = new Date();
@@ -262,10 +284,7 @@ const FinanceAnalysisPage: React.FC = () => {
       if (!isExpense && !isIncome) return;
       const amount = Math.abs(Number(row.amount) || 0);
       if (!amount) return;
-      const iso = row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`;
-      const date = new Date(iso);
-      if (Number.isNaN(date.getTime())) return;
-      const key = getDayKey(date);
+      const key = getRecordDayKey(row);
       if (!totals.has(key)) return;
       const current = totals.get(key) || { income: 0, expense: 0 };
       totals.set(key, {
@@ -305,7 +324,7 @@ const FinanceAnalysisPage: React.FC = () => {
       maxValue: niceMaxValue,
       yAxisTicks,
     };
-  }, [records, user?.timezone, i18n.language, dailyChartMode]);
+  }, [records, user?.timezone, i18n.language, dailyChartMode, dayKeyFormatter]);
 
   const dailyChartSeries = useMemo(() => {
     if (dailyChartMode === 'income') {
@@ -335,9 +354,31 @@ const FinanceAnalysisPage: React.FC = () => {
     { title: t('finance_updated_at_col'), dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
   ];
 
-  const filteredRecords = emailIdFromQuery
+  const emailFilteredRecords = emailIdFromQuery
     ? records.filter((row) => row.email_id === emailIdFromQuery)
     : records;
+  const filteredRecords = selectedDailyKey
+    ? emailFilteredRecords.filter((row) => getRecordDayKey(row) === selectedDailyKey)
+    : emailFilteredRecords;
+  const filteredMonthly = selectedDailyKey
+    ? Array.from(filteredRecords.reduce((acc, row) => {
+      const monthKey = row.transaction_month_key || row.month_key;
+      const category = row.category || row.direction || 'unknown';
+      const key = `${monthKey}-${category}`;
+      const current = acc.get(key) || {
+        month_key: monthKey,
+        category,
+        total_amount: 0,
+        updated_at: row.created_at,
+      };
+      current.total_amount += Math.abs(Number(row.amount) || 0);
+      if (row.created_at > current.updated_at) current.updated_at = row.created_at;
+      acc.set(key, current);
+      return acc;
+    }, new Map<string, MonthlyFinance>()).values()).sort((a, b) => (
+      b.month_key.localeCompare(a.month_key) || a.category.localeCompare(b.category)
+    ))
+    : monthly;
 
   const recordColumns: TableColumnsType<FinanceRecord> = [
     { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
@@ -425,7 +466,20 @@ const FinanceAnalysisPage: React.FC = () => {
               </div>
               <div className="finance-bar-chart-layout">
                 {dailyFinanceLast30Days.bars.map((item, index) => (
-                  <div className="finance-bar-column" key={item.key}>
+                  <div
+                    className={`finance-bar-column ${selectedDailyKey === item.key ? 'is-selected' : ''}`}
+                    key={item.key}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={selectedDailyKey === item.key}
+                    onClick={() => setSelectedDailyKey((current) => current === item.key ? '' : item.key)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSelectedDailyKey((current) => current === item.key ? '' : item.key);
+                      }
+                    }}
+                  >
                     <div className={`finance-bar-series ${dailyChartMode === 'both' ? 'is-grouped' : 'is-single'}`}>
                       {dailyChartSeries.map((series) => {
                         const value = series.key === 'income' ? item.income : item.expense;
@@ -467,10 +521,19 @@ const FinanceAnalysisPage: React.FC = () => {
         )}
       </CollapsibleCard>
       <CollapsibleCard storageKey="monthly-summary" title={t('finance_monthly_summary')}>
+        {selectedDailyKey && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={t('finance_daily_filter_active', { date: formatDayKey(selectedDailyKey) })}
+            action={<Button size="small" onClick={clearDailyFilter}>{t('finance_clear_daily_filter')}</Button>}
+          />
+        )}
         <Table
           rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`}
           columns={monthlyColumns}
-          dataSource={monthly}
+          dataSource={filteredMonthly}
           scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 12 }}
         />
@@ -483,8 +546,21 @@ const FinanceAnalysisPage: React.FC = () => {
             <Text type="secondary">
               {isFilteringByEmail ? t('finance_filtering_by') : t('finance_highlighting')}: {linkedSubject}
             </Text>
+            {selectedDailyKey && (
+              <Text type="secondary">
+                {t('finance_filtering_day')}: {formatDayKey(selectedDailyKey)}
+              </Text>
+            )}
             {isFilteringByEmail && <Button size="small" onClick={clearEmailFilter}>{t('finance_clear_filter')}</Button>}
+            {selectedDailyKey && <Button size="small" onClick={clearDailyFilter}>{t('finance_clear_daily_filter')}</Button>}
             <Button size="small" onClick={backToDashboard}>{t('finance_back_dashboard')}</Button>
+          </Space>
+        ) : selectedDailyKey ? (
+          <Space wrap>
+            <Text type="secondary">
+              {t('finance_filtering_day')}: {formatDayKey(selectedDailyKey)}
+            </Text>
+            <Button size="small" onClick={clearDailyFilter}>{t('finance_clear_daily_filter')}</Button>
           </Space>
         ) : null}
       >
