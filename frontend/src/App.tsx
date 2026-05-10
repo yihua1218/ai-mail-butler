@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Button, ConfigProvider, Dropdown, Input, Layout, Menu, Spin, Typography, message } from 'antd';
 import { GlobalOutlined, LoginOutlined, LogoutOutlined } from '@ant-design/icons';
 import axios from 'axios';
@@ -54,7 +54,13 @@ const App: React.FC = () => {
   const location = useLocation();
   const [loginEmail, setLoginEmail] = useState('');
   const [isLinkSent, setIsLinkSent] = useState(false);
-  const [readonlyInfo, setReadonlyInfo] = useState<{ enabled: boolean; overlayDir?: string; readonlyBase?: string }>({ enabled: false });
+  const [readonlyInfo, setReadonlyInfo] = useState<{
+    enabled: boolean;
+    writeApisBlocked: boolean;
+    remoteDebugApiWritesEnabled: boolean;
+    overlayDir?: string;
+    readonlyBase?: string;
+  }>({ enabled: false, writeApisBlocked: false, remoteDebugApiWritesEnabled: false });
 
   // Derive active menu key from current URL path
   const activeMenu = PATH_TO_KEY[location.pathname] ?? '1';
@@ -98,19 +104,27 @@ const App: React.FC = () => {
     document.title = `${titles[activeMenu] ?? 'AI Mail Butler'} | AI Mail Butler`;
   }, [activeMenu, t]);
 
-  useEffect(() => {
+  const loadReadonlyInfo = useCallback(() => {
     axios.get('/api/about')
       .then((res) => {
         setReadonlyInfo({
           enabled: !!res.data?.readonly_mode_enabled,
+          writeApisBlocked: !!res.data?.write_apis_blocked,
+          remoteDebugApiWritesEnabled: !!res.data?.remote_debug_api_writes_enabled,
           overlayDir: res.data?.overlay_dir || undefined,
           readonlyBase: res.data?.readonly_base || undefined,
         });
       })
       .catch(() => {
-        setReadonlyInfo({ enabled: false });
+        setReadonlyInfo({ enabled: false, writeApisBlocked: false, remoteDebugApiWritesEnabled: false });
       });
   }, []);
+
+  useEffect(() => {
+    loadReadonlyInfo();
+    window.addEventListener('ai-mail-butler:runtime-updated', loadReadonlyInfo);
+    return () => window.removeEventListener('ai-mail-butler:runtime-updated', loadReadonlyInfo);
+  }, [loadReadonlyInfo]);
 
   const handleMenuSelect = (key: string) => {
     navigate(KEY_TO_PATH[key] ?? '/dashboard');
@@ -284,10 +298,10 @@ const App: React.FC = () => {
               type="warning"
               showIcon
               style={{ marginBottom: 16 }}
-              message={i18n.language === 'zh-TW' ? '唯讀 Overlay 模式啟用中' : 'Read-only Overlay Mode Enabled'}
+              message={i18n.language === 'zh-TW' ? 'Overlay 模式啟用中' : 'Overlay Mode Enabled'}
               description={i18n.language === 'zh-TW'
-                ? `系統會阻擋所有寫入 API。Overlay: ${readonlyInfo.overlayDir || '-'}；Base: ${readonlyInfo.readonlyBase || '-'}`
-                : `All write APIs are blocked. Overlay: ${readonlyInfo.overlayDir || '-'}; Base: ${readonlyInfo.readonlyBase || '-'}.`}
+                ? `${readonlyInfo.writeApisBlocked ? '系統會阻擋所有寫入 API。' : readonlyInfo.remoteDebugApiWritesEnabled ? '遠端除錯寫入已開啟，寫入 API 會作用在本地 overlay，不會修改遠端 base。' : '寫入 API 會作用在本地 overlay，不會修改 base。'}Overlay: ${readonlyInfo.overlayDir || '-'}；Base: ${readonlyInfo.readonlyBase || '-'}`
+                : `${readonlyInfo.writeApisBlocked ? 'All write APIs are blocked.' : readonlyInfo.remoteDebugApiWritesEnabled ? 'Remote debug writes are enabled; write APIs run against the local overlay and do not modify the remote base.' : 'Write APIs run against the local overlay and do not modify the base.'} Overlay: ${readonlyInfo.overlayDir || '-'}; Base: ${readonlyInfo.readonlyBase || '-'}.`}
             />
           )}
           <Suspense fallback={pageFallback}>

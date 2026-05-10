@@ -18,7 +18,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { CloudServerOutlined, MailOutlined, MessageOutlined, RobotOutlined, SyncOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
+import { CloudServerOutlined, DownloadOutlined, MailOutlined, MessageOutlined, RobotOutlined, SyncOutlined, UserOutlined, WarningOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -207,7 +207,11 @@ const DashboardPage: React.FC = () => {
   const [replyText, setReplyText] = useState<string>('');
   const [replying, setReplying] = useState(false);
   const [selectedEmailRowKeys, setSelectedEmailRowKeys] = useState<React.Key[]>([]);
+  const [selectedErrorRowKeys, setSelectedErrorRowKeys] = useState<React.Key[]>([]);
   const [processingSelected, setProcessingSelected] = useState(false);
+  const [buildingSupportPackage, setBuildingSupportPackage] = useState(false);
+  const [supportPackageModalOpen, setSupportPackageModalOpen] = useState(false);
+  const [supportPackagePreview, setSupportPackagePreview] = useState<any>(null);
   const [retryingErrorId, setRetryingErrorId] = useState<number | null>(null);
   const [viewingErrorId, setViewingErrorId] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -637,6 +641,47 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  const buildSupportPackagePreview = async () => {
+    if (!user?.email) return;
+    if (selectedEmailRowKeys.length === 0 && selectedErrorRowKeys.length === 0) {
+      message.warning(t('support_package_select_required'));
+      return;
+    }
+    setBuildingSupportPackage(true);
+    try {
+      const res = await axios.post('/api/support-package/preview', {
+        email: user.email,
+        email_ids: selectedEmailRowKeys.map(String),
+        error_ids: selectedErrorRowKeys.map((key) => Number(key)).filter((key) => Number.isFinite(key)),
+      });
+      if (res.data?.status !== 'success') {
+        message.error(res.data?.message || t('support_package_failed'));
+        return;
+      }
+      setSupportPackagePreview(res.data.package);
+      setSupportPackageModalOpen(true);
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || t('support_package_failed'));
+    } finally {
+      setBuildingSupportPackage(false);
+    }
+  };
+
+  const downloadSupportPackage = () => {
+    if (!supportPackagePreview) return;
+    const json = JSON.stringify(supportPackagePreview, null, 2);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const generatedAt = String(supportPackagePreview.generated_at || new Date().toISOString()).replace(/[:.]/g, '-');
+    anchor.href = url;
+    anchor.download = `ai-mail-butler-support-package-${generatedAt}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const reprocessSingleEmail = async (emailId: string) => {
     if (!user?.email) return;
     setReprocessingEmailId(emailId);
@@ -742,7 +787,10 @@ const DashboardPage: React.FC = () => {
       setRuntimeInfo((current: any) => ({
         ...(current || {}),
         remote_debug_access_mode: res.data.remote_debug_access_mode || accessMode,
+        write_apis_blocked: res.data.write_apis_blocked,
+        remote_debug_api_writes_enabled: res.data.remote_debug_api_writes_enabled,
       }));
+      window.dispatchEvent(new Event('ai-mail-butler:runtime-updated'));
       message.success(t('remote_debug_mode_saved'));
     } catch (error: any) {
       message.error(error?.response?.data?.message || t('remote_debug_mode_save_failed'));
@@ -835,6 +883,25 @@ const DashboardPage: React.FC = () => {
     </div>
   );
 
+  const SupportPackageActionBar = () => (
+    <Space wrap>
+      <Button
+        icon={<DownloadOutlined />}
+        loading={buildingSupportPackage}
+        disabled={selectedEmailRowKeys.length === 0 && selectedErrorRowKeys.length === 0}
+        onClick={buildSupportPackagePreview}
+      >
+        {t('support_package_build')}
+      </Button>
+      <span style={{ color: '#86868b' }}>
+        {t('support_package_selected', {
+          emails: selectedEmailRowKeys.length,
+          logs: selectedErrorRowKeys.length,
+        })}
+      </span>
+    </Space>
+  );
+
   const GlobalStatsDisplay = () => (
     globalStats ? (
       <div style={{ marginBottom: isUltraWide ? 0 : 32 }}>
@@ -891,6 +958,8 @@ const DashboardPage: React.FC = () => {
     const mode = runtimeInfo.remote_debug_mode || 'readonly';
     const isOverlay = mode === 'overlay';
     const accessMode = runtimeInfo.remote_debug_access_mode || 'readonly';
+    const writeApisBlocked = runtimeInfo.write_apis_blocked ?? runtimeInfo.readonly_mode_enabled;
+    const remoteDebugApiWritesEnabled = !!runtimeInfo.remote_debug_api_writes_enabled;
     const canSyncSnapshot = enabled && isOverlay && runtimeInfo.readonly_mode_enabled && accessMode === 'readonly';
     return (
       <Card
@@ -909,10 +978,14 @@ const DashboardPage: React.FC = () => {
               {accessMode === 'readwrite' ? t('remote_debug_readwrite') : t('remote_debug_readonly')}
             </Tag>
             {isOverlay && <Tag color="blue">{t('remote_debug_overlay')}</Tag>}
-            {runtimeInfo.readonly_mode_enabled && <Tag color="orange">{t('remote_debug_app_readonly')}</Tag>}
+            {runtimeInfo.readonly_mode_enabled && (
+              <Tag color={writeApisBlocked ? 'orange' : 'green'}>
+                {writeApisBlocked ? t('remote_debug_app_readonly') : t('remote_debug_overlay_writable')}
+              </Tag>
+            )}
           </Space>
           <div style={{ color: '#86868b' }}>{t('remote_debug_desc')}</div>
-          {accessMode === 'readwrite' && (
+          {remoteDebugApiWritesEnabled && (
             <Alert
               type="warning"
               showIcon
@@ -985,6 +1058,59 @@ const DashboardPage: React.FC = () => {
       </Space>
     </Card>
   );
+
+  const SupportPackageModal = () => {
+    if (!supportPackagePreview) return null;
+    const summary = supportPackagePreview.summary || {};
+    const identitySummary = supportPackagePreview.identity_summary || {};
+    const previewText = JSON.stringify(supportPackagePreview, null, 2);
+    return (
+      <Modal
+        title={t('support_package_modal_title')}
+        open={supportPackageModalOpen}
+        onCancel={() => setSupportPackageModalOpen(false)}
+        width={900}
+        footer={[
+          <Button key="cancel" onClick={() => setSupportPackageModalOpen(false)}>
+            {t('btn_cancel')}
+          </Button>,
+          <Button key="download" type="primary" icon={<DownloadOutlined />} onClick={downloadSupportPackage}>
+            {t('support_package_download')}
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Alert
+            type="warning"
+            showIcon
+            message={t('support_package_review_notice')}
+            description={t('support_package_review_desc')}
+          />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12 }}>
+            <Card size="small"><Statistic title={t('support_package_emails')} value={summary.emails || 0} /></Card>
+            <Card size="small"><Statistic title={t('support_package_logs')} value={summary.mail_errors || 0} /></Card>
+            <Card size="small"><Statistic title={t('support_package_processing_logs')} value={summary.processing_logs || 0} /></Card>
+            <Card size="small"><Statistic title={t('support_package_identities')} value={(identitySummary.emails || []).length} /></Card>
+          </div>
+          <div>
+            <Title level={5}>{t('support_package_virtual_identities')}</Title>
+            <Space wrap>
+              {(identitySummary.emails || []).map((email: string) => <Tag key={email}>{email}</Tag>)}
+              {(identitySummary.phones || []).map((phone: string) => <Tag key={phone}>{phone}</Tag>)}
+              {(identitySummary.tokens || []).map((token: string) => <Tag key={token}>{token}</Tag>)}
+              {(identitySummary.numbers || []).map((number: string) => <Tag key={number}>{number}</Tag>)}
+            </Space>
+          </div>
+          <Input.TextArea
+            value={previewText}
+            readOnly
+            rows={16}
+            style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12 }}
+          />
+        </Space>
+      </Modal>
+    );
+  };
 
   const ResultsModal = () => {
     if (!resultsData) return null;
@@ -1211,6 +1337,7 @@ const DashboardPage: React.FC = () => {
             {t('process_selected')}: {selectedEmailRowKeys.length}
           </span>
         </Space>
+        <SupportPackageActionBar />
       </Space>
       <Table
         dataSource={filteredEmails}
@@ -1260,7 +1387,23 @@ const DashboardPage: React.FC = () => {
                 <LogFilterBar />
                 {mailErrors.length === 0
                   ? <Alert message={t('dashboard_no_logs')} type="success" showIcon />
-                  : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 10 }} size="small" />}
+                  : (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <SupportPackageActionBar />
+                      <Table
+                        dataSource={filteredMailErrors}
+                        rowKey="id"
+                        columns={errorColumns}
+                        scroll={{ x: 'max-content' }}
+                        pagination={{ pageSize: 10 }}
+                        size="small"
+                        rowSelection={{
+                          selectedRowKeys: selectedErrorRowKeys,
+                          onChange: (keys) => setSelectedErrorRowKeys(keys),
+                        }}
+                      />
+                    </Space>
+                  )}
               </Card>
               <Card bordered={false} title={t('dashboard_feedback_admin')}>
                 <Table dataSource={feedbackRows} rowKey="id" columns={feedbackColumns as any} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />
@@ -1290,6 +1433,7 @@ const DashboardPage: React.FC = () => {
         </Modal>
 
         <ResultsModal />
+        <SupportPackageModal />
         <DraftEditorModal />
         <EmailViewerModal />
       </div>
@@ -1320,7 +1464,23 @@ const DashboardPage: React.FC = () => {
                 <LogFilterBar />
                 {mailErrors.length === 0
                   ? <Alert message={t('dashboard_no_logs_user')} type="success" showIcon />
-                  : <Table dataSource={filteredMailErrors} rowKey="id" columns={errorColumns} scroll={{ x: 'max-content' }} pagination={{ pageSize: 8 }} size="small" />}
+                  : (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <SupportPackageActionBar />
+                      <Table
+                        dataSource={filteredMailErrors}
+                        rowKey="id"
+                        columns={errorColumns}
+                        scroll={{ x: 'max-content' }}
+                        pagination={{ pageSize: 8 }}
+                        size="small"
+                        rowSelection={{
+                          selectedRowKeys: selectedErrorRowKeys,
+                          onChange: (keys) => setSelectedErrorRowKeys(keys),
+                        }}
+                      />
+                    </Space>
+                  )}
               </Card>
               <Card bordered={false} title={t('dashboard_feedback_user')}>
                 {feedbackRows.length === 0
@@ -1332,6 +1492,7 @@ const DashboardPage: React.FC = () => {
         </Row>
 
         <ResultsModal />
+        <SupportPackageModal />
         <DraftEditorModal />
         <EmailViewerModal />
       </div>

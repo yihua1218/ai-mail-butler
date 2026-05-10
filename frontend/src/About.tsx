@@ -19,6 +19,8 @@ interface BuildInfo {
   build_disk: string;
   assistant_email: string;
   readonly_mode_enabled: boolean;
+  write_apis_blocked?: boolean;
+  remote_debug_api_writes_enabled?: boolean;
   readonly_base?: string | null;
   overlay_dir?: string | null;
 }
@@ -141,7 +143,11 @@ export const About: React.FC = () => {
           <Descriptions.Item label="GDPR">{text.gdpr}</Descriptions.Item>
           <Descriptions.Item label={text.runtimeMode}>
             {info?.readonly_mode_enabled
-              ? `${isZh ? '唯讀 Overlay' : 'Read-only Overlay'} (overlay=${info.overlay_dir || '-'}, base=${info.readonly_base || '-'})`
+              ? `${info.write_apis_blocked === false
+                ? (info.remote_debug_api_writes_enabled
+                  ? (isZh ? '遠端除錯 Overlay 可寫' : 'Remote Debug Overlay Writable')
+                  : (isZh ? 'Overlay 可寫' : 'Overlay Writable'))
+                : (isZh ? '唯讀 Overlay' : 'Read-only Overlay')} (overlay=${info.overlay_dir || '-'}, base=${info.readonly_base || '-'})`
               : (isZh ? '一般可寫模式' : 'Writable Mode')}
           </Descriptions.Item>
         </Descriptions>

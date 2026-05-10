@@ -166,6 +166,128 @@ fn redact_training_text(input: &str) -> String {
         .to_string()
 }
 
+#[derive(Default)]
+struct SupportPackagePseudonymizer {
+    emails: HashMap<String, String>,
+    phones: HashMap<String, String>,
+    tokens: HashMap<String, String>,
+    numbers: HashMap<String, String>,
+}
+
+impl SupportPackagePseudonymizer {
+    fn pseudonymize(&mut self, input: &str) -> String {
+        static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
+        static US_PHONE_RE: OnceLock<Regex> = OnceLock::new();
+        static TW_PHONE_RE: OnceLock<Regex> = OnceLock::new();
+        static LONG_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+        static LONG_NUMBER_RE: OnceLock<Regex> = OnceLock::new();
+
+        let email_re = EMAIL_RE.get_or_init(|| {
+            Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+                .expect("support package email regex")
+        });
+        let us_phone_re = US_PHONE_RE.get_or_init(|| {
+            Regex::new(r"(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}")
+                .expect("support package us phone regex")
+        });
+        let tw_phone_re = TW_PHONE_RE.get_or_init(|| {
+            Regex::new(r"(?:\+886[-.\s]?)?0?9\d{2}[-.\s]?\d{3}[-.\s]?\d{3}")
+                .expect("support package tw phone regex")
+        });
+        let long_token_re = LONG_TOKEN_RE.get_or_init(|| {
+            Regex::new(r"\b[A-Za-z0-9_-]{24,}\b").expect("support package token regex")
+        });
+        let long_number_re = LONG_NUMBER_RE.get_or_init(|| {
+            Regex::new(r"\b\d{12,19}\b").expect("support package long number regex")
+        });
+
+        let out = email_re
+            .replace_all(input, |caps: &regex::Captures| {
+                self.virtual_email(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
+        let out = us_phone_re
+            .replace_all(&out, |caps: &regex::Captures| {
+                self.virtual_phone(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
+        let out = tw_phone_re
+            .replace_all(&out, |caps: &regex::Captures| {
+                self.virtual_phone(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
+        let out = long_token_re
+            .replace_all(&out, |caps: &regex::Captures| {
+                self.virtual_token(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
+        long_number_re
+            .replace_all(&out, |caps: &regex::Captures| {
+                self.virtual_number(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string()
+    }
+
+    fn pseudonymize_opt(&mut self, input: Option<String>) -> Option<String> {
+        input.map(|value| self.pseudonymize(&value))
+    }
+
+    fn virtual_email(&mut self, original: &str) -> String {
+        let key = original.to_ascii_lowercase();
+        if let Some(value) = self.emails.get(&key) {
+            return value.clone();
+        }
+        let value = format!("person{}@example.test", self.emails.len() + 1);
+        self.emails.insert(key, value.clone());
+        value
+    }
+
+    fn virtual_phone(&mut self, original: &str) -> String {
+        let key = original.to_string();
+        if let Some(value) = self.phones.get(&key) {
+            return value.clone();
+        }
+        let value = format!("+1-555-01{:02}", self.phones.len() + 1);
+        self.phones.insert(key, value.clone());
+        value
+    }
+
+    fn virtual_token(&mut self, original: &str) -> String {
+        let key = original.to_string();
+        if let Some(value) = self.tokens.get(&key) {
+            return value.clone();
+        }
+        let value = format!("token_{}_redacted", self.tokens.len() + 1);
+        self.tokens.insert(key, value.clone());
+        value
+    }
+
+    fn virtual_number(&mut self, original: &str) -> String {
+        let key = original.to_string();
+        if let Some(value) = self.numbers.get(&key) {
+            return value.clone();
+        }
+        let value = format!("411111111111{:04}", self.numbers.len() + 1);
+        self.numbers.insert(key, value.clone());
+        value
+    }
+
+    fn identity_summary(&self) -> serde_json::Value {
+        fn sorted_values(map: &HashMap<String, String>) -> Vec<String> {
+            let mut values = map.values().cloned().collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+
+        serde_json::json!({
+            "emails": sorted_values(&self.emails),
+            "phones": sorted_values(&self.phones),
+            "tokens": sorted_values(&self.tokens),
+            "numbers": sorted_values(&self.numbers),
+        })
+    }
+}
+
 fn generate_rule_label(rule_text: &str) -> String {
     fn is_cjk(c: char) -> bool {
         matches!(
@@ -1301,6 +1423,7 @@ async fn readonly_write_guard(
         || path == "/api/auth/verify"
         || path == "/api/admin/remote-debug/access-mode"
         || path == "/api/admin/remote-debug/sync"
+        || path == "/api/support-package/preview"
     {
         return next.run(req).await;
     }
@@ -1350,6 +1473,40 @@ struct ManualProcessRequest {
 struct RetryMailErrorRequest {
     email: String,
     error_id: i64,
+}
+
+#[derive(Deserialize)]
+struct SupportPackagePreviewRequest {
+    email: String,
+    email_ids: Vec<String>,
+    error_ids: Vec<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SupportPackageEmailRow {
+    id: String,
+    subject: Option<String>,
+    preview: Option<String>,
+    stored_content: Option<String>,
+    plain_content: Option<String>,
+    html_content: Option<String>,
+    status: String,
+    matched_rule_label: Option<String>,
+    received_at: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SupportPackageProcessingLogRow {
+    id: String,
+    email_id: String,
+    process_method: String,
+    status_before: Option<String>,
+    status_after: Option<String>,
+    result: String,
+    finance_records_before: i64,
+    finance_records_after: i64,
+    details: Option<String>,
+    created_at: Option<String>,
 }
 
 async fn count_financial_records(pool: &SqlitePool, user_id: &str, email_id: &str) -> i64 {
@@ -2247,11 +2404,18 @@ struct BuildInfo {
     assistant_email: String,
     readonly_mode_enabled: bool,
     readonly_block_writes: bool,
+    write_apis_blocked: bool,
+    remote_debug_api_writes_enabled: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
 }
 
 async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
+    let remote_debug_api_writes_enabled = remote_debug_api_writes_enabled(&state).await;
+    let write_apis_blocked = state.config.readonly_mode_enabled
+        && state.config.readonly_block_writes
+        && !remote_debug_api_writes_enabled;
+
     Json(BuildInfo {
         version: env!("CARGO_PKG_VERSION"),
         target: env!("BUILD_TARGET"),
@@ -2266,6 +2430,8 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
         assistant_email: state.config.assistant_email.clone(),
         readonly_mode_enabled: state.config.readonly_mode_enabled,
         readonly_block_writes: state.config.readonly_block_writes,
+        write_apis_blocked,
+        remote_debug_api_writes_enabled,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
     })
@@ -2274,6 +2440,9 @@ async fn get_about(State(state): State<AppState>) -> Json<BuildInfo> {
 #[derive(Serialize)]
 struct AdminRuntimeInfo {
     readonly_mode_enabled: bool,
+    readonly_block_writes: bool,
+    write_apis_blocked: bool,
+    remote_debug_api_writes_enabled: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
     remote_debug_sshfs_enabled: bool,
@@ -2351,8 +2520,16 @@ async fn get_admin_runtime_info(
             .into_response();
     }
 
+    let remote_debug_api_writes_enabled = remote_debug_api_writes_enabled(&state).await;
+    let write_apis_blocked = state.config.readonly_mode_enabled
+        && state.config.readonly_block_writes
+        && !remote_debug_api_writes_enabled;
+
     Json(AdminRuntimeInfo {
         readonly_mode_enabled: state.config.readonly_mode_enabled,
+        readonly_block_writes: state.config.readonly_block_writes,
+        write_apis_blocked,
+        remote_debug_api_writes_enabled,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
         remote_debug_sshfs_enabled: state.config.remote_debug_sshfs_enabled,
@@ -2622,10 +2799,20 @@ async fn post_admin_remote_debug_access_mode(
     .await;
 
     match result {
-        Ok(_) => Json(
-            serde_json::json!({ "status": "success", "remote_debug_access_mode": access_mode }),
-        )
-        .into_response(),
+        Ok(_) => {
+            let remote_debug_api_writes_enabled = remote_debug_api_writes_enabled(&state).await;
+            let write_apis_blocked = state.config.readonly_mode_enabled
+                && state.config.readonly_block_writes
+                && !remote_debug_api_writes_enabled;
+
+            Json(serde_json::json!({
+                "status": "success",
+                "remote_debug_access_mode": access_mode,
+                "write_apis_blocked": write_apis_blocked,
+                "remote_debug_api_writes_enabled": remote_debug_api_writes_enabled,
+            }))
+            .into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to update remote debug access mode: {}", e);
             (
@@ -3816,6 +4003,198 @@ async fn get_mail_error_message(
             "path": source_path.to_string_lossy(),
         })),
     }
+}
+
+async fn build_redacted_mail_error_source(
+    state: &AppState,
+    context: Option<&str>,
+    pseudonymizer: &mut SupportPackagePseudonymizer,
+) -> Option<serde_json::Value> {
+    let context_path = context?;
+    let source_path = find_mail_error_source_path(state, context_path).await?;
+    let bytes = fs::read(&source_path).await.ok()?;
+    let parsed = mailparse::parse_mail(&bytes).ok()?;
+    let rendered = render_mail_content(&parsed);
+
+    Some(serde_json::json!({
+        "path": pseudonymizer.pseudonymize(&source_path.to_string_lossy()),
+        "subject": pseudonymizer.pseudonymize(&mail_header_value(&parsed, "Subject").unwrap_or_else(|| "No Subject".to_string())),
+        "from": pseudonymizer.pseudonymize(&mail_header_value(&parsed, "From").unwrap_or_default()),
+        "to": pseudonymizer.pseudonymize(&mail_header_value(&parsed, "To").unwrap_or_default()),
+        "received_at": mail_header_value(&parsed, "Date").unwrap_or_default(),
+        "content_format": rendered.content_format,
+        "content": pseudonymizer.pseudonymize(&rendered.content),
+        "plain_content": pseudonymizer.pseudonymize_opt(rendered.plain_content),
+        "html_content": pseudonymizer.pseudonymize_opt(rendered.html_content),
+    }))
+}
+
+async fn post_support_package_preview(
+    State(state): State<AppState>,
+    Json(payload): Json<SupportPackagePreviewRequest>,
+) -> Json<serde_json::Value> {
+    let requester_email = payload.email.trim().to_lowercase();
+    if requester_email.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    }
+    if payload.email_ids.is_empty() && payload.error_ids.is_empty() {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": "Select at least one email or error log"
+        }));
+    }
+    if payload.email_ids.len() > 50 || payload.error_ids.len() > 50 {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": "Support packages are limited to 50 emails and 50 logs"
+        }));
+    }
+
+    let requester_user_id = get_user_id_by_email(&state.pool, &requester_email).await;
+    let is_privileged = is_admin_or_developer(&state, &requester_email);
+    if !is_privileged && requester_user_id.is_none() {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    }
+
+    let mut pseudonymizer = SupportPackagePseudonymizer::default();
+    let requester = pseudonymizer.pseudonymize(&requester_email);
+    let mut emails = Vec::new();
+    let mut processing_logs = Vec::new();
+    let mut mail_errors = Vec::new();
+
+    for email_id in payload.email_ids.iter().take(50) {
+        let row = if is_privileged {
+            sqlx::query_as::<_, SupportPackageEmailRow>(
+                "SELECT id, subject, preview, stored_content, plain_content, html_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at \
+                 FROM emails WHERE id = ?",
+            )
+            .bind(email_id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+        } else {
+            sqlx::query_as::<_, SupportPackageEmailRow>(
+                "SELECT id, subject, preview, stored_content, plain_content, html_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at \
+                 FROM emails WHERE id = ? AND user_id = ?",
+            )
+            .bind(email_id)
+            .bind(requester_user_id.as_deref().unwrap_or_default())
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+        };
+
+        let Some(row) = row else {
+            continue;
+        };
+
+        emails.push(serde_json::json!({
+            "id": row.id,
+            "subject": pseudonymizer.pseudonymize_opt(row.subject),
+            "preview": pseudonymizer.pseudonymize_opt(row.preview),
+            "stored_content": pseudonymizer.pseudonymize_opt(row.stored_content),
+            "plain_content": pseudonymizer.pseudonymize_opt(row.plain_content),
+            "html_content": pseudonymizer.pseudonymize_opt(row.html_content),
+            "status": row.status,
+            "matched_rule_label": pseudonymizer.pseudonymize_opt(row.matched_rule_label),
+            "received_at": row.received_at,
+        }));
+
+        let logs = if is_privileged {
+            sqlx::query_as::<_, SupportPackageProcessingLogRow>(
+                "SELECT id, email_id, process_method, status_before, status_after, result, finance_records_before, finance_records_after, details, CAST(created_at AS TEXT) as created_at \
+                 FROM email_processing_logs WHERE email_id = ? ORDER BY created_at DESC LIMIT 20",
+            )
+            .bind(email_id)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default()
+        } else {
+            sqlx::query_as::<_, SupportPackageProcessingLogRow>(
+                "SELECT id, email_id, process_method, status_before, status_after, result, finance_records_before, finance_records_after, details, CAST(created_at AS TEXT) as created_at \
+                 FROM email_processing_logs WHERE email_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 20",
+            )
+            .bind(email_id)
+            .bind(requester_user_id.as_deref().unwrap_or_default())
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default()
+        };
+
+        for log in logs {
+            processing_logs.push(serde_json::json!({
+                "id": log.id,
+                "email_id": log.email_id,
+                "process_method": log.process_method,
+                "status_before": log.status_before,
+                "status_after": log.status_after,
+                "result": pseudonymizer.pseudonymize(&log.result),
+                "finance_records_before": log.finance_records_before,
+                "finance_records_after": log.finance_records_after,
+                "details": pseudonymizer.pseudonymize_opt(log.details),
+                "created_at": log.created_at,
+            }));
+        }
+    }
+
+    for error_id in payload.error_ids.iter().take(50) {
+        let row = if is_privileged {
+            sqlx::query_as::<_, MailError>(
+                "SELECT m.id, m.level, m.error_type, m.message, m.context, m.user_id, u.email as user_email, CAST(m.occurred_at AS TEXT) as occurred_at \
+                 FROM mail_errors m LEFT JOIN users u ON u.id = m.user_id WHERE m.id = ?",
+            )
+            .bind(error_id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+        } else {
+            sqlx::query_as::<_, MailError>(
+                "SELECT m.id, m.level, m.error_type, m.message, m.context, m.user_id, u.email as user_email, CAST(m.occurred_at AS TEXT) as occurred_at \
+                 FROM mail_errors m LEFT JOIN users u ON u.id = m.user_id WHERE m.id = ? AND m.user_id = ?",
+            )
+            .bind(error_id)
+            .bind(requester_user_id.as_deref().unwrap_or_default())
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+        };
+
+        let Some(row) = row else {
+            continue;
+        };
+        let source_message =
+            build_redacted_mail_error_source(&state, row.context.as_deref(), &mut pseudonymizer)
+                .await;
+
+        mail_errors.push(serde_json::json!({
+            "id": row.id,
+            "level": row.level,
+            "error_type": row.error_type,
+            "message": pseudonymizer.pseudonymize(&row.message),
+            "context": pseudonymizer.pseudonymize_opt(row.context),
+            "user_email": pseudonymizer.pseudonymize_opt(row.user_email),
+            "occurred_at": row.occurred_at,
+            "source_message": source_message,
+        }));
+    }
+
+    let package = serde_json::json!({
+        "schema_version": 1,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "requester": requester,
+        "summary": {
+            "emails": emails.len(),
+            "mail_errors": mail_errors.len(),
+            "processing_logs": processing_logs.len(),
+        },
+        "identity_summary": pseudonymizer.identity_summary(),
+        "review_notice": "Review this redacted package before sharing it. Remove any remaining private names, addresses, account numbers, or internal identifiers.",
+        "emails": emails,
+        "mail_errors": mail_errors,
+        "processing_logs": processing_logs,
+    });
+
+    Json(serde_json::json!({ "status": "success", "package": package }))
 }
 
 async fn get_rules(
@@ -5537,6 +5916,10 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         )
         .route("/errors/:id/message", get(get_mail_error_message))
         .route("/errors/retry", post(post_retry_mail_error))
+        .route(
+            "/support-package/preview",
+            post(post_support_package_preview),
+        )
         .route("/training/export", get(get_training_export))
         .route("/feedback", get(get_feedback))
         .route("/feedback/mark-read", post(post_mark_feedback_read))
