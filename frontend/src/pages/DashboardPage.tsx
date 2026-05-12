@@ -15,6 +15,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Timeline,
   Typography,
   message,
 } from 'antd';
@@ -34,9 +35,26 @@ type EmailRow = {
   stored_content?: string;
   plain_content?: string;
   html_content?: string;
+  original_from?: string;
   status: string;
   matched_rule_label?: string;
   received_at?: string;
+};
+
+type ProcessingStepStatus = 'wait' | 'process' | 'finish' | 'error';
+
+type ProcessingStep = {
+  key: string;
+  label: string;
+  status: ProcessingStepStatus;
+  detail?: string;
+};
+
+type EmailProcessingState = {
+  running: boolean;
+  steps: ProcessingStep[];
+  result?: string;
+  reason?: string;
 };
 
 const DANGEROUS_HTML_TAGS = new Set([
@@ -223,7 +241,8 @@ const DashboardPage: React.FC = () => {
   const [draftEditorOpen, setDraftEditorOpen] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [sendingDraft, setSendingDraft] = useState(false);
-  const [reprocessingEmailId, setReprocessingEmailId] = useState<string | null>(null);
+  const [processingByEmailId, setProcessingByEmailId] = useState<Record<string, EmailProcessingState>>({});
+  const [expandedEmailRowKeys, setExpandedEmailRowKeys] = useState<React.Key[]>([]);
   const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
   const [savingRemoteDebugMode, setSavingRemoteDebugMode] = useState(false);
   const [syncingRemoteDebug, setSyncingRemoteDebug] = useState(false);
@@ -418,12 +437,12 @@ const DashboardPage: React.FC = () => {
           </Button>
           <Button
             size="small"
-            loading={reprocessingEmailId === record.id}
+            loading={!!processingByEmailId[record.id]?.running}
             onClick={() => reprocessSingleEmail(record.id)}
           >
             {t('btn_reprocess')}
           </Button>
-          {record.status === 'drafted' && (
+          {draftRepliesByEmailId[record.id] && (
             <Button size="small" type="primary" onClick={() => openDraftEditor(record.id)}>
               {t('btn_view_edit_draft')}
             </Button>
@@ -619,17 +638,68 @@ const DashboardPage: React.FC = () => {
     }] : []),
   ];
 
+  const initialProcessingSteps = (): ProcessingStep[] => [
+    { key: 'submit', label: t('processing_step_submit'), status: 'finish' },
+    { key: 'reset_previous', label: t('processing_step_reset'), status: 'process' },
+    { key: 'finance_rules', label: t('processing_step_finance'), status: 'wait' },
+    { key: 'match_rules', label: t('processing_step_rules'), status: 'wait' },
+    { key: 'draft_reply', label: t('processing_step_draft'), status: 'wait' },
+  ];
+
+  const setEmailProcessingState = (emailId: string, updater: (prev?: EmailProcessingState) => EmailProcessingState) => {
+    setProcessingByEmailId((prev) => ({ ...prev, [emailId]: updater(prev[emailId]) }));
+  };
+
+  const processEmail = async (emailId: string) => {
+    if (!user?.email) return null;
+    setExpandedEmailRowKeys((keys) => Array.from(new Set([...keys, emailId])));
+    setEmailProcessingState(emailId, () => ({ running: true, steps: initialProcessingSteps() }));
+
+    try {
+      const res = await axios.post('/api/emails/process-manual', {
+        email: user.email,
+        email_ids: [emailId],
+        force_reextract: true,
+      });
+      const result = res.data?.results?.[0];
+      const backendSteps = (result?.processing_steps || []) as ProcessingStep[];
+      setEmailProcessingState(emailId, () => ({
+        running: false,
+        steps: backendSteps.length ? backendSteps : [
+          ...initialProcessingSteps().map((step) => ({ ...step, status: 'finish' as ProcessingStepStatus })),
+        ],
+        result: result?.result || res.data?.status,
+        reason: result?.reason,
+      }));
+      return result;
+    } catch (error: any) {
+      setEmailProcessingState(emailId, (prev) => ({
+        running: false,
+        steps: [
+          ...(prev?.steps || initialProcessingSteps()).map((step) => (
+            step.status === 'process' ? { ...step, status: 'error' as ProcessingStepStatus } : step
+          )),
+        ],
+        result: 'failed',
+        reason: error?.response?.data?.message || 'Request failed',
+      }));
+      return { email_id: emailId, result: 'failed', reason: error?.response?.data?.message || 'Request failed' };
+    }
+  };
+
   const processSelectedEmails = async () => {
     if (!user?.email || selectedEmailRowKeys.length === 0) return;
     setProcessingSelected(true);
     try {
       const emailIds = selectedEmailRowKeys.map((id) => String(id));
-      const res = await axios.post('/api/emails/process-manual', {
-        email: user.email,
-        email_ids: emailIds,
-        force_reextract: true,
+      const results = await Promise.all(emailIds.map((emailId) => processEmail(emailId)));
+      setResultsData({
+        status: 'success',
+        processed: results.filter((r) => r?.result === 'processed').length,
+        skipped: results.filter((r) => r?.result === 'skipped').length,
+        failed: results.filter((r) => !r || r.result === 'failed').length,
+        results,
       });
-      setResultsData(res.data);
       setResultsModalVisible(true);
       setSelectedEmailRowKeys([]);
       await reloadDashboard();
@@ -683,27 +753,16 @@ const DashboardPage: React.FC = () => {
   };
 
   const reprocessSingleEmail = async (emailId: string) => {
-    if (!user?.email) return;
-    setReprocessingEmailId(emailId);
-    try {
-      const res = await axios.post('/api/emails/process-manual', {
-        email: user.email,
-        email_ids: [emailId],
-        force_reextract: true,
-      });
-      const result = res.data?.results?.[0];
-      if (result?.result === 'processed') {
-        message.success('Reprocessed successfully.');
-      } else {
-        message.info(result?.reason || 'Reprocess queued.');
-      }
-      await reloadDashboard();
-      await loadDraftReplies();
-    } catch {
-      message.error('Failed to reprocess this email.');
-    } finally {
-      setReprocessingEmailId(null);
+    const result = await processEmail(emailId);
+    if (result?.result === 'processed') {
+      message.success(t('reprocess_success'));
+    } else if (result?.result === 'failed') {
+      message.error(result?.reason || t('reprocess_failed'));
+    } else {
+      message.info(result?.reason || t('reprocess_finished'));
     }
+    await reloadDashboard();
+    await loadDraftReplies();
   };
 
   const openDraftEditor = (emailId: string) => {
@@ -1289,6 +1348,50 @@ const DashboardPage: React.FC = () => {
     );
   };
 
+  const renderEmailProcessingPanel = (record: EmailRow) => {
+    const state = processingByEmailId[record.id];
+    const steps = state?.steps || [];
+    if (!state && !draftRepliesByEmailId[record.id]) {
+      return <Alert type="info" showIcon message={t('processing_no_run')} />;
+    }
+
+    const timelineItems = steps.map((step) => ({
+      key: step.key,
+      color: step.status === 'error' ? 'red' : step.status === 'finish' ? 'green' : step.status === 'process' ? 'blue' : 'gray',
+      children: (
+        <div>
+          <div style={{ fontWeight: 600 }}>{step.label}</div>
+          {step.detail ? <div style={{ color: '#86868b', marginTop: 2 }}>{step.detail}</div> : null}
+        </div>
+      ),
+    }));
+
+    return (
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        {state ? (
+          <Space wrap>
+            <Tag color={state.running ? 'processing' : state.result === 'failed' ? 'red' : 'green'}>
+              {state.running ? t('processing_running') : t('processing_finished')}
+            </Tag>
+            {state.result ? <Tag>{state.result}</Tag> : null}
+            {state.reason ? <span style={{ color: '#86868b' }}>{state.reason}</span> : null}
+          </Space>
+        ) : null}
+        {timelineItems.length ? <Timeline items={timelineItems} /> : null}
+        {draftRepliesByEmailId[record.id] ? (
+          <Card size="small" title={t('draft_modal_title')} bordered>
+            <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 12 }}>
+              {draftRepliesByEmailId[record.id].body}
+            </Paragraph>
+            <Button size="small" type="primary" onClick={() => openDraftEditor(record.id)}>
+              {t('btn_view_edit_draft')}
+            </Button>
+          </Card>
+        ) : null}
+      </Space>
+    );
+  };
+
   const EmailTableWithFilter = () => (
     <Card bordered={false} title={t('your_emails')}>
       <Space direction="vertical" style={{ width: '100%', marginBottom: 12 }}>
@@ -1348,6 +1451,11 @@ const DashboardPage: React.FC = () => {
         rowSelection={{
           selectedRowKeys: selectedEmailRowKeys,
           onChange: (keys) => setSelectedEmailRowKeys(keys),
+        }}
+        expandable={{
+          expandedRowKeys: expandedEmailRowKeys,
+          onExpandedRowsChange: (keys) => setExpandedEmailRowKeys([...keys]),
+          expandedRowRender: renderEmailProcessingPanel,
         }}
         rowClassName={(record: any) => (emailIdFromQuery && record.id === emailIdFromQuery ? 'finance-linked-row' : '')}
       />

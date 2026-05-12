@@ -1586,11 +1586,12 @@ impl MailService {
             .await;
 
             let _ = sqlx::query(
-                "UPDATE emails SET stored_content = ?, plain_content = ?, html_content = ? WHERE id = ?",
+                "UPDATE emails SET stored_content = ?, plain_content = ?, html_content = ?, original_from = ? WHERE id = ?",
             )
                 .bind(&preferred_content)
                 .bind(decoded_bodies.plain.as_deref())
                 .bind(decoded_bodies.html.as_deref())
+                .bind(&from_clean)
                 .bind(&id)
                 .execute(pool)
                 .await;
@@ -2174,11 +2175,12 @@ impl MailService {
                                     };
 
                                     let _ = sqlx::query(
-                                        "UPDATE emails SET stored_content = ?, plain_content = ?, html_content = ? WHERE id = ?",
+                                        "UPDATE emails SET stored_content = ?, plain_content = ?, html_content = ?, original_from = ? WHERE id = ?",
                                     )
                                     .bind(&stored_content)
                                     .bind(decoded_bodies.plain.as_deref())
                                     .bind(decoded_bodies.html.as_deref())
+                                    .bind(&from_clean)
                                     .bind(&id)
                                     .execute(&pool)
                                     .await;

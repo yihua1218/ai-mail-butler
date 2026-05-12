@@ -150,6 +150,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE emails ADD COLUMN html_content TEXT")
         .execute(&pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE emails ADD COLUMN original_from TEXT")
+        .execute(&pool)
+        .await;
     let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_emails_user_received ON emails(user_id, received_at DESC)",
     )

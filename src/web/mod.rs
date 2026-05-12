@@ -1490,6 +1490,7 @@ struct SupportPackageEmailRow {
     stored_content: Option<String>,
     plain_content: Option<String>,
     html_content: Option<String>,
+    original_from: Option<String>,
     status: String,
     matched_rule_label: Option<String>,
     received_at: Option<String>,
@@ -1836,7 +1837,7 @@ async fn get_dashboard(
                 .unwrap_or(None);
 
             if let Some((uid,)) = user_id {
-                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
 
@@ -4078,7 +4079,7 @@ async fn post_support_package_preview(
     for email_id in payload.email_ids.iter().take(50) {
         let row = if is_privileged {
             sqlx::query_as::<_, SupportPackageEmailRow>(
-                "SELECT id, subject, preview, stored_content, plain_content, html_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at \
+                "SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at \
                  FROM emails WHERE id = ?",
             )
             .bind(email_id)
@@ -4087,7 +4088,7 @@ async fn post_support_package_preview(
             .unwrap_or(None)
         } else {
             sqlx::query_as::<_, SupportPackageEmailRow>(
-                "SELECT id, subject, preview, stored_content, plain_content, html_content, status, matched_rule_label, CAST(received_at AS TEXT) as received_at \
+                "SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at \
                  FROM emails WHERE id = ? AND user_id = ?",
             )
             .bind(email_id)
@@ -4108,6 +4109,7 @@ async fn post_support_package_preview(
             "stored_content": pseudonymizer.pseudonymize_opt(row.stored_content),
             "plain_content": pseudonymizer.pseudonymize_opt(row.plain_content),
             "html_content": pseudonymizer.pseudonymize_opt(row.html_content),
+            "original_from": pseudonymizer.pseudonymize_opt(row.original_from),
             "status": row.status,
             "matched_rule_label": pseudonymizer.pseudonymize_opt(row.matched_rule_label),
             "received_at": row.received_at,
@@ -4261,8 +4263,8 @@ async fn post_manual_process_emails(
     let mut results = Vec::new();
 
     for email_id in payload.email_ids {
-        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String)>(
-            "SELECT id, subject, preview, stored_content, plain_content, html_content, status FROM emails WHERE id = ? AND user_id = ?"
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String)>(
+            "SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status FROM emails WHERE id = ? AND user_id = ?"
         )
         .bind(&email_id)
         .bind(&user.id)
@@ -4270,10 +4272,17 @@ async fn post_manual_process_emails(
         .await
         .unwrap_or(None);
 
-        let Some((id, subject, preview, stored_content, plain_content, html_content, status)) = row
+        let Some((id, subject, preview, stored_content, plain_content, html_content, original_from, status)) = row
         else {
             failed += 1;
-            results.push(serde_json::json!({ "email_id": email_id, "result": "failed", "reason": "Email not found" }));
+            results.push(serde_json::json!({
+                "email_id": email_id,
+                "result": "failed",
+                "reason": "Email not found",
+                "processing_steps": [
+                    { "key": "load_email", "label": "Load stored email", "status": "error", "detail": "Email not found" }
+                ]
+            }));
             continue;
         };
 
@@ -4283,10 +4292,27 @@ async fn post_manual_process_emails(
         } else {
             "manual_process"
         };
+        let mut processing_steps = vec![serde_json::json!({
+            "key": "load_email",
+            "label": "Load stored email",
+            "status": "finish",
+            "detail": format!("Status before: {}", status),
+        })];
 
         if status != "pending" && !force_reextract {
             skipped += 1;
-            results.push(serde_json::json!({ "email_id": id, "result": "skipped", "reason": "Status is not pending" }));
+            processing_steps.push(serde_json::json!({
+                "key": "skip_status",
+                "label": "Check processing eligibility",
+                "status": "finish",
+                "detail": "Status is not pending",
+            }));
+            results.push(serde_json::json!({
+                "email_id": id,
+                "result": "skipped",
+                "reason": "Status is not pending",
+                "processing_steps": processing_steps,
+            }));
             log_email_processing(
                 &state.pool,
                 &user.id,
@@ -4312,6 +4338,17 @@ async fn post_manual_process_emails(
                 .bind(&id)
                 .execute(&state.pool)
                 .await;
+            let _ = sqlx::query("UPDATE emails SET matched_rule_label = NULL WHERE id = ? AND user_id = ?")
+                .bind(&id)
+                .bind(&user.id)
+                .execute(&state.pool)
+                .await;
+            processing_steps.push(serde_json::json!({
+                "key": "reset_previous",
+                "label": "Reset previous derived results",
+                "status": "finish",
+                "detail": format!("Removed {} finance records and old unsent drafts", removed_finance_records),
+            }));
         }
 
         let source_name = if plain_content
@@ -4352,13 +4389,131 @@ async fn post_manual_process_emails(
         )
         .await;
         let finance_records_after = count_financial_records(&state.pool, &user.id, &id).await;
+        processing_steps.push(serde_json::json!({
+            "key": "finance_rules",
+            "label": "Reprocess finance extraction rules",
+            "status": "finish",
+            "detail": format!("Extracted {} finance records; total for this email is now {}", extracted_finance_records, finance_records_after),
+        }));
+
+        let subject_text = subject.as_deref().unwrap_or("(no subject)");
+        let original_from_text = original_from
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("(unknown sender)");
+        let enabled_rule_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_rules WHERE user_id = ? AND is_enabled = 1",
+        )
+        .bind(&user.id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+
+        let mut matched_rule_label: Option<String> = None;
+        let mut generated_reply_id: Option<String> = None;
+        match crate::services::EmailReplyService::find_matching_rule(
+            &state.pool,
+            &user.id,
+            subject_text,
+            &source_text,
+            original_from_text,
+        )
+        .await
+        {
+            Ok(Some((rule_id, rule_text, rule_label))) => {
+                matched_rule_label = Some(rule_label.clone());
+                let _ = sqlx::query("UPDATE emails SET matched_rule_label = ? WHERE id = ? AND user_id = ?")
+                    .bind(&rule_label)
+                    .bind(&id)
+                    .bind(&user.id)
+                    .execute(&state.pool)
+                    .await;
+
+                processing_steps.push(serde_json::json!({
+                    "key": "match_rules",
+                    "label": "Compare enabled email matching rules",
+                    "status": "finish",
+                    "detail": format!("Matched rule #{} [{}] from {} enabled rules", rule_id, rule_label, enabled_rule_count),
+                }));
+
+                match crate::services::EmailReplyService::generate_auto_reply(
+                    &state.ai_client,
+                    &user,
+                    &rule_text,
+                    original_from_text,
+                    subject_text,
+                    &source_text,
+                )
+                .await
+                {
+                    Ok(reply_body) => {
+                        match crate::services::EmailReplyService::store_auto_reply(
+                            &state.pool,
+                            &user.id,
+                            Some(&id),
+                            rule_id,
+                            original_from_text,
+                            subject_text,
+                            &reply_body,
+                            "draft",
+                        )
+                        .await
+                        {
+                            Ok(reply_id) => {
+                                generated_reply_id = Some(reply_id.clone());
+                                processing_steps.push(serde_json::json!({
+                                    "key": "draft_reply",
+                                    "label": "Generate auto-reply draft",
+                                    "status": "finish",
+                                    "detail": format!("Draft saved: {}", reply_id),
+                                }));
+                            }
+                            Err(e) => {
+                                processing_steps.push(serde_json::json!({
+                                    "key": "draft_reply",
+                                    "label": "Generate auto-reply draft",
+                                    "status": "error",
+                                    "detail": format!("Failed to save draft: {}", e),
+                                }));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        processing_steps.push(serde_json::json!({
+                            "key": "draft_reply",
+                            "label": "Generate auto-reply draft",
+                            "status": "error",
+                            "detail": format!("Failed to generate draft: {}", e),
+                        }));
+                    }
+                }
+            }
+            Ok(None) => {
+                processing_steps.push(serde_json::json!({
+                    "key": "match_rules",
+                    "label": "Compare enabled email matching rules",
+                    "status": "finish",
+                    "detail": format!("No rule matched from {} enabled rules", enabled_rule_count),
+                }));
+            }
+            Err(e) => {
+                processing_steps.push(serde_json::json!({
+                    "key": "match_rules",
+                    "label": "Compare enabled email matching rules",
+                    "status": "error",
+                    "detail": format!("Rule matching failed: {}", e),
+                }));
+            }
+        }
 
         let status_after = if status == "replied" {
             "replied"
+        } else if generated_reply_id.is_some() {
+            "drafted"
         } else if finance_records_after > 0 {
             "processed"
         } else {
-            "drafted"
+            "pending"
         };
 
         let _ = sqlx::query("UPDATE emails SET status = ? WHERE id = ?")
@@ -4382,7 +4537,10 @@ async fn post_manual_process_emails(
                 "force_reextract": force_reextract,
                 "removed_finance_records": removed_finance_records,
                 "extracted_finance_records": extracted_finance_records,
+                "matched_rule_label": matched_rule_label.clone(),
+                "generated_reply_id": generated_reply_id.clone(),
                 "source": source_name,
+                "steps": processing_steps.clone(),
             }),
         )
         .await;
@@ -4395,6 +4553,9 @@ async fn post_manual_process_emails(
             "finance_records_after": finance_records_after,
             "removed_finance_records": removed_finance_records,
             "extracted_finance_records": extracted_finance_records,
+            "matched_rule_label": matched_rule_label,
+            "generated_reply_id": generated_reply_id,
+            "processing_steps": processing_steps,
         }));
     }
 
