@@ -63,12 +63,20 @@ body {
   border-radius: 50%;
 }
 
+.finance-bar-chart-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-top: 2px;
+}
+
 .finance-bar-chart {
   display: grid;
   grid-template-columns: minmax(54px, auto) minmax(0, 1fr);
   align-items: end;
   gap: 10px;
-  width: 100%;
+  width: max(100%, 720px);
 }
 
 .finance-bar-y-axis {
@@ -87,6 +95,7 @@ body {
 .finance-bar-plot {
   position: relative;
   min-width: 0;
+  overflow: hidden;
 }
 
 .finance-bar-grid {
@@ -156,37 +165,9 @@ body {
   background: linear-gradient(180deg, #f5f7fb 0%, #eef2f9 100%);
   border-radius: 10px;
   position: relative;
-  overflow: visible;
+  overflow: hidden;
   flex: 1 1 0;
   min-width: 0;
-}
-
-.finance-bar-track:hover {
-  z-index: 3;
-}
-
-.finance-bar-track::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  z-index: 2;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: rgba(17, 24, 39, 0.92);
-  color: #fff;
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-}
-
-.finance-bar-track:hover::after,
-.finance-bar-track:focus-visible::after {
-  opacity: 1;
 }
 
 .finance-bar-fill {
@@ -209,14 +190,13 @@ body {
 }
 
 .finance-bar-legend {
-  position: absolute;
-  top: -24px;
-  right: 0;
   display: flex;
+  justify-content: flex-end;
   align-items: center;
   gap: 12px;
   color: #4b5563;
   font-size: 12px;
+  margin-top: 4px;
 }
 
 .finance-bar-legend span {
@@ -241,10 +221,14 @@ body {
 }
 
 @media (max-width: 768px) {
+  .finance-bar-chart {
+    width: 720px;
+    max-width: none;
+  }
+
   .finance-bar-chart-layout {
     grid-template-columns: repeat(30, minmax(8px, 1fr));
     gap: 4px;
-    overflow-x: auto;
     padding-bottom: 10px;
   }
 

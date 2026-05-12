@@ -46,6 +46,7 @@ const FinanceAnalysisPage: React.FC = () => {
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
   const [dailyChartMode, setDailyChartMode] = useState<DailyFinanceChartMode>('expense');
   const [selectedDailyKey, setSelectedDailyKey] = useState<string>('');
+  const [recordPagination, setRecordPagination] = useState({ current: 1, pageSize: 10 });
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(() => {
     try {
       return JSON.parse(localStorage.getItem(FINANCE_CARD_COLLAPSE_KEY) || '{}');
@@ -339,6 +340,10 @@ const FinanceAnalysisPage: React.FC = () => {
     return [{ key: 'expense', label: t('finance_chart_expense'), className: 'expense' }];
   }, [dailyChartMode, t]);
 
+  useEffect(() => {
+    setRecordPagination((prev) => ({ ...prev, current: 1 }));
+  }, [emailIdFromQuery, selectedDailyKey]);
+
   if (!user) {
     return (
       <Card bordered={false}>
@@ -360,25 +365,17 @@ const FinanceAnalysisPage: React.FC = () => {
   const filteredRecords = selectedDailyKey
     ? emailFilteredRecords.filter((row) => getRecordDayKey(row) === selectedDailyKey)
     : emailFilteredRecords;
-  const filteredMonthly = selectedDailyKey
-    ? Array.from(filteredRecords.reduce((acc, row) => {
-      const monthKey = row.transaction_month_key || row.month_key;
-      const category = row.category || row.direction || 'unknown';
-      const key = `${monthKey}-${category}`;
-      const current = acc.get(key) || {
-        month_key: monthKey,
-        category,
-        total_amount: 0,
-        updated_at: row.created_at,
-      };
-      current.total_amount += Math.abs(Number(row.amount) || 0);
-      if (row.created_at > current.updated_at) current.updated_at = row.created_at;
-      acc.set(key, current);
-      return acc;
-    }, new Map<string, MonthlyFinance>()).values()).sort((a, b) => (
-      b.month_key.localeCompare(a.month_key) || a.category.localeCompare(b.category)
-    ))
-    : monthly;
+
+  const recordTablePagination = {
+    current: recordPagination.current,
+    pageSize: recordPagination.pageSize,
+    showSizeChanger: true,
+    pageSizeOptions: [5, 10, 20, 50, 100],
+    showTotal: (total: number, range: [number, number]) => t('pagination_total', { from: range[0], to: range[1], total }),
+    onChange: (page: number, pageSize: number) => {
+      setRecordPagination({ current: page, pageSize });
+    },
+  };
 
   const recordColumns: TableColumnsType<FinanceRecord> = [
     { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
@@ -452,68 +449,70 @@ const FinanceAnalysisPage: React.FC = () => {
         }
       >
         {dailyFinanceLast30Days.maxValue > 0 ? (
-          <div className="finance-bar-chart">
-            <div className="finance-bar-y-axis" aria-hidden="true">
-              {dailyFinanceLast30Days.yAxisTicks.map((tick, index) => (
-                <span key={`${tick}-${index}`}>{tick.toLocaleString()}</span>
-              ))}
-            </div>
-            <div className="finance-bar-plot">
-              <div className="finance-bar-grid" aria-hidden="true">
+          <div className="finance-bar-chart-scroll">
+            <div className="finance-bar-chart">
+              <div className="finance-bar-y-axis" aria-hidden="true">
                 {dailyFinanceLast30Days.yAxisTicks.map((tick, index) => (
-                  <span key={`${tick}-${index}`} />
+                  <span key={`${tick}-${index}`}>{tick.toLocaleString()}</span>
                 ))}
               </div>
-              <div className="finance-bar-chart-layout">
-                {dailyFinanceLast30Days.bars.map((item, index) => (
-                  <div
-                    className={`finance-bar-column ${selectedDailyKey === item.key ? 'is-selected' : ''}`}
-                    key={item.key}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={selectedDailyKey === item.key}
-                    onClick={() => setSelectedDailyKey((current) => current === item.key ? '' : item.key)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setSelectedDailyKey((current) => current === item.key ? '' : item.key);
-                      }
-                    }}
-                  >
-                    <div className={`finance-bar-series ${dailyChartMode === 'both' ? 'is-grouped' : 'is-single'}`}>
-                      {dailyChartSeries.map((series) => {
-                        const value = series.key === 'income' ? item.income : item.expense;
-                        const heightPercent = dailyFinanceLast30Days.maxValue > 0
-                          ? Math.max(4, Math.round((value / dailyFinanceLast30Days.maxValue) * 100))
-                          : 0;
-                        const tooltip = `${item.label} ${series.label}: ${value.toLocaleString()}`;
-                        return (
-                          <div
-                            className="finance-bar-track"
-                            title={tooltip}
-                            data-tooltip={tooltip}
-                            aria-label={tooltip}
-                            key={series.key}
-                          >
-                            <div className={`finance-bar-fill ${series.className}`} style={{ height: `${heightPercent}%` }} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <span className="finance-bar-label">{index % 5 === 0 || index === dailyFinanceLast30Days.bars.length - 1 ? item.label : ''}</span>
-                  </div>
-                ))}
-              </div>
-              {dailyChartMode === 'both' && (
-                <div className="finance-bar-legend">
-                  {dailyChartSeries.map((series) => (
-                    <span key={series.key}>
-                      <i className={`finance-bar-legend-swatch ${series.className}`} />
-                      {series.label}
-                    </span>
+              <div className="finance-bar-plot">
+                <div className="finance-bar-grid" aria-hidden="true">
+                  {dailyFinanceLast30Days.yAxisTicks.map((tick, index) => (
+                    <span key={`${tick}-${index}`} />
                   ))}
                 </div>
-              )}
+                <div className="finance-bar-chart-layout">
+                  {dailyFinanceLast30Days.bars.map((item, index) => (
+                    <div
+                      className={`finance-bar-column ${selectedDailyKey === item.key ? 'is-selected' : ''}`}
+                      key={item.key}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selectedDailyKey === item.key}
+                      onClick={() => setSelectedDailyKey((current) => current === item.key ? '' : item.key)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setSelectedDailyKey((current) => current === item.key ? '' : item.key);
+                        }
+                      }}
+                    >
+                      <div className={`finance-bar-series ${dailyChartMode === 'both' ? 'is-grouped' : 'is-single'}`}>
+                        {dailyChartSeries.map((series) => {
+                          const value = series.key === 'income' ? item.income : item.expense;
+                          const heightPercent = dailyFinanceLast30Days.maxValue > 0
+                            ? Math.max(4, Math.round((value / dailyFinanceLast30Days.maxValue) * 100))
+                            : 0;
+                          const tooltip = `${item.label} ${series.label}: ${value.toLocaleString()}`;
+                          return (
+                            <div
+                              className="finance-bar-track"
+                              title={tooltip}
+                              data-tooltip={tooltip}
+                              aria-label={tooltip}
+                              key={series.key}
+                            >
+                              <div className={`finance-bar-fill ${series.className}`} style={{ height: `${heightPercent}%` }} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <span className="finance-bar-label">{index % 5 === 0 || index === dailyFinanceLast30Days.bars.length - 1 ? item.label : ''}</span>
+                    </div>
+                  ))}
+                </div>
+                {dailyChartMode === 'both' && (
+                  <div className="finance-bar-legend">
+                    {dailyChartSeries.map((series) => (
+                      <span key={series.key}>
+                        <i className={`finance-bar-legend-swatch ${series.className}`} />
+                        {series.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         ) : (
@@ -521,19 +520,10 @@ const FinanceAnalysisPage: React.FC = () => {
         )}
       </CollapsibleCard>
       <CollapsibleCard storageKey="monthly-summary" title={t('finance_monthly_summary')}>
-        {selectedDailyKey && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 12 }}
-            message={t('finance_daily_filter_active', { date: formatDayKey(selectedDailyKey) })}
-            action={<Button size="small" onClick={clearDailyFilter}>{t('finance_clear_daily_filter')}</Button>}
-          />
-        )}
         <Table
           rowKey={(r: MonthlyFinance) => `${r.month_key}-${r.category}`}
           columns={monthlyColumns}
-          dataSource={filteredMonthly}
+          dataSource={monthly}
           scroll={{ x: 'max-content' }}
           pagination={{ pageSize: 12 }}
         />
@@ -569,7 +559,7 @@ const FinanceAnalysisPage: React.FC = () => {
           columns={recordColumns}
           dataSource={filteredRecords}
           scroll={{ x: 'max-content' }}
-          pagination={{ pageSize: 10 }}
+          pagination={recordTablePagination}
           rowClassName={(record: FinanceRecord) => (linkedEmailId && record.email_id === linkedEmailId ? 'finance-linked-row' : '')}
         />
       </CollapsibleCard>
