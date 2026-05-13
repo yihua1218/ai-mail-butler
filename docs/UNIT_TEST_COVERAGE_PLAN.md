@@ -12,6 +12,7 @@ Validation command:
 
 ```bash
 cargo test
+cargo llvm-cov --summary-only
 ```
 
 Current result:
@@ -20,11 +21,27 @@ Current result:
 48 passed; 0 failed
 ```
 
-Coverage measurement note:
+Coverage snapshot:
 
-- `cargo llvm-cov --summary-only` could not be run in the current environment because `cargo-llvm-cov` is not installed.
-- The previous measured backend snapshot from 2026-04-22 was 15.41% line coverage, 23.20% function coverage, and 15.80% region coverage.
-- Next measurement task: install `cargo-llvm-cov` in the dev environment or CI and replace this note with fresh numbers.
+| Metric                    |    Current Value |
+|---------------------------|-----------------:|
+| Date                      |       2026-05-13 |
+| Backend line coverage     |           29.19% |
+| Backend function coverage |           29.77% |
+| Backend region coverage   |           27.87% |
+| Frontend coverage         | Not measured yet |
+
+Previous measured backend snapshot from 2026-04-22:
+
+| Metric                    | Previous Value |
+|---------------------------|---------------:|
+| Backend line coverage     |         15.41% |
+| Backend function coverage |         23.20% |
+| Backend region coverage   |         15.80% |
+
+Environment note:
+
+- `cargo llvm-cov --summary-only` may need permission to bind `127.0.0.1` because reprocessing tests use a local mock AI HTTP server.
 
 ## Coverage Scope Status
 
@@ -69,6 +86,7 @@ Coverage measurement note:
   - SQLite URL to path conversion,
   - overlay-relative DB path resolution,
   - standardized processing step JSON contract.
+- Installed and ran `cargo-llvm-cov`; backend line coverage is now measured at 29.19%.
 - Previous P2 work added manual reprocessing tests for:
   - finance rollback,
   - rule rematch,

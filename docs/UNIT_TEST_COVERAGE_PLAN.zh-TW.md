@@ -12,6 +12,7 @@
 
 ```bash
 cargo test
+cargo llvm-cov --summary-only
 ```
 
 目前結果：
@@ -20,11 +21,27 @@ cargo test
 48 passed; 0 failed
 ```
 
-Coverage 量測備註：
+Coverage 快照：
 
-- 目前環境未安裝 `cargo-llvm-cov`，因此 `cargo llvm-cov --summary-only` 無法執行。
-- 先前 2026-04-22 的實測 backend snapshot 為 line coverage 15.41%、function coverage 23.20%、region coverage 15.80%。
-- 下一步：在開發環境或 CI 安裝 `cargo-llvm-cov`，並用新數字取代本段備註。
+| 指標                      |   目前數值 |
+|---------------------------|-----------:|
+| 日期                      | 2026-05-13 |
+| Backend line coverage     |     29.19% |
+| Backend function coverage |     29.77% |
+| Backend region coverage   |     27.87% |
+| Frontend coverage         |   尚未量測 |
+
+先前 2026-04-22 的 backend 實測 snapshot：
+
+| 指標                      | 先前數值 |
+|---------------------------|---------:|
+| Backend line coverage     |   15.41% |
+| Backend function coverage |   23.20% |
+| Backend region coverage   |   15.80% |
+
+環境備註：
+
+- `cargo llvm-cov --summary-only` 可能需要允許 bind `127.0.0.1`，因為 reprocessing 測試會啟動本機 mock AI HTTP server。
 
 ## 測試涵蓋範圍狀態
 
@@ -69,6 +86,7 @@ Coverage 量測備註：
   - SQLite URL 轉 path。
   - overlay-relative DB path resolution。
   - 標準化 processing step JSON contract。
+- 已安裝並執行 `cargo-llvm-cov`；backend line coverage 目前實測為 29.19%。
 - 先前 P2 已新增手動重新處理測試：
   - 財務 rollback。
   - 規則重新命中。
