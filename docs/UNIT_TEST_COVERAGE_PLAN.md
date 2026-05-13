@@ -13,12 +13,16 @@ Validation command:
 ```bash
 cargo test
 cargo llvm-cov --summary-only
+cd frontend
+npm run test:run
+npm run test:coverage
 ```
 
 Current result:
 
 ```text
-125 passed; 0 failed
+Backend: 125 passed; 0 failed
+Frontend: 9 passed; 0 failed
 ```
 
 Coverage snapshot:
@@ -29,7 +33,9 @@ Coverage snapshot:
 | Backend line coverage     |           90.02% |
 | Backend function coverage |           90.44% |
 | Backend region coverage   |           89.59% |
-| Frontend coverage         | Not measured yet |
+| Frontend line coverage    |           11.62% |
+| Frontend function coverage|            8.55% |
+| Frontend branch coverage  |            4.87% |
 
 Previous measured backend snapshot from 2026-04-22:
 
@@ -55,6 +61,13 @@ Previous local snapshots from 2026-05-13:
 | After SMTP security config and rate-limit tests          | 70.20% |   74.19% | 70.10% |
 | After firewall/main/models/web runtime API tests         | 74.70% |   78.92% | 74.20% |
 | After deterministic backend unit-test scope hardening    | 90.02% |   90.44% | 89.59% |
+
+Frontend local snapshots from 2026-05-13:
+
+| Snapshot                                          |  Lines | Functions | Branches | Statements |
+|---------------------------------------------------|-------:|----------:|---------:|-----------:|
+| Before frontend tests were added                  |  0.00% |     0.00% |    0.00% |      0.00% |
+| After AuthContext, Settings, and Rules page tests | 11.62% |     8.55% |    4.87% |     10.89% |
 
 Environment note:
 
@@ -98,7 +111,9 @@ Environment note:
 | Finance/about/runtime web handlers               | Covered     | Finance records/monthly views, about page, runtime auth, and mode conflicts.          |
 | Mail content and chat success handler paths      | Covered     | Message body rendering, chat transcript insert, memory, and onboarding.               |
 | Test shims for external I/O boundaries           | Covered     | Deterministic unit scope protects logic without live SMTP/Cloudflare/system commands. |
-| Frontend settings consent switch behavior        | Not Covered | Needs Vitest/RTL tests.                                                               |
+| Frontend auth provider behavior                  | Covered     | Saved user loading, token verification, refresh, logout, and magic-link API.          |
+| Frontend settings save/delete flows              | Covered     | Guest local save, logged-in settings payload, consent payload, deletion request.      |
+| Frontend rules manager flows                     | Covered     | Guest guidance, rule loading, create, toggle, and delete flows.                       |
 | Dashboard multi-email reprocess UI state         | Not Covered | Needs frontend tests for independent row timelines.                                   |
 
 ## Recently Added Coverage
@@ -203,6 +218,11 @@ Environment note:
   - overlay-relative DB path resolution,
   - standardized processing step JSON contract.
 - Installed and ran `cargo-llvm-cov`; backend line coverage is now measured at 90.02% for the deterministic backend unit-test scope.
+- Added initial frontend Vitest/React Testing Library tests for:
+  - `AuthContext` saved-user load, token verification, refresh, logout, and magic-link request,
+  - `SettingsPage` guest local save, logged-in settings submit, training consent payload, PDF password payload, and data-deletion request,
+  - `RulesManagerPage` guest guidance, rule loading, manual rule creation, rule toggle, and delete confirmation.
+- Installed and ran frontend coverage; frontend line coverage is now measured at 11.62%.
 - Previous P2 work added manual reprocessing tests for:
   - finance rollback,
   - rule rematch,
@@ -258,10 +278,12 @@ Target: cover cross-table state transitions.
 
 Target: cover UI state that can regress without backend failures.
 
-- Settings consent switch rendering and payload.
+- Status: Vitest/RTL tooling is enabled and first coverage is measured at 11.62% line coverage.
+- Status: Settings save/delete payloads, AuthContext state transitions, and Rules manager CRUD basics are covered.
 - Dashboard independent processing timelines for multiple concurrently reprocessed emails.
 - Dashboard draft viewer/editor content after auto-reply generation.
 - Finance analysis filters and empty states.
+- Next target: raise frontend line coverage above 25% with Dashboard and Finance tests.
 
 ## Coverage Milestones
 
@@ -271,7 +293,8 @@ Target: cover UI state that can regress without backend failures.
 - Milestone D: 50% backend line coverage with key web/mail/firewall handlers covered. Status: reached.
 - Milestone E: 70% backend line coverage with mail processing, web handlers, service helpers, and SMTP security covered. Status: reached at 70.20%.
 - Milestone F: 90% backend line coverage for deterministic backend unit-test scope. Status: reached at 90.02%.
-- Milestone G: frontend Vitest coverage enabled for settings and dashboard flows.
+- Milestone G: frontend Vitest coverage enabled with initial Auth/Settings/Rules coverage. Status: reached at 11.62% frontend line coverage.
+- Milestone H: frontend coverage above 25% with dashboard reprocess timelines and finance filters covered.
 
 ## Tooling Recommendation
 
@@ -317,6 +340,7 @@ export default defineConfig({
     setupFiles: './src/test/setup.ts',
     globals: true,
     passWithNoTests: true,
+    testTimeout: 10000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],

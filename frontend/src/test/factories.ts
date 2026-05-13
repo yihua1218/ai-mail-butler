@@ -1,0 +1,27 @@
+import type { User } from '../AuthContext'
+
+export const makeUser = (overrides: Partial<User> = {}): User => ({
+  id: 'user-1',
+  email: 'user@example.com',
+  mail_send_method: 'direct_mx',
+  is_onboarded: true,
+  preferences: null,
+  role: 'user',
+  auto_reply: false,
+  dry_run: true,
+  display_name: 'Test User',
+  email_format: 'both',
+  assistant_name_zh: null,
+  assistant_name_en: null,
+  assistant_tone_zh: null,
+  assistant_tone_en: null,
+  pdf_passwords: null,
+  timezone: 'UTC',
+  preferred_language: 'en',
+  training_data_consent: false,
+  training_consent_updated_at: null,
+  rule_label_mode: 'ai_first',
+  time_format: '24h',
+  date_format: 'auto',
+  ...overrides,
+})

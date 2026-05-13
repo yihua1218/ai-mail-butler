@@ -13,12 +13,16 @@
 ```bash
 cargo test
 cargo llvm-cov --summary-only
+cd frontend
+npm run test:run
+npm run test:coverage
 ```
 
 目前結果：
 
 ```text
-125 passed; 0 failed
+Backend: 125 passed; 0 failed
+Frontend: 9 passed; 0 failed
 ```
 
 Coverage 快照：
@@ -29,7 +33,9 @@ Coverage 快照：
 | Backend line coverage     |     90.02% |
 | Backend function coverage |     90.44% |
 | Backend region coverage   |     89.59% |
-| Frontend coverage         |   尚未量測 |
+| Frontend line coverage    |     11.62% |
+| Frontend function coverage|      8.55% |
+| Frontend branch coverage  |      4.87% |
 
 先前 2026-04-22 的 backend 實測 snapshot：
 
@@ -55,6 +61,13 @@ Coverage 快照：
 | 補完 SMTP security config 與 rate-limit tests 後           | 70.20% |   74.19% | 70.10% |
 | 補完 firewall/main/models/web runtime API tests 後         | 74.70% |   78.92% | 74.20% |
 | 補完 deterministic backend unit-test scope hardening 後    | 90.02% |   90.44% | 89.59% |
+
+2026-05-13 frontend 本地 snapshots：
+
+| Snapshot                                          |  Lines | Functions | Branches | Statements |
+|---------------------------------------------------|-------:|----------:|---------:|-----------:|
+| 尚未加入 frontend tests 前                        |  0.00% |     0.00% |    0.00% |      0.00% |
+| 補完 AuthContext、Settings 與 Rules page tests 後 | 11.62% |     8.55% |    4.87% |     10.89% |
 
 環境備註：
 
@@ -98,7 +111,9 @@ Coverage 快照：
 | Finance/about/runtime web handlers            | 已涵蓋 | Finance records/monthly views、about page、runtime auth 與 mode conflicts。       |
 | 郵件內容與 chat success handler paths         | 已涵蓋 | Message body rendering、chat transcript insert、memory 與 onboarding。            |
 | External I/O 邊界的 test shims                | 已涵蓋 | Deterministic unit scope 保護邏輯，不依賴 live SMTP/Cloudflare/system commands。 |
-| 前端 consent 開關互動與送出                   | 未涵蓋 | 需補 Vitest/RTL 測試。                                                          |
+| 前端 Auth provider 行為                        | 已涵蓋 | Saved user loading、token verification、refresh、logout 與 magic-link API。       |
+| 前端 settings save/delete flows                | 已涵蓋 | Guest local save、logged-in settings payload、consent payload、deletion request。 |
+| 前端 rules manager flows                       | 已涵蓋 | Guest guidance、rule loading、create、toggle 與 delete flows。                   |
 | Dashboard 多封信重處理 UI state               | 未涵蓋 | 需補各 row 獨立 timeline 的前端測試。                                           |
 
 ## 本次新增覆蓋
@@ -203,6 +218,11 @@ Coverage 快照：
   - overlay-relative DB path resolution。
   - 標準化 processing step JSON contract。
 - 已安裝並執行 `cargo-llvm-cov`；deterministic backend unit-test scope 的 backend line coverage 目前實測為 90.02%。
+- 新增第一批 frontend Vitest/React Testing Library 測試：
+  - `AuthContext` saved-user load、token verification、refresh、logout 與 magic-link request。
+  - `SettingsPage` guest local save、logged-in settings submit、training consent payload、PDF password payload 與 data-deletion request。
+  - `RulesManagerPage` guest guidance、rule loading、manual rule creation、rule toggle 與 delete confirmation。
+- 已執行 frontend coverage；frontend line coverage 目前實測為 11.62%。
 - 先前 P2 已新增手動重新處理測試：
   - 財務 rollback。
   - 規則重新命中。
@@ -258,10 +278,12 @@ Coverage 快照：
 
 目標：覆蓋不一定會讓後端測試失敗的 UI state。
 
-- Settings consent switch 顯示與 payload。
+- 狀態：Vitest/RTL tooling 已啟用，第一批 frontend line coverage 實測為 11.62%。
+- 狀態：Settings save/delete payloads、AuthContext state transitions 與 Rules manager CRUD basics 已涵蓋。
 - Dashboard 多封郵件同時重新處理時，各自 timeline 獨立更新。
 - Dashboard 自動回覆產生後的草稿查看/編輯內容。
 - Finance analysis filters 與 empty states。
+- 下一個目標：以 Dashboard 與 Finance tests 將 frontend line coverage 提高到 25% 以上。
 
 ## 覆蓋率里程碑
 
@@ -271,7 +293,8 @@ Coverage 快照：
 - Milestone D：backend line coverage 50%，且 key web/mail/firewall handlers 已涵蓋。狀態：已達成。
 - Milestone E：backend line coverage 70%，且 mail processing、web handlers、service helpers 與 SMTP security 已涵蓋。狀態：已達成，目前 70.20%。
 - Milestone F：deterministic backend unit-test scope 的 backend line coverage 90%。狀態：已達成，目前 90.02%。
-- Milestone G：前端 Vitest coverage 啟用，涵蓋 settings 與 dashboard flows。
+- Milestone G：前端 Vitest coverage 已啟用，並補完第一批 Auth/Settings/Rules coverage。狀態：已達成，目前 frontend line coverage 11.62%。
+- Milestone H：frontend coverage 超過 25%，並涵蓋 dashboard reprocess timelines 與 finance filters。
 
 ## 建議工具
 
@@ -317,6 +340,7 @@ export default defineConfig({
     setupFiles: './src/test/setup.ts',
     globals: true,
     passWithNoTests: true,
+    testTimeout: 10000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
