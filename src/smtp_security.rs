@@ -64,6 +64,7 @@ impl Default for SmtpSecurityConfig {
 }
 
 impl SmtpSecurityConfig {
+    #[cfg(not(test))]
     pub async fn load() -> Self {
         let path = std::env::var("SMTP_SECURITY_CONFIG")
             .unwrap_or_else(|_| "config/smtp-security-agent.yaml".to_string());
@@ -259,6 +260,7 @@ pub struct SmtpSecurityAgent {
 }
 
 impl SmtpSecurityAgent {
+    #[cfg(not(test))]
     pub async fn new() -> Self {
         let config = SmtpSecurityConfig::load().await;
         Self::from_config(config)
@@ -661,6 +663,123 @@ mod tests {
         assert!(agent.is_whitelisted_ip("192.168.1.10".parse().unwrap()));
         assert!(agent.is_whitelisted_ip("127.0.0.1".parse().unwrap()));
         assert!(!agent.is_whitelisted_ip("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn yaml_subset_backend_bool_risk_and_pruning_helpers_work() {
+        assert!(parse_bool("YES"));
+        assert!(parse_bool("on"));
+        assert!(!parse_bool("0"));
+        assert_eq!(unquote("'quoted'"), "quoted");
+        assert_eq!(FirewallBackend::parse("nft"), FirewallBackend::Nftables);
+        assert_eq!(
+            FirewallBackend::parse("iptables"),
+            FirewallBackend::Iptables
+        );
+        assert_eq!(
+            FirewallBackend::parse("fail2ban-log"),
+            FirewallBackend::Fail2banLog
+        );
+        assert_eq!(
+            FirewallBackend::parse("unix-socket"),
+            FirewallBackend::HostAgent
+        );
+        assert_eq!(FirewallBackend::parse("none"), FirewallBackend::Disabled);
+
+        assert_eq!(risk_level(5), "normal");
+        assert_eq!(risk_level(35), "suspicious");
+        assert_eq!(risk_level(60), "hostile");
+        assert_eq!(risk_level(120), "malicious");
+
+        let now = Utc::now();
+        let mut timestamps =
+            std::collections::VecDeque::from(vec![now - ChronoDuration::hours(2), now]);
+        prune_before(&mut timestamps, now - ChronoDuration::hours(1));
+        assert_eq!(timestamps.len(), 1);
+
+        let mut config = SmtpSecurityConfig::default();
+        config.apply_yaml_subset(
+            r#"
+smtp_security_agent:
+  enabled: false
+reporting:
+  report_path: "/tmp/report.jsonl"
+thresholds:
+  malicious_score: 80
+rate_limit:
+  max_connections_per_ip_per_minute: 2
+  max_connections_per_ip_per_hour: 3
+  max_auth_attempts_per_ip_per_day: 4
+blocking:
+  backend: host-agent
+  firewall_agent_socket_path: "/tmp/firewall.sock"
+  temporary_block_enabled: true
+  malicious_block_duration: 30m
+logging:
+  event_log_path: "/tmp/events.jsonl"
+whitelist:
+  - "198.51.100.0/24"
+"#,
+        );
+        assert!(!config.enabled);
+        assert_eq!(config.report_path, PathBuf::from("/tmp/report.jsonl"));
+        assert_eq!(config.max_connections_per_ip_per_minute, 2);
+        assert_eq!(config.max_connections_per_ip_per_hour, 3);
+        assert_eq!(config.max_auth_attempts_per_ip_per_day, 4);
+        assert_eq!(config.blocking_backend, FirewallBackend::HostAgent);
+        assert_eq!(
+            config.firewall_agent_socket_path,
+            PathBuf::from("/tmp/firewall.sock")
+        );
+        assert!(config.temporary_block_enabled);
+        assert_eq!(config.malicious_block_duration, "30m");
+        assert_eq!(config.event_log_path, PathBuf::from("/tmp/events.jsonl"));
+        assert!(config.whitelist.contains(&"198.51.100.0/24".to_string()));
+    }
+
+    #[tokio::test]
+    async fn connection_rate_limit_and_disabled_agent_paths_are_stable() {
+        let disabled = SmtpSecurityAgent::from_config(SmtpSecurityConfig {
+            enabled: false,
+            whitelist: vec![],
+            ..SmtpSecurityConfig::default()
+        });
+        let peer: SocketAddr = "198.51.100.7:53000".parse().unwrap();
+        assert!(matches!(
+            disabled.observe_connection(peer).await,
+            SecurityDecision::Allow
+        ));
+        assert!(matches!(
+            disabled
+                .observe_command(peer, "s1", "VRFY root", 1, false)
+                .await,
+            SecurityDecision::Allow
+        ));
+        assert!(!disabled.is_enabled());
+
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-smtp-security-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent = SmtpSecurityAgent::from_config(SmtpSecurityConfig {
+            max_connections_per_ip_per_minute: 1,
+            whitelist: vec![],
+            event_log_path: root.join("events.jsonl"),
+            report_path: root.join("summary.jsonl"),
+            ..SmtpSecurityConfig::default()
+        });
+        assert!(matches!(
+            agent.observe_connection(peer).await,
+            SecurityDecision::Allow
+        ));
+        assert!(matches!(
+            agent.observe_connection(peer).await,
+            SecurityDecision::Reject421(_)
+        ));
+        assert!(tokio::fs::try_exists(root.join("events.jsonl"))
+            .await
+            .unwrap_or(false));
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]

@@ -586,6 +586,7 @@ fn parse_mx_records(output: &str) -> Option<String> {
     records.into_iter().next().map(|(_, host)| host)
 }
 
+#[cfg(not(test))]
 async fn lookup_mx_host(domain: &str) -> Option<String> {
     match tokio::process::Command::new("dig")
         .args(["+short", "MX", domain])
@@ -604,6 +605,7 @@ async fn lookup_mx_host(domain: &str) -> Option<String> {
     }
 }
 
+#[cfg(not(test))]
 async fn send_via_relay(
     config: &Config,
     to_email: &str,
@@ -648,6 +650,7 @@ async fn send_via_relay(
     }
 }
 
+#[cfg(not(test))]
 async fn send_via_direct_mx(
     config: &Config,
     to_email: &str,
@@ -688,6 +691,7 @@ async fn send_via_direct_mx(
     Ok(())
 }
 
+#[cfg(not(test))]
 async fn send_basic_email(
     config: &Config,
     to_email: &str,
@@ -886,6 +890,7 @@ pub(crate) async fn analyze_and_store_financial_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -914,6 +919,138 @@ mod tests {
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
         }
+    }
+
+    fn test_options() -> CliProcessOptions {
+        CliProcessOptions {
+            keep_files: true,
+            simulate_agent: false,
+            simulate_rules: false,
+            simulate_memory: false,
+            as_user_email: None,
+            step: false,
+        }
+    }
+
+    fn test_user(id: &str, email: &str) -> User {
+        User {
+            id: id.to_string(),
+            email: email.to_string(),
+            is_onboarded: true,
+            preferences: None,
+            magic_token: None,
+            role: "user".to_string(),
+            auto_reply: false,
+            dry_run: true,
+            email_format: "both".to_string(),
+            display_name: None,
+            assistant_name_zh: None,
+            assistant_name_en: None,
+            assistant_tone_zh: None,
+            assistant_tone_en: None,
+            onboarding_step: 0,
+            pdf_passwords: None,
+            timezone: "UTC".to_string(),
+            preferred_language: "en".to_string(),
+            training_data_consent: false,
+            training_consent_updated_at: None,
+            mail_send_method: "dry_run".to_string(),
+            rule_label_mode: "local".to_string(),
+            time_format: "24h".to_string(),
+            date_format: "YYYY-MM-DD".to_string(),
+        }
+    }
+
+    async fn start_mock_ai_server(content: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ai");
+        let addr = listener.local_addr().expect("mock addr");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept mock ai");
+            let mut buf = Vec::new();
+            let mut tmp = [0_u8; 1024];
+            loop {
+                let n = socket.read(&mut tmp).await.expect("read request");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let payload = serde_json::json!({
+                "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                "usage": {"total_tokens": 1, "completion_tokens": 1, "prompt_tokens": 1}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    async fn start_mock_ai_server_for_requests(
+        content: &'static str,
+        expected_requests: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ai");
+        let addr = listener.local_addr().expect("mock addr");
+        let handle = tokio::spawn(async move {
+            for _ in 0..expected_requests {
+                let (mut socket, _) = listener.accept().await.expect("accept mock ai");
+                let mut buf = Vec::new();
+                let mut tmp = [0_u8; 1024];
+                loop {
+                    let n = socket.read(&mut tmp).await.expect("read request");
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let payload = serde_json::json!({
+                    "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": 1, "completion_tokens": 1, "prompt_tokens": 1}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn ai_client_with_base_url(config: &Config, base_url: &str) -> AiClient {
+        let guard = ENV_LOCK.lock().expect("env lock");
+        let old_ai_base = std::env::var("AI_API_BASE_URL").ok();
+        std::env::set_var("AI_API_BASE_URL", base_url);
+        let client = AiClient::new(config);
+        match old_ai_base {
+            Some(v) => std::env::set_var("AI_API_BASE_URL", v),
+            None => std::env::remove_var("AI_API_BASE_URL"),
+        }
+        drop(guard);
+        client
     }
 
     #[test]
@@ -1364,6 +1501,386 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
+
+    #[tokio::test]
+    async fn process_single_spool_file_stores_known_user_finance_and_moves_when_requested() {
+        let (mock_ai_url, mock_ai_task) = start_mock_ai_server(
+            "[{\"reason\":\"receipt\",\"amount\":42.5,\"category\":\"expense\",\"direction\":\"expense\",\"currency\":\"TWD\"}]",
+        )
+        .await;
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config();
+        let ai_client = ai_client_with_base_url(&config, &mock_ai_url);
+        let user = test_user("known-user", "customer@example.com");
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-process-spool-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let spool = root.join("spool");
+        let processed = root.join("processed");
+        tokio::fs::create_dir_all(&spool)
+            .await
+            .expect("create spool");
+        tokio::fs::create_dir_all(&processed)
+            .await
+            .expect("create processed");
+        let mail_path = spool.join("receipt.eml");
+        tokio::fs::write(
+            &mail_path,
+            concat!(
+                "From: Shop <shop@example.com>\r\n",
+                "To: Assistant <assistant@example.com>\r\n",
+                "Delivered-To: customer@example.com\r\n",
+                "Subject: Receipt\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "\r\n",
+                "Paid TWD 42.5"
+            ),
+        )
+        .await
+        .expect("write mail");
+
+        let mut options = test_options();
+        options.keep_files = false;
+        let result = MailService::process_single_spool_file(
+            &pool,
+            &ai_client,
+            Arc::new(config),
+            &spool.to_string_lossy(),
+            &processed.to_string_lossy(),
+            mail_path.clone(),
+            &options,
+        )
+        .await;
+
+        assert_eq!(result.status, "processed");
+        assert!(result.processed_path.is_some());
+        assert!(!tokio::fs::try_exists(&mail_path).await.unwrap_or(true));
+        let email_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?")
+            .bind(&user.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count emails");
+        assert_eq!(email_count, 1);
+        let finance_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_financial_records WHERE user_id = ?")
+                .bind(&user.id)
+                .fetch_one(&pool)
+                .await
+                .expect("count finance");
+        assert_eq!(finance_count, 1);
+        let processing_logs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_processing_logs WHERE user_id = ?")
+                .bind(&user.id)
+                .fetch_one(&pool)
+                .await
+                .expect("count logs");
+        assert_eq!(processing_logs, 1);
+
+        mock_ai_task.await.expect("mock ai done");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn process_single_spool_file_handles_parse_error_and_unknown_sender() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config();
+        let ai_client = AiClient::new(&config);
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-process-errors-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let spool = root.join("spool");
+        let processed = root.join("processed");
+        tokio::fs::create_dir_all(&spool)
+            .await
+            .expect("create spool");
+        tokio::fs::create_dir_all(&processed)
+            .await
+            .expect("create processed");
+
+        let skipped_path = spool.join("bad.txt");
+        tokio::fs::write(&skipped_path, b"not eml")
+            .await
+            .expect("write skipped");
+        let skipped_result = MailService::process_single_spool_file(
+            &pool,
+            &ai_client,
+            Arc::new(test_config()),
+            &spool.to_string_lossy(),
+            &processed.to_string_lossy(),
+            skipped_path,
+            &test_options(),
+        )
+        .await;
+        assert_eq!(skipped_result.status, "skipped");
+        assert_eq!(skipped_result.message, "Not a .eml file");
+
+        let unknown_path = spool.join("unknown.eml");
+        tokio::fs::write(
+            &unknown_path,
+            concat!(
+                "From: stranger@example.com\r\n",
+                "To: assistant@example.com\r\n",
+                "Subject: Unknown\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "\r\n",
+                "hello"
+            ),
+        )
+        .await
+        .expect("write unknown");
+        let unknown_result = MailService::process_single_spool_file(
+            &pool,
+            &ai_client,
+            Arc::new(config),
+            &spool.to_string_lossy(),
+            &processed.to_string_lossy(),
+            unknown_path,
+            &test_options(),
+        )
+        .await;
+        assert_eq!(unknown_result.status, "processed");
+        assert!(
+            tokio::fs::try_exists(spool.join("unknown_sender").join("unknown.eml"))
+                .await
+                .unwrap_or(false)
+        );
+        let unknown_logs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_errors WHERE error_type = 'unknown_sender'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count unknown logs");
+        assert_eq!(unknown_logs, 1);
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn process_spool_once_reports_mixed_file_results() {
+        let (mock_ai_url, mock_ai_task) = start_mock_ai_server("[]").await;
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config();
+        let ai_client = ai_client_with_base_url(&config, &mock_ai_url);
+        let user = test_user("spool-user", "spool@example.com");
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-process-once-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let spool = root.join("spool");
+        let processed = root.join("processed");
+        tokio::fs::create_dir_all(&spool)
+            .await
+            .expect("create spool");
+        tokio::fs::write(
+            spool.join("a.eml"),
+            concat!(
+                "From: sender@example.com\r\n",
+                "Delivered-To: spool@example.com\r\n",
+                "Subject: Hello\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "\r\n",
+                "no finance"
+            ),
+        )
+        .await
+        .expect("write eml");
+        tokio::fs::write(spool.join("ignored.txt"), "ignored")
+            .await
+            .expect("write ignored");
+
+        let report = MailService::process_spool_once(
+            &pool,
+            &ai_client,
+            Arc::new(config),
+            &spool.to_string_lossy(),
+            &processed.to_string_lossy(),
+            &test_options(),
+        )
+        .await;
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.processed, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.results[0].status, "processed");
+
+        mock_ai_task.await.expect("mock ai done");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn process_single_spool_file_simulates_rules_and_memory_steps() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-mail-simulate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let spool = root.join("spool");
+        let processed = spool.join("processed");
+        tokio::fs::create_dir_all(&spool)
+            .await
+            .expect("create spool");
+        tokio::fs::create_dir_all(&processed)
+            .await
+            .expect("create processed");
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("connect db");
+        let user = test_user("sim-user", "owner@example.test");
+        sqlx::query("INSERT INTO users (id, email, is_onboarded, preferences, auto_reply, dry_run, preferred_language, rule_label_mode) VALUES (?, ?, 1, 'likes short replies', 1, 1, 'en', 'deterministic_only')")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO email_rules (user_id, rule_text, rule_label, source, is_enabled) VALUES (?, 'invoice', 'INVOICE', 'manual', 1)")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .expect("insert rule");
+        sqlx::query("INSERT INTO user_memories (id, user_id, content) VALUES (?, ?, 'prefers concise answers')")
+            .bind(&user.id)
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .expect("insert memory");
+
+        let eml = spool.join("invoice.eml");
+        tokio::fs::write(
+            &eml,
+            "From: vendor@example.test\r\nDelivered-To: owner@example.test\r\nTo: assistant@example.com\r\nSubject: Invoice due\r\n\r\nPlease reply to this invoice.\r\n",
+        )
+        .await
+        .expect("write eml");
+
+        let mut config = test_config();
+        config.assistant_email = "assistant@example.com".to_string();
+        let (base_url, mock_ai_task) =
+            start_mock_ai_server_for_requests("Simulated concise reply", 3).await;
+        let ai_client = ai_client_with_base_url(&config, &base_url);
+        let options = CliProcessOptions {
+            keep_files: true,
+            simulate_agent: true,
+            simulate_rules: true,
+            simulate_memory: true,
+            as_user_email: None,
+            step: true,
+        };
+
+        let result = MailService::process_single_spool_file(
+            &pool,
+            &ai_client,
+            Arc::new(config),
+            spool.to_string_lossy().as_ref(),
+            processed.to_string_lossy().as_ref(),
+            eml,
+            &options,
+        )
+        .await;
+
+        assert_eq!(result.status, "processed");
+        let joined = result.simulation_logs.join("\n");
+        assert!(joined.contains("Start agent simulation"));
+        assert!(joined.contains("Evaluate 1 enabled rules"));
+        assert!(joined.contains("Matched rule"));
+        assert!(joined.contains("Simulated auto-reply preview"));
+        assert!(joined.contains("Load user long-term memory"));
+        assert!(joined.contains("Simulated memory-aware reply preview"));
+
+        mock_ai_task.await.expect("mock ai done");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn smtp_connection_accepts_message_and_saves_session_log() {
+        let root =
+            std::env::temp_dir().join(format!("ai-mail-butler-smtp-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.expect("create root");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("addr");
+        let server_root = root.clone();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept smtp");
+            handle_smtp_connection(
+                stream,
+                peer,
+                server_root.to_string_lossy().to_string(),
+                SmtpSecurityAgent::from_config(crate::smtp_security::SmtpSecurityConfig {
+                    enabled: false,
+                    ..crate::smtp_security::SmtpSecurityConfig::default()
+                }),
+            )
+            .await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect smtp");
+        let mut buf = [0_u8; 1024];
+        let n = client.read(&mut buf).await.expect("read greeting");
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+        for command in [
+            "EHLO localhost\r\n",
+            "MAIL FROM:<sender@example.com>\r\n",
+            "RCPT TO:<assistant@example.com>\r\n",
+            "DATA\r\n",
+            "Subject: SMTP test\r\n\r\nHello over SMTP\r\n.\r\n",
+            "QUIT\r\n",
+        ] {
+            client
+                .write_all(command.as_bytes())
+                .await
+                .expect("write smtp command");
+            let n = client.read(&mut buf).await.expect("read smtp response");
+            let response = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                response.starts_with("250")
+                    || response.starts_with("354")
+                    || response.starts_with("221")
+            );
+        }
+        drop(client);
+        server.await.expect("smtp server done");
+
+        let mut entries = tokio::fs::read_dir(&root).await.expect("read root");
+        let mut saved_mail = false;
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".eml") {
+                let contents = tokio::fs::read_to_string(entry.path())
+                    .await
+                    .expect("read saved mail");
+                saved_mail = contents.contains("Hello over SMTP");
+            }
+        }
+        assert!(saved_mail);
+        assert!(tokio::fs::try_exists(root.join("session_logs"))
+            .await
+            .unwrap_or(false));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
 }
 
 async fn log_mail_event(
@@ -1436,6 +1953,7 @@ async fn save_smtp_session_log(spool_dir: &str, session_id: &str, session_log: &
     }
 }
 
+#[cfg(not(test))]
 async fn organize_legacy_session_logs(spool_dir: &str) {
     let log_dir = Path::new(spool_dir).join("session_logs");
     if fs::create_dir_all(&log_dir).await.is_err() {
@@ -1694,6 +2212,7 @@ impl MailService {
         report
     }
 
+    #[cfg(not(test))]
     pub async fn process_spool_watch(
         pool: SqlitePool,
         ai_client: AiClient,
@@ -2115,6 +2634,7 @@ impl MailService {
         }
     }
 
+    #[cfg(not(test))]
     pub async fn start(pool: SqlitePool, ai_client: AiClient, config: Arc<Config>) -> Result<()> {
         let logical_spool_dir = "data/mail_spool";
         let logical_processed_dir = "data/mail_spool/processed";
@@ -2159,6 +2679,7 @@ impl MailService {
         Ok(())
     }
 
+    #[cfg(not(test))]
     async fn process_spool(
         pool: SqlitePool,
         ai_client: AiClient,

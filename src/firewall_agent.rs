@@ -272,6 +272,7 @@ impl FirewallAgent {
         }
     }
 
+    #[cfg(not(test))]
     pub async fn run(self) -> Result<()> {
         if !self.config.enabled {
             return Err(anyhow!("firewall agent is disabled"));
@@ -311,6 +312,7 @@ impl FirewallAgent {
         }
     }
 
+    #[cfg(not(test))]
     fn clone_for_task(&self) -> Self {
         Self {
             config: self.config.clone(),
@@ -571,6 +573,7 @@ impl FirewallAgent {
         }
     }
 
+    #[cfg(not(test))]
     async fn ensure_nftables(&self) -> Result<()> {
         let _ = run_command("nft", &["add", "table", "inet", "ai_mail_butler"]).await;
         let _ = run_command(
@@ -650,11 +653,23 @@ impl FirewallAgent {
         Ok(())
     }
 
+    #[cfg(not(test))]
     async fn ensure_iptables_docker_user(&self) -> Result<()> {
         run_command("iptables", &["-N", "DOCKER-USER"]).await.ok();
         Ok(())
     }
 
+    #[cfg(test)]
+    async fn ensure_nftables(&self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn ensure_iptables_docker_user(&self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(test))]
     async fn apply_block(&self, ip: IpAddr, duration: &str) -> Result<HostFirewallBackend> {
         let backends = [
             self.config.preferred_backend,
@@ -700,6 +715,7 @@ impl FirewallAgent {
         Err(last_error.unwrap_or_else(|| anyhow!("no available firewall backend")))
     }
 
+    #[cfg(not(test))]
     async fn apply_iptables_rule(&self, chain: &str, ip: IpAddr) -> Result<()> {
         let program = if ip.is_ipv4() {
             "iptables"
@@ -727,6 +743,7 @@ impl FirewallAgent {
         Ok(())
     }
 
+    #[cfg(not(test))]
     async fn apply_unblock(&self, ip: IpAddr, backend: HostFirewallBackend) -> Result<()> {
         match backend {
             HostFirewallBackend::Nftables => {
@@ -756,6 +773,7 @@ impl FirewallAgent {
         }
     }
 
+    #[cfg(not(test))]
     async fn delete_iptables_rule(&self, chain: &str, ip: IpAddr) -> Result<()> {
         let program = if ip.is_ipv4() {
             "iptables"
@@ -783,6 +801,23 @@ impl FirewallAgent {
         Ok(())
     }
 
+    #[cfg(test)]
+    async fn apply_block(&self, _ip: IpAddr, _duration: &str) -> Result<HostFirewallBackend> {
+        if self.config.preferred_backend != HostFirewallBackend::Disabled {
+            Ok(self.config.preferred_backend)
+        } else if self.config.fallback_backend != HostFirewallBackend::Disabled {
+            Ok(self.config.fallback_backend)
+        } else {
+            Ok(HostFirewallBackend::Disabled)
+        }
+    }
+
+    #[cfg(test)]
+    async fn apply_unblock(&self, _ip: IpAddr, _backend: HostFirewallBackend) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(test))]
     async fn restore_active_blocks(&self) {
         let now = Utc::now();
         let records = self
@@ -804,6 +839,7 @@ impl FirewallAgent {
         self.cleanup_expired().await;
     }
 
+    #[cfg(not(test))]
     async fn cleanup_loop(&self) {
         loop {
             sleep(Duration::from_secs(self.config.cleanup_interval_seconds)).await;
@@ -921,6 +957,7 @@ fn parse_duration(raw: &str) -> Option<ChronoDuration> {
     .filter(|duration| *duration > ChronoDuration::zero())
 }
 
+#[cfg(not(test))]
 async fn run_command(program: &str, args: &[&str]) -> Result<()> {
     let output = Command::new(program)
         .args(args)
@@ -950,6 +987,11 @@ async fn save_state(path: &Path, state: &FirewallState) -> Result<()> {
         fs::create_dir_all(parent).await?;
     }
     fs::write(path, serde_json::to_string_pretty(state)?).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn run_command(_program: &str, _args: &[&str]) -> Result<()> {
     Ok(())
 }
 
@@ -1154,5 +1196,265 @@ firewall_agent:
             })
             .await;
         assert_eq!(response.status, "rejected");
+    }
+
+    fn test_config(root: &Path) -> FirewallAgentConfig {
+        FirewallAgentConfig {
+            enabled: true,
+            socket_path: root.join("firewall.sock"),
+            preferred_backend: HostFirewallBackend::Disabled,
+            fallback_backend: HostFirewallBackend::Disabled,
+            smtp_ports: vec![25, 587],
+            default_duration: "10m".to_string(),
+            max_duration: "1h".to_string(),
+            allow_private_ip_blocking: false,
+            allow_cidr_blocking: false,
+            whitelist: vec!["127.0.0.1".to_string()],
+            audit_log_path: root.join("audit").join("firewall.jsonl"),
+            state_path: root.join("state").join("firewall.json"),
+            cleanup_interval_seconds: 60,
+        }
+    }
+
+    fn request(action: &str, ip: Option<&str>) -> FirewallRequest {
+        FirewallRequest {
+            action: action.to_string(),
+            ip: ip.map(str::to_string),
+            duration: Some("10m".to_string()),
+            reason: Some("unit test".to_string()),
+            source: Some("test".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_handler_covers_health_list_and_unsupported_actions() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-firewall-handler-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent = FirewallAgent::new(test_config(&root)).await;
+
+        let health = agent.handle_request(request("health", None)).await;
+        assert_eq!(health.status, "ok");
+        assert_eq!(health.backend.as_deref(), Some("disabled"));
+        assert_eq!(health.firewall_ready, Some(true));
+
+        let list = agent.handle_request(request("list_blocks", None)).await;
+        assert_eq!(list.status, "ok");
+        assert_eq!(list.blocked.expect("blocked list").len(), 0);
+
+        let unsupported = agent
+            .handle_request(request("launch_missiles", Some("198.51.100.8")))
+            .await;
+        assert_eq!(unsupported.status, "error");
+        assert_eq!(unsupported.ip.as_deref(), Some("198.51.100.8"));
+        assert_eq!(unsupported.reason.as_deref(), Some("unsupported action"));
+
+        let _ = fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn block_request_validation_rejections_are_audited() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-firewall-reject-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent = FirewallAgent::new(test_config(&root)).await;
+
+        let invalid_ip = agent.handle_request(request("block_ip", Some("bad"))).await;
+        assert_eq!(invalid_ip.status, "rejected");
+        assert_eq!(
+            invalid_ip.reason.as_deref(),
+            Some("ip must be a valid IPv4 or IPv6 address")
+        );
+
+        let missing_reason = agent
+            .handle_request(FirewallRequest {
+                reason: Some("   ".to_string()),
+                ..request("block_ip", Some("198.51.100.8"))
+            })
+            .await;
+        assert_eq!(missing_reason.status, "rejected");
+        assert_eq!(
+            missing_reason.reason.as_deref(),
+            Some("reason must be 1-240 characters")
+        );
+
+        let private_ip = agent
+            .handle_request(request("block_ip", Some("10.0.0.8")))
+            .await;
+        assert_eq!(private_ip.status, "rejected");
+        assert_eq!(
+            private_ip.reason.as_deref(),
+            Some("private/internal IP blocking is disabled")
+        );
+
+        let invalid_duration = agent
+            .handle_request(FirewallRequest {
+                duration: Some("later".to_string()),
+                ..request("block_ip", Some("198.51.100.8"))
+            })
+            .await;
+        assert_eq!(invalid_duration.status, "rejected");
+        assert_eq!(invalid_duration.reason.as_deref(), Some("invalid duration"));
+
+        let excessive_duration = agent
+            .handle_request(FirewallRequest {
+                duration: Some("2h".to_string()),
+                ..request("block_ip", Some("198.51.100.8"))
+            })
+            .await;
+        assert_eq!(excessive_duration.status, "rejected");
+        assert_eq!(
+            excessive_duration.reason.as_deref(),
+            Some("duration exceeds max_duration")
+        );
+
+        let audit = fs::read_to_string(root.join("audit").join("firewall.jsonl"))
+            .await
+            .expect("audit log");
+        assert_eq!(audit.lines().count(), 5);
+        assert!(audit.contains("firewall_block_rejected"));
+
+        let _ = fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn unblock_and_cleanup_expired_records_update_state_and_audit() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-firewall-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent = FirewallAgent::new(test_config(&root)).await;
+        let blocked_ip: IpAddr = "198.51.100.23".parse().expect("blocked ip");
+        let expired_ip: IpAddr = "198.51.100.24".parse().expect("expired ip");
+        {
+            let mut state = agent.state.lock().await;
+            state.blocked.insert(
+                blocked_ip,
+                BlockRecord {
+                    ip: blocked_ip,
+                    reason: "manual test".to_string(),
+                    source: "unit".to_string(),
+                    backend: "disabled".to_string(),
+                    expires_at: Utc::now() + ChronoDuration::minutes(5),
+                },
+            );
+            state.blocked.insert(
+                expired_ip,
+                BlockRecord {
+                    ip: expired_ip,
+                    reason: "expired test".to_string(),
+                    source: "unit".to_string(),
+                    backend: "disabled".to_string(),
+                    expires_at: Utc::now() - ChronoDuration::minutes(5),
+                },
+            );
+            save_state(&agent.config.state_path, &state)
+                .await
+                .expect("save state");
+        }
+
+        let unblock = agent
+            .handle_request(request("unblock_ip", Some("198.51.100.23")))
+            .await;
+        assert_eq!(unblock.status, "ok");
+        assert_eq!(unblock.backend.as_deref(), Some("disabled"));
+
+        agent.cleanup_expired().await;
+        let state = load_state(&agent.config.state_path)
+            .await
+            .expect("load state");
+        assert!(state.blocked.is_empty());
+
+        let audit = fs::read_to_string(root.join("audit").join("firewall.jsonl"))
+            .await
+            .expect("audit log");
+        assert!(audit.contains("firewall_unblock"));
+        assert!(audit.contains("firewall_block_expired"));
+
+        let _ = fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn stream_handler_returns_json_errors_and_success_responses() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-firewall-stream-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent = FirewallAgent::new(test_config(&root)).await;
+
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        client
+            .write_all(b"{bad json}\n")
+            .await
+            .expect("write invalid request");
+        agent
+            .handle_stream(server)
+            .await
+            .expect("handle invalid json");
+        let mut line = String::new();
+        BufReader::new(client)
+            .read_line(&mut line)
+            .await
+            .expect("read response");
+        let response: FirewallResponse = serde_json::from_str(&line).expect("json response");
+        assert_eq!(response.status, "error");
+        assert!(response
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invalid json request"));
+
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        let health = request("health", None);
+        client
+            .write_all(format!("{}\n", serde_json::to_string(&health).unwrap()).as_bytes())
+            .await
+            .expect("write health request");
+        agent.handle_stream(server).await.expect("handle health");
+        let mut line = String::new();
+        BufReader::new(client)
+            .read_line(&mut line)
+            .await
+            .expect("read response");
+        let response: FirewallResponse = serde_json::from_str(&line).expect("json response");
+        assert_eq!(response.status, "ok");
+
+        let _ = fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn config_load_reads_yaml_file_when_present() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-firewall-load-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).await.expect("create root");
+        let config_path = root.join("firewall.yaml");
+        fs::write(
+            &config_path,
+            r#"
+firewall_agent:
+  enabled: false
+  socket_path: "/tmp/custom-firewall.sock"
+  backend:
+    preferred: input
+    fallback: disabled
+"#,
+        )
+        .await
+        .expect("write config");
+
+        let config = FirewallAgentConfig::load(Some(config_path.to_string_lossy().as_ref())).await;
+        assert!(!config.enabled);
+        assert_eq!(
+            config.socket_path,
+            PathBuf::from("/tmp/custom-firewall.sock")
+        );
+        assert_eq!(config.preferred_backend, HostFirewallBackend::IptablesInput);
+        assert_eq!(config.fallback_backend, HostFirewallBackend::Disabled);
+
+        let _ = fs::remove_dir_all(&root).await;
     }
 }

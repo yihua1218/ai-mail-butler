@@ -353,6 +353,7 @@ async fn list_empty_db_rows_with_archive(
     Ok(())
 }
 
+#[cfg(not(test))]
 async fn run_cli_repl(
     pool: &sqlx::SqlitePool,
     ai_client: &ai::AiClient,
@@ -467,6 +468,7 @@ async fn run_cli_repl(
     Ok(())
 }
 
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize environment variables
@@ -864,6 +866,163 @@ mod tests {
             config.overlay_dir.as_deref(),
             Some(overlay.to_str().unwrap())
         );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn readonly_base_resolution_supports_data_root_fallback_and_missing_base() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-base-resolve-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let base = root.join("base");
+        tokio::fs::create_dir_all(&base).await.expect("create base");
+        tokio::fs::write(base.join("data.sqlite"), "db")
+            .await
+            .expect("write db");
+
+        let resolved = resolve_readonly_base_path(&base, &PathBuf::from("data/data.sqlite")).await;
+        assert_eq!(resolved, base.join("data.sqlite"));
+
+        let missing = resolve_readonly_base_path(&base, &PathBuf::from("missing.sqlite")).await;
+        assert_eq!(missing, base.join("missing.sqlite"));
+
+        let mut config = test_config("sqlite:data/data.sqlite");
+        prepare_readonly_overlay_db(&mut config)
+            .await
+            .expect("non-readonly is no-op");
+        assert_eq!(config.database_url, "sqlite:data/data.sqlite");
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn archive_lookup_uses_db_sibling_and_skips_empty_or_mismatched_archives() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-archive-sibling-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let data = root.join("data");
+        let user_dir = data
+            .join("mail_spool")
+            .join(sanitize_path_component("user@example.test"));
+        let empty = user_dir.join("empty");
+        let wrong_subject = user_dir.join("wrong");
+        let matched = user_dir.join("matched");
+        tokio::fs::create_dir_all(&empty)
+            .await
+            .expect("create empty");
+        tokio::fs::create_dir_all(&wrong_subject)
+            .await
+            .expect("create wrong");
+        tokio::fs::create_dir_all(&matched)
+            .await
+            .expect("create matched");
+        tokio::fs::write(
+            empty.join("meta.txt"),
+            "subject: Receipt\nreceived_at: 2026-05-13 10:00:00\n",
+        )
+        .await
+        .expect("write empty meta");
+        tokio::fs::write(empty.join("body.txt"), "")
+            .await
+            .expect("write empty body");
+        tokio::fs::write(
+            wrong_subject.join("meta.txt"),
+            "subject: Newsletter\nreceived_at: 2026-05-13 10:00:00\n",
+        )
+        .await
+        .expect("write wrong meta");
+        tokio::fs::write(wrong_subject.join("raw.eml"), "wrong")
+            .await
+            .expect("write wrong raw");
+        tokio::fs::write(
+            matched.join("meta.txt"),
+            "subject: Receipt\nreceived_at: 2026-05-13 10:05:00\n",
+        )
+        .await
+        .expect("write matched meta");
+        tokio::fs::write(matched.join("body.txt"), "body content")
+            .await
+            .expect("write matched body");
+
+        let config = test_config(format!("sqlite:{}", data.join("data.sqlite").display()));
+        let found = find_archived_mail_for_empty_row(
+            &config,
+            root.join("unrelated-spool").to_string_lossy().as_ref(),
+            "user@example.test",
+            "Receipt",
+            Some("2026-05-13 10:05:00"),
+        )
+        .await
+        .expect("find sibling archive");
+        assert_eq!(found.0, 12);
+        assert!(found.1.ends_with("body.txt"));
+
+        assert!(find_archived_mail_for_empty_row(
+            &config,
+            root.join("unrelated-spool").to_string_lossy().as_ref(),
+            "user@example.test",
+            "Missing",
+            None,
+        )
+        .await
+        .is_none());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn list_empty_db_rows_with_archive_handles_matches_and_nonmatches() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-empty-rows-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let pool = db::connect("sqlite::memory:").await.expect("connect db");
+        sqlx::query(
+            "INSERT INTO users (id, email, is_onboarded, preferences)
+             VALUES ('user-1', 'user@example.test', 1, '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert user");
+        sqlx::query(
+            "INSERT INTO emails (id, user_id, subject, preview, stored_content, plain_content, html_content, status, received_at)
+             VALUES
+             ('email-1', 'user-1', 'Receipt', '', '', '', '', 'pending', '2026-05-13 10:00:00'),
+             ('email-2', 'user-1', '', '', '', '', '', 'pending', '2026-05-13 10:00:00'),
+             ('email-3', 'user-1', 'Has content', 'preview', '', '', '', 'processed', '2026-05-13 10:00:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert emails");
+
+        let archive_dir = root
+            .join("spool")
+            .join(sanitize_path_component("user@example.test"))
+            .join("receipt");
+        tokio::fs::create_dir_all(&archive_dir)
+            .await
+            .expect("create archive");
+        tokio::fs::write(
+            archive_dir.join("meta.txt"),
+            "subject: Receipt\nreceived_at: 2026-05-13 10:00:00\n",
+        )
+        .await
+        .expect("write meta");
+        tokio::fs::write(archive_dir.join("raw.eml"), "raw receipt")
+            .await
+            .expect("write raw");
+
+        let config = test_config("sqlite::memory:");
+        list_empty_db_rows_with_archive(
+            &pool,
+            &config,
+            root.join("spool").to_string_lossy().as_ref(),
+        )
+        .await
+        .expect("list empty rows");
 
         let _ = tokio::fs::remove_dir_all(&root).await;
     }

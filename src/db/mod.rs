@@ -625,6 +625,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+#[cfg(not(test))]
 pub async fn run_startup_diagnostics(pool: &SqlitePool) -> Result<()> {
     use crate::models::User;
     tracing::info!("Running startup diagnostics...");

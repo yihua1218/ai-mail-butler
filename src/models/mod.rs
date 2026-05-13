@@ -119,6 +119,139 @@ mod tests {
         assert!(json.contains("id1"));
         assert!(json.contains("Test"));
     }
+
+    #[test]
+    fn user_defaults_cover_all_preferences() {
+        let user: User = serde_json::from_str(
+            r#"{
+                "id": "user-1",
+                "email": "user@example.test",
+                "is_onboarded": false,
+                "preferences": null,
+                "magic_token": null,
+                "display_name": null,
+                "assistant_name_zh": null,
+                "assistant_name_en": null,
+                "assistant_tone_zh": null,
+                "assistant_tone_en": null,
+                "pdf_passwords": null,
+                "training_consent_updated_at": null
+            }"#,
+        )
+        .expect("deserialize user defaults");
+
+        assert_eq!(user.role, "");
+        assert!(!user.auto_reply);
+        assert!(user.dry_run);
+        assert_eq!(user.email_format, "both");
+        assert_eq!(user.onboarding_step, 0);
+        assert_eq!(user.timezone, "UTC");
+        assert_eq!(user.preferred_language, "en");
+        assert!(!user.training_data_consent);
+        assert_eq!(user.mail_send_method, "direct_mx");
+        assert_eq!(user.rule_label_mode, "ai_first");
+        assert_eq!(user.time_format, "24h");
+        assert_eq!(user.date_format, "auto");
+    }
+
+    #[test]
+    fn privacy_and_wish_models_serialize_expected_fields() {
+        let audit = ConsentAuditTrail {
+            id: "audit-1".to_string(),
+            user_id: "user-1".to_string(),
+            policy_version: "2026-05".to_string(),
+            consent_type: "training".to_string(),
+            consent_granted: true,
+            consent_source: "settings".to_string(),
+            ip_address: Some("198.51.100.1".to_string()),
+            user_agent: Some("test".to_string()),
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+        };
+        assert!(serde_json::to_value(audit)
+            .unwrap()
+            .get("consent_granted")
+            .unwrap()
+            .as_bool()
+            .unwrap());
+
+        let dsar = DsarRequest {
+            id: "dsar-1".to_string(),
+            user_id: "user-1".to_string(),
+            request_type: "export".to_string(),
+            status: "pending".to_string(),
+            admin_notes: None,
+            completed_at: None,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(dsar).unwrap()["request_type"],
+            serde_json::json!("export")
+        );
+
+        let policy = DataRetentionPolicy {
+            id: "policy-1".to_string(),
+            data_type: "chat_transcripts".to_string(),
+            retention_days: 30,
+            is_active: true,
+            updated_at: None,
+        };
+        let round_trip: DataRetentionPolicy =
+            serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        assert_eq!(round_trip.retention_days, 30);
+
+        let privacy = UserPrivacySettings {
+            user_id: "user-1".to_string(),
+            do_not_sell_share: true,
+            cross_border_disclosure_given: false,
+            data_location_preference: Some("tw".to_string()),
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(privacy).unwrap()["data_location_preference"],
+            serde_json::json!("tw")
+        );
+
+        let age = UserAgeVerification {
+            user_id: "user-1".to_string(),
+            is_minor: true,
+            guardian_consent_given: true,
+            guardian_email: Some("guardian@example.test".to_string()),
+            age_verified_at: Some("2026-05-13T00:00:00Z".to_string()),
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(age).unwrap()["guardian_email"],
+            serde_json::json!("guardian@example.test")
+        );
+
+        let wish = FeatureWish {
+            id: "wish-1".to_string(),
+            title: "Better dashboard".to_string(),
+            title_zh: Some("更好的儀表板".to_string()),
+            title_en: None,
+            description: Some("More status".to_string()),
+            description_zh: None,
+            description_en: None,
+            created_by: Some("user-1".to_string()),
+            is_official: false,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+            vote_count: 7,
+            user_has_voted: true,
+        };
+        let cloned = wish.clone();
+        assert_eq!(cloned.vote_count, 7);
+        assert!(format!("{:?}", cloned).contains("Better dashboard"));
+
+        let create: CreateWishRequest = serde_json::from_str(
+            r#"{"email":"user@example.test","title":"New flow","title_zh":null,"title_en":null,"description":null,"description_zh":null,"description_en":null}"#,
+        )
+        .expect("create wish");
+        assert_eq!(create.email, "user@example.test");
+
+        let vote: VoteWishRequest =
+            serde_json::from_str(r#"{"email":"user@example.test"}"#).expect("vote wish");
+        assert_eq!(vote.email, "user@example.test");
+    }
 }
 
 #[derive(Serialize, FromRow)]

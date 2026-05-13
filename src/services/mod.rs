@@ -357,7 +357,122 @@ impl EmailReplyService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::models::User;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_config() -> Config {
+        Config {
+            database_url: "sqlite::memory:".to_string(),
+            server_port: 3000,
+            ai_api_key: String::new(),
+            developer_email: None,
+            smtp_relay_host: None,
+            smtp_relay_port: 587,
+            smtp_relay_user: None,
+            smtp_relay_pass: None,
+            assistant_email: "assistant@example.com".to_string(),
+            docs_whitelist: vec![],
+            readonly_mode_enabled: false,
+            readonly_block_writes: false,
+            readonly_base: None,
+            overlay_dir: None,
+            remote_debug_sshfs_enabled: false,
+            remote_debug_mode: "readonly".to_string(),
+            remote_debug_access_mode: "readonly".to_string(),
+            remote_debug_remote: None,
+            remote_debug_mount_point: None,
+            remote_debug_overlay_dir: None,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
+        }
+    }
+
+    fn test_user() -> User {
+        User {
+            id: "service-user".to_string(),
+            email: "service@example.com".to_string(),
+            is_onboarded: true,
+            preferences: Some("prefers concise replies".to_string()),
+            magic_token: None,
+            role: "user".to_string(),
+            auto_reply: false,
+            dry_run: true,
+            email_format: "both".to_string(),
+            display_name: Some("Service User".to_string()),
+            assistant_name_zh: Some("測試管家".to_string()),
+            assistant_name_en: Some("Test Butler".to_string()),
+            assistant_tone_zh: Some("親切".to_string()),
+            assistant_tone_en: Some("warm".to_string()),
+            onboarding_step: 4,
+            pdf_passwords: None,
+            timezone: "UTC".to_string(),
+            preferred_language: "en".to_string(),
+            training_data_consent: false,
+            training_consent_updated_at: None,
+            mail_send_method: "dry_run".to_string(),
+            rule_label_mode: "local".to_string(),
+            time_format: "24h".to_string(),
+            date_format: "YYYY-MM-DD".to_string(),
+        }
+    }
+
+    async fn start_mock_ai_server(
+        expected_requests: usize,
+        content: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock ai");
+        let addr = listener.local_addr().expect("mock addr");
+        let handle = tokio::spawn(async move {
+            for _ in 0..expected_requests {
+                let (mut socket, _) = listener.accept().await.expect("accept mock ai");
+                let mut buf = Vec::new();
+                let mut tmp = [0_u8; 1024];
+                loop {
+                    let n = socket.read(&mut tmp).await.expect("read request");
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let payload = serde_json::json!({
+                    "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": 9, "completion_tokens": 4, "prompt_tokens": 5}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn ai_client_with_base_url(base_url: &str) -> AiClient {
+        let guard = ENV_LOCK.lock().expect("env lock");
+        let old_ai_base = std::env::var("AI_API_BASE_URL").ok();
+        std::env::set_var("AI_API_BASE_URL", base_url);
+        let client = AiClient::new(&test_config());
+        match old_ai_base {
+            Some(v) => std::env::set_var("AI_API_BASE_URL", v),
+            None => std::env::remove_var("AI_API_BASE_URL"),
+        }
+        drop(guard);
+        client
+    }
 
     #[test]
     fn extract_pdf_text_returns_error_for_invalid_bytes() {
@@ -414,5 +529,156 @@ mod tests {
         assert!(OnboardingService::get_next_onboarding_question(&user)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn onboarding_ai_helpers_use_mock_client_and_persist_memory() {
+        let (base_url, mock_ai) = start_mock_ai_server(5, "mock service reply").await;
+        let client = ai_client_with_base_url(&base_url);
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let user = test_user();
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        let preferences =
+            OnboardingService::extract_preferences(&client, &user, "I like brief replies")
+                .await
+                .expect("extract preferences");
+        assert_eq!(preferences, "mock service reply");
+
+        let reply = OnboardingService::generate_reply(
+            &client,
+            &user,
+            "Where do I forward mail?",
+            "Memory says user likes receipts",
+            "assistant@example.com",
+            Some("PDF says paid".to_string()),
+            Some("Docs context".to_string()),
+        )
+        .await
+        .expect("generate reply");
+        assert_eq!(reply.content, "mock service reply");
+        assert_eq!(reply.total_tokens, 9);
+
+        let anonymous = OnboardingService::generate_anonymous_reply(
+            &client,
+            "What can you do?",
+            Some("Visitor".to_string()),
+            "assistant@example.com",
+            Some("Docs".to_string()),
+        )
+        .await
+        .expect("anonymous reply");
+        assert_eq!(anonymous.content, "mock service reply");
+
+        assert_eq!(
+            OnboardingService::get_memory(&pool, &user.id).await,
+            "No previous memories of this user."
+        );
+        OnboardingService::update_memory(&client, &pool, &user.id, "hello", "reply")
+            .await
+            .expect("update memory");
+        assert_eq!(
+            OnboardingService::get_memory(&pool, &user.id).await,
+            "mock service reply"
+        );
+
+        let auto = EmailReplyService::generate_auto_reply(
+            &client,
+            &user,
+            "reply politely",
+            "sender@example.com",
+            "Question",
+            "Please answer",
+        )
+        .await
+        .expect("auto reply");
+        assert_eq!(auto, "mock service reply");
+
+        mock_ai.await.expect("mock ai done");
+    }
+
+    #[tokio::test]
+    async fn rule_matching_activity_and_draft_storage_round_trip() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let user = test_user();
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO email_rules (id, user_id, rule_text, rule_label, is_enabled) VALUES (1, ?, 'invoice, receipt', 'RULE-INVOICE', 1)")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .expect("insert rule");
+
+        let matched = EmailReplyService::find_matching_rule(
+            &pool,
+            &user.id,
+            "Monthly invoice",
+            "Please see attached",
+            "sender@example.com",
+        )
+        .await
+        .expect("find rule")
+        .expect("matched rule");
+        assert_eq!(matched.0, 1);
+        assert_eq!(matched.2, "RULE-INVOICE");
+
+        let no_match = EmailReplyService::find_matching_rule(
+            &pool,
+            &user.id,
+            "Greetings",
+            "No keywords",
+            "sender@example.com",
+        )
+        .await
+        .expect("find none");
+        assert!(no_match.is_none());
+
+        OnboardingService::log_activity(&pool, &user.id, "ask_forwarding_info")
+            .await
+            .expect("log once");
+        OnboardingService::log_activity(&pool, &user.id, "ask_forwarding_info")
+            .await
+            .expect("log twice");
+        let activity_count: i64 = sqlx::query_scalar(
+            "SELECT count FROM user_activity_stats WHERE user_id = ? AND activity_key = 'ask_forwarding_info'",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .expect("activity count");
+        assert_eq!(activity_count, 2);
+
+        let draft_id = EmailReplyService::store_auto_reply(
+            &pool,
+            &user.id,
+            Some("mail-1"),
+            1,
+            "sender@example.com",
+            "Monthly invoice",
+            "Draft body",
+            "draft",
+        )
+        .await
+        .expect("store draft");
+        let drafts = EmailReplyService::get_draft_replies(&pool, &user.id)
+            .await
+            .expect("drafts");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].0, draft_id);
+        assert_eq!(drafts[0].1.as_deref(), Some("mail-1"));
+        assert_eq!(drafts[0].4, "Draft body");
     }
 }
