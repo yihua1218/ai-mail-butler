@@ -3,13 +3,61 @@ use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct AiClient {
     client: Client,
     base_url: String,
     api_key: String,
-    model_name: String,
+    model_name: Arc<RwLock<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AiModelInfo {
+    pub id: String,
+    pub state: String,
+    pub model_type: Option<String>,
+    pub publisher: Option<String>,
+    pub arch: Option<String>,
+    pub compatibility_type: Option<String>,
+    pub quantization: Option<String>,
+    pub max_context_length: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct LmStudioModelsResponse {
+    data: Vec<LmStudioModelInfo>,
+}
+
+#[derive(Deserialize)]
+struct LmStudioModelInfo {
+    id: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, rename = "type")]
+    model_type: Option<String>,
+    #[serde(default)]
+    publisher: Option<String>,
+    #[serde(default)]
+    arch: Option<String>,
+    #[serde(default)]
+    compatibility_type: Option<String>,
+    #[serde(default)]
+    quantization: Option<String>,
+    #[serde(default)]
+    max_context_length: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModelInfo>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelInfo {
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -64,14 +112,114 @@ impl AiClient {
             base_url: std::env::var("AI_API_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:1234/v1".to_string()),
             api_key: config.ai_api_key.clone(),
-            model_name: std::env::var("AI_MODEL_NAME")
-                .unwrap_or_else(|_| "local-model".to_string()),
+            model_name: Arc::new(RwLock::new(
+                std::env::var("AI_MODEL_NAME").unwrap_or_else(|_| "local-model".to_string()),
+            )),
         }
+    }
+
+    pub async fn model_name(&self) -> String {
+        self.model_name.read().await.clone()
+    }
+
+    pub async fn set_model_name(&self, model_name: String) {
+        *self.model_name.write().await = model_name;
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<AiModelInfo>> {
+        match self.list_lm_studio_models().await {
+            Ok(models) => Ok(sort_models(models)),
+            Err(primary_err) => match self.list_openai_compatible_models().await {
+                Ok(models) => Ok(sort_models(models)),
+                Err(fallback_err) => Err(anyhow::anyhow!(
+                    "failed to query LM Studio models: {}; fallback /models failed: {}",
+                    primary_err,
+                    fallback_err
+                )),
+            },
+        }
+    }
+
+    async fn list_lm_studio_models(&self) -> Result<Vec<AiModelInfo>> {
+        let url = format!("{}/api/v0/models", self.server_root_url());
+        let mut req = self.client.get(&url);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let response = req.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "HTTP {} from /api/v0/models: {}",
+                status,
+                summarize_body(&body)
+            ));
+        }
+
+        let res: LmStudioModelsResponse = serde_json::from_str(&body)?;
+        Ok(res
+            .data
+            .into_iter()
+            .map(|model| AiModelInfo {
+                id: model.id,
+                state: model.state.unwrap_or_else(|| "unknown".to_string()),
+                model_type: model.model_type,
+                publisher: model.publisher,
+                arch: model.arch,
+                compatibility_type: model.compatibility_type,
+                quantization: model.quantization,
+                max_context_length: model.max_context_length,
+            })
+            .collect())
+    }
+
+    async fn list_openai_compatible_models(&self) -> Result<Vec<AiModelInfo>> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let mut req = self.client.get(&url);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let response = req.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "HTTP {} from /models: {}",
+                status,
+                summarize_body(&body)
+            ));
+        }
+
+        let res: OpenAiModelsResponse = serde_json::from_str(&body)?;
+        Ok(res
+            .data
+            .into_iter()
+            .map(|model| AiModelInfo {
+                id: model.id,
+                state: "loaded".to_string(),
+                model_type: None,
+                publisher: None,
+                arch: None,
+                compatibility_type: None,
+                quantization: None,
+                max_context_length: None,
+            })
+            .collect())
+    }
+
+    fn server_root_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        base.strip_suffix("/v1")
+            .or_else(|| base.strip_suffix("/api/v0"))
+            .or_else(|| base.strip_suffix("/api/v1"))
+            .unwrap_or(base)
+            .to_string()
     }
 
     pub async fn chat(&self, system_prompt: &str, user_message: &str) -> Result<ChatResult> {
         let req_body = ChatRequest {
-            model: self.model_name.clone(),
+            model: self.model_name().await,
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
@@ -124,6 +272,15 @@ impl AiClient {
             Err(anyhow::anyhow!("No choices returned from AI API"))
         }
     }
+}
+
+fn sort_models(mut models: Vec<AiModelInfo>) -> Vec<AiModelInfo> {
+    models.sort_by(|a, b| {
+        let a_loaded = a.state.eq_ignore_ascii_case("loaded");
+        let b_loaded = b.state.eq_ignore_ascii_case("loaded");
+        b_loaded.cmp(&a_loaded).then_with(|| a.id.cmp(&b.id))
+    });
+    models
 }
 
 fn summarize_body(body: &str) -> String {

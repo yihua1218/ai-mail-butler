@@ -540,6 +540,15 @@ async fn main() -> Result<()> {
 
     // 2. Initialize AI Client
     let ai_client = ai::AiClient::new(&config);
+    if let Some(saved_model) = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM app_settings WHERE key = 'ai_model_name'",
+    )
+    .fetch_optional(&pool)
+    .await?
+    .filter(|value| !value.trim().is_empty())
+    {
+        ai_client.set_model_name(saved_model).await;
+    }
 
     let config_arc = Arc::new(config);
 

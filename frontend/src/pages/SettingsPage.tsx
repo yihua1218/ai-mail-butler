@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -11,10 +11,11 @@ import {
   Select,
   Space,
   Switch,
+  Tag,
   Typography,
   message,
 } from 'antd';
-import { PlusOutlined, SettingOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../AuthContext';
@@ -22,12 +23,27 @@ import { GUEST_NAME_KEY } from '../Chat';
 
 const { Title } = Typography;
 
+interface AiModelInfo {
+  id: string;
+  state: string;
+  model_type?: string | null;
+  publisher?: string | null;
+  arch?: string | null;
+  compatibility_type?: string | null;
+  quantization?: string | null;
+  max_context_length?: number | null;
+}
+
 const SettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const { user, refreshUser } = useAuth();
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [aiModels, setAiModels] = useState<AiModelInfo[]>([]);
+  const [selectedAiModel, setSelectedAiModel] = useState<string>();
   const [form] = Form.useForm();
+  const isAdmin = user?.role === 'admin';
 
   useEffect(() => {
     if (user) {
@@ -68,6 +84,24 @@ const SettingsPage: React.FC = () => {
     }
   }, [user, form]);
 
+  const loadAiModels = useCallback(async () => {
+    if (!user || user.role !== 'admin') return;
+    setModelsLoading(true);
+    try {
+      const res = await axios.get(`/api/admin/ai/models?email=${encodeURIComponent(user.email)}`);
+      setAiModels(res.data?.models || []);
+      setSelectedAiModel(res.data?.selected_model);
+    } catch {
+      message.error(t('ai_models_load_failed'));
+    } finally {
+      setModelsLoading(false);
+    }
+  }, [t, user]);
+
+  useEffect(() => {
+    loadAiModels();
+  }, [loadAiModels]);
+
   const onFinish = async (values: any) => {
     if (!user) {
       localStorage.setItem(GUEST_NAME_KEY, values.display_name || '');
@@ -78,6 +112,12 @@ const SettingsPage: React.FC = () => {
     setLoading(true);
     try {
       await axios.post('/api/settings', { email: user.email, ...values });
+      if (isAdmin && selectedAiModel) {
+        await axios.post('/api/admin/ai/settings', {
+          email: user.email,
+          model_name: selectedAiModel,
+        });
+      }
       message.success(t('settings_saved'));
       refreshUser();
     } catch {
@@ -263,6 +303,49 @@ const SettingsPage: React.FC = () => {
                 ]}
               />
             </Form.Item>
+
+            {isAdmin && (
+              <>
+                <Title level={5} style={{ margin: '24px 0 16px' }}>{t('ai_model_settings')}</Title>
+                <Typography.Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 16 }}>
+                  {t('ai_model_settings_desc')}
+                </Typography.Paragraph>
+                <Form.Item label={t('ai_model_select_label')} tooltip={t('ai_model_select_tooltip')}>
+                  <Space.Compact style={{ width: '100%' }}>
+                    <Select
+                      showSearch
+                      loading={modelsLoading}
+                      value={selectedAiModel}
+                      onChange={setSelectedAiModel}
+                      placeholder={t('ai_model_select_placeholder')}
+                      optionLabelProp="label"
+                      options={aiModels.map((model) => {
+                        const meta = [
+                          model.model_type,
+                          model.quantization,
+                          model.max_context_length ? `${model.max_context_length} ctx` : null,
+                        ].filter(Boolean).join(' · ');
+                        return {
+                          value: model.id,
+                          label: (
+                            <Space direction="vertical" size={0}>
+                              <Space wrap>
+                                <Typography.Text>{model.id}</Typography.Text>
+                                <Tag color={model.state === 'loaded' ? 'green' : 'default'}>{model.state}</Tag>
+                              </Space>
+                              {meta && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{meta}</Typography.Text>}
+                            </Space>
+                          ),
+                        };
+                      })}
+                    />
+                    <Button icon={<ReloadOutlined />} loading={modelsLoading} onClick={loadAiModels}>
+                      {t('refresh')}
+                    </Button>
+                  </Space.Compact>
+                </Form.Item>
+              </>
+            )}
 
             <Title level={5} style={{ margin: '24px 0 16px' }}>{t('pdf_passwords_title')}</Title>
             <Typography.Paragraph style={{ color: '#86868b', fontSize: '12px', marginBottom: 16 }}>

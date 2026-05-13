@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::ai::AiClient;
+use crate::ai::{AiClient, AiModelInfo};
 use crate::models::{
     ConsentAuditTrail, DataRetentionPolicy, DsarRequest, EmailRecord, User, UserAgeVerification,
     UserPrivacySettings,
@@ -2745,6 +2745,35 @@ struct RemoteDebugSyncRequest {
     email: String,
 }
 
+#[derive(Deserialize)]
+struct AdminAiSettingsRequest {
+    email: String,
+    model_name: String,
+}
+
+#[derive(Serialize)]
+struct AdminAiModelsResponse {
+    status: String,
+    selected_model: String,
+    models: Vec<AiModelInfo>,
+}
+
+async fn load_selected_ai_model_name(state: &AppState) -> String {
+    if let Some(value) = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM app_settings WHERE key = 'ai_model_name'",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+    {
+        value
+    } else {
+        state.ai_client.model_name().await
+    }
+}
+
 async fn load_remote_debug_access_mode(state: &AppState) -> String {
     let configured = normalize_remote_debug_access_mode(&state.config.remote_debug_access_mode);
     sqlx::query_scalar::<_, String>(
@@ -2822,6 +2851,42 @@ async fn get_admin_runtime_info(
         remote_debug_overlay_dir: state.config.remote_debug_overlay_dir.clone(),
     })
     .into_response()
+}
+
+async fn get_admin_ai_models(
+    State(state): State<AppState>,
+    Query(query): Query<AdminRuntimeQuery>,
+) -> impl IntoResponse {
+    if !is_admin(&state, &query.email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "status": "error", "message": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    let selected_model = load_selected_ai_model_name(&state).await;
+    match state.ai_client.list_models().await {
+        Ok(models) => Json(AdminAiModelsResponse {
+            status: "success".to_string(),
+            selected_model,
+            models,
+        })
+        .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list AI models: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": format!("Failed to query AI server models: {}", e),
+                    "selected_model": selected_model,
+                    "models": [],
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 fn sqlite_url_to_path(database_url: &str) -> PathBuf {
@@ -3122,6 +3187,55 @@ async fn post_admin_remote_debug_access_mode(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "status": "error", "message": "Failed to update remote debug access mode" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn post_admin_ai_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<AdminAiSettingsRequest>,
+) -> impl IntoResponse {
+    if !is_admin(&state, &payload.email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "status": "error", "message": "Unauthorized" })),
+        )
+            .into_response();
+    }
+
+    let model_name = payload.model_name.trim();
+    if model_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "status": "error", "message": "Model name is required" })),
+        )
+            .into_response();
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ('ai_model_name', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(model_name)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            state.ai_client.set_model_name(model_name.to_string()).await;
+            Json(serde_json::json!({
+                "status": "success",
+                "selected_model": model_name,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to save AI model setting: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": "Failed to save AI model setting" })),
             )
                 .into_response()
         }
@@ -8841,6 +8955,8 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/errors", get(get_user_errors))
         .route("/admin/errors", get(get_admin_errors))
         .route("/admin/runtime", get(get_admin_runtime_info))
+        .route("/admin/ai/models", get(get_admin_ai_models))
+        .route("/admin/ai/settings", post(post_admin_ai_settings))
         .route(
             "/admin/remote-debug/access-mode",
             post(post_admin_remote_debug_access_mode),
