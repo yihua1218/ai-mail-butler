@@ -284,11 +284,67 @@ cargo llvm-cov --summary-only
 
 Frontend：
 
+從 `frontend/` 目錄安裝測試工具：
+
 ```bash
-npm run test -- --coverage
+cd frontend
+npm install --save-dev vitest jsdom @vitest/coverage-v8 @testing-library/react @testing-library/jest-dom @testing-library/user-event
 ```
 
-若前端測試工具尚未設定，先加入 Vitest 與 React Testing Library，再開始計算 frontend coverage。
+在 `frontend/package.json` 加入 test scripts：
+
+```json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  }
+}
+```
+
+在 `frontend/vite.config.ts` 設定 Vitest：
+
+```ts
+/// <reference types="vitest" />
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    globals: true,
+    passWithNoTests: true,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.d.ts',
+        'src/test/**',
+        'src/main.tsx'
+      ],
+    },
+  },
+});
+```
+
+建立 `frontend/src/test/setup.ts`：
+
+```ts
+import '@testing-library/jest-dom/vitest';
+```
+
+執行 coverage：
+
+```bash
+npm run test:coverage
+```
+
+設定完成後，優先補 settings consent controls、Dashboard reprocess timelines、自動回覆草稿查看/編輯，以及 finance analysis filters 的 focused tests。
 
 ## 備註
 

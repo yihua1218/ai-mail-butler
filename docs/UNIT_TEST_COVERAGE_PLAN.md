@@ -284,11 +284,67 @@ cargo llvm-cov --summary-only
 
 Frontend:
 
+Install test tooling from the `frontend/` directory:
+
 ```bash
-npm run test -- --coverage
+cd frontend
+npm install --save-dev vitest jsdom @vitest/coverage-v8 @testing-library/react @testing-library/jest-dom @testing-library/user-event
 ```
 
-If frontend test tooling is not configured yet, add Vitest plus React Testing Library before counting frontend coverage.
+Add test scripts to `frontend/package.json`:
+
+```json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  }
+}
+```
+
+Configure Vitest in `frontend/vite.config.ts`:
+
+```ts
+/// <reference types="vitest" />
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    globals: true,
+    passWithNoTests: true,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.d.ts',
+        'src/test/**',
+        'src/main.tsx'
+      ],
+    },
+  },
+});
+```
+
+Create `frontend/src/test/setup.ts`:
+
+```ts
+import '@testing-library/jest-dom/vitest';
+```
+
+Run coverage:
+
+```bash
+npm run test:coverage
+```
+
+After this is in place, add focused tests for settings consent controls, dashboard reprocess timelines, auto-reply draft viewing/editing, and finance analysis filters.
 
 ## Notes
 
