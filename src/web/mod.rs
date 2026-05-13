@@ -1759,6 +1759,171 @@ fn render_mail_content(parsed: &mailparse::ParsedMail<'_>) -> RenderedMailConten
     }
 }
 
+fn record_has_display_content(record: &EmailRecord) -> bool {
+    [
+        &record.stored_content,
+        &record.plain_content,
+        &record.html_content,
+        &record.preview,
+    ]
+    .iter()
+    .any(|value| {
+        value
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn parse_mail_meta_field(meta: &str, field: &str) -> Option<String> {
+    let prefix = format!("{}:", field);
+    meta.lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(|v| v.trim().to_string()))
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_mail_timestamp(value: &str) -> Option<i64> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(dt.timestamp());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Some(dt.and_utc().timestamp());
+    }
+    None
+}
+
+async fn render_archived_mail_dir(dir: &std::path::Path) -> Option<RenderedMailContent> {
+    let raw_path = dir.join("raw.eml");
+    if let Ok(raw) = fs::read(&raw_path).await {
+        if let Ok(parsed) = mailparse::parse_mail(&raw) {
+            let rendered = render_mail_content(&parsed);
+            if !rendered.content.trim().is_empty()
+                || rendered
+                    .plain_content
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                || rendered
+                    .html_content
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            {
+                return Some(rendered);
+            }
+        }
+    }
+
+    let body_path = dir.join("body.txt");
+    let body = fs::read_to_string(&body_path).await.ok()?;
+    if body.trim().is_empty() {
+        return None;
+    }
+
+    let looks_html = body.contains("<html")
+        || body.contains("<body")
+        || body.contains("</table>")
+        || body.contains("</div>");
+    Some(RenderedMailContent {
+        content_format: if looks_html { "html" } else { "plain" }.to_string(),
+        content: body.clone(),
+        plain_content: (!looks_html).then(|| body.clone()),
+        html_content: looks_html.then_some(body),
+    })
+}
+
+async fn find_archived_mail_content_for_record(
+    state: &AppState,
+    user_email: &str,
+    record: &EmailRecord,
+) -> Option<RenderedMailContent> {
+    let subject = record.subject.as_deref()?.trim();
+    if subject.is_empty() {
+        return None;
+    }
+
+    let runtime_user_dir = resolve_runtime_mail_path(
+        state,
+        &format!("data/mail_spool/{}", sanitize_path_component(user_email)),
+    );
+    let db_sibling_user_dir = sqlite_url_to_path(&state.config.database_url)
+        .parent()
+        .map(|p| {
+            p.join("mail_spool")
+                .join(sanitize_path_component(user_email))
+        });
+    let mut user_dirs = vec![runtime_user_dir];
+    if let Some(path) = db_sibling_user_dir {
+        if !user_dirs.iter().any(|existing| existing == &path) {
+            user_dirs.push(path);
+        }
+    }
+
+    let target_ts = record.received_at.as_deref().and_then(parse_mail_timestamp);
+    let mut best: Option<(i64, PathBuf)> = None;
+
+    for user_dir in user_dirs {
+        let Ok(mut entries) = fs::read_dir(&user_dir).await else {
+            continue;
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let meta = fs::read_to_string(path.join("meta.txt"))
+                .await
+                .unwrap_or_default();
+            let meta_subject = parse_mail_meta_field(&meta, "subject");
+            if meta_subject.as_deref() != Some(subject) {
+                continue;
+            }
+
+            let distance = match (
+                target_ts,
+                parse_mail_meta_field(&meta, "received_at").and_then(|v| parse_mail_timestamp(&v)),
+            ) {
+                (Some(target), Some(candidate)) => (target - candidate).abs(),
+                _ => 0,
+            };
+
+            if best
+                .as_ref()
+                .map(|(best_distance, _)| distance < *best_distance)
+                .unwrap_or(true)
+            {
+                best = Some((distance, path));
+            }
+        }
+    }
+
+    let (_, path) = best?;
+    render_archived_mail_dir(&path).await
+}
+
+async fn hydrate_missing_email_content(
+    state: &AppState,
+    user_email: &str,
+    records: &mut [EmailRecord],
+) {
+    for record in records.iter_mut() {
+        if record_has_display_content(record) {
+            continue;
+        }
+
+        if let Some(rendered) =
+            find_archived_mail_content_for_record(state, user_email, record).await
+        {
+            record.stored_content = Some(rendered.content.clone());
+            record.plain_content = rendered.plain_content;
+            record.html_content = rendered.html_content;
+            record.preview = Some(rendered.content.chars().take(100).collect());
+        }
+    }
+}
+
 async fn get_me(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
@@ -1837,9 +2002,10 @@ async fn get_dashboard(
                 .unwrap_or(None);
 
             if let Some((uid,)) = user_id {
-                let personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let mut personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
+                hydrate_missing_email_content(&state, &email, &mut personal_emails).await;
 
                 let p_received: i64 =
                     sqlx::query_scalar("SELECT COUNT(*) FROM emails WHERE user_id = ?")
@@ -4263,8 +4429,8 @@ async fn post_manual_process_emails(
     let mut results = Vec::new();
 
     for email_id in payload.email_ids {
-        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String)>(
-            "SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status FROM emails WHERE id = ? AND user_id = ?"
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<String>)>(
+            "SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, CAST(received_at AS TEXT) FROM emails WHERE id = ? AND user_id = ?"
         )
         .bind(&email_id)
         .bind(&user.id)
@@ -4272,7 +4438,17 @@ async fn post_manual_process_emails(
         .await
         .unwrap_or(None);
 
-        let Some((id, subject, preview, stored_content, plain_content, html_content, original_from, status)) = row
+        let Some((
+            id,
+            subject,
+            preview,
+            stored_content,
+            plain_content,
+            html_content,
+            original_from,
+            status,
+            received_at,
+        )) = row
         else {
             failed += 1;
             results.push(serde_json::json!({
@@ -4338,11 +4514,13 @@ async fn post_manual_process_emails(
                 .bind(&id)
                 .execute(&state.pool)
                 .await;
-            let _ = sqlx::query("UPDATE emails SET matched_rule_label = NULL WHERE id = ? AND user_id = ?")
-                .bind(&id)
-                .bind(&user.id)
-                .execute(&state.pool)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE emails SET matched_rule_label = NULL WHERE id = ? AND user_id = ?",
+            )
+            .bind(&id)
+            .bind(&user.id)
+            .execute(&state.pool)
+            .await;
             processing_steps.push(serde_json::json!({
                 "key": "reset_previous",
                 "label": "Reset previous derived results",
@@ -4351,7 +4529,7 @@ async fn post_manual_process_emails(
             }));
         }
 
-        let source_name = if plain_content
+        let mut source_name = if plain_content
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
@@ -4371,14 +4549,35 @@ async fn post_manual_process_emails(
             "html_content"
         } else {
             "preview"
-        };
-        let source_text = plain_content
+        }
+        .to_string();
+        let mut source_text = plain_content
             .filter(|s| !s.trim().is_empty())
             .or_else(|| stored_content.filter(|s| !s.trim().is_empty()))
             .or_else(|| html_content.filter(|s| !s.trim().is_empty()))
             .filter(|s| !s.trim().is_empty())
             .or(preview)
             .unwrap_or_default();
+        if source_text.trim().is_empty() {
+            let lookup_record = EmailRecord {
+                id: id.clone(),
+                subject: subject.clone(),
+                preview: None,
+                stored_content: None,
+                plain_content: None,
+                html_content: None,
+                original_from: original_from.clone(),
+                status: status.clone(),
+                matched_rule_label: None,
+                received_at: received_at.clone(),
+            };
+            if let Some(rendered) =
+                find_archived_mail_content_for_record(&state, &user.email, &lookup_record).await
+            {
+                source_text = rendered.content;
+                source_name = "archived_raw".to_string();
+            }
+        }
         let extracted_finance_records = crate::mail::analyze_and_store_financial_records(
             &state.pool,
             &state.ai_client,
@@ -4422,12 +4621,14 @@ async fn post_manual_process_emails(
         {
             Ok(Some((rule_id, rule_text, rule_label))) => {
                 matched_rule_label = Some(rule_label.clone());
-                let _ = sqlx::query("UPDATE emails SET matched_rule_label = ? WHERE id = ? AND user_id = ?")
-                    .bind(&rule_label)
-                    .bind(&id)
-                    .bind(&user.id)
-                    .execute(&state.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE emails SET matched_rule_label = ? WHERE id = ? AND user_id = ?",
+                )
+                .bind(&rule_label)
+                .bind(&id)
+                .bind(&user.id)
+                .execute(&state.pool)
+                .await;
 
                 processing_steps.push(serde_json::json!({
                     "key": "match_rules",
