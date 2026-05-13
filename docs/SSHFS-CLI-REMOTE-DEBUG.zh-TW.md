@@ -2,6 +2,14 @@
 
 本文件說明如何透過 SSHFS 掛載遠端 AI Mail Butler 伺服器的 spool 目錄，並使用你本地開發中的 CLI 工具，針對卡住或失敗的 `.eml` 郵件做除錯。
 
+相關文件：
+
+- [EC2 Production Checklist](EC2-PRODUCTION-CHECKLIST.zh-TW.md)
+- [環境變數範本](ENV-EXAMPLES.zh-TW.md)
+- [使用 nerdctl 或 Docker Compose 執行](NERDCTL_COMPOSE_GUIDE.zh-TW.md)
+- [EC2 Host Firewall Agent](EC2-HOST-FIREWALL-AGENT.md)
+- [Cloudflare Cache Purge Token 與操作](CLOUDFLARE-CACHE-PURGE.zh-TW.md)
+
 ## 適用情境
 
 適合以下情況：
@@ -57,9 +65,11 @@ REMOTE_DEBUG_MODE=overlay
 REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data
 REMOTE_DEBUG_MOUNT_POINT=/mnt/ai-mail-butler-data
 REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
+OVERLAY_DIR=/tmp/ai-mail-butler-overlay
 ```
 
 `REMOTE_DEBUG_MODE=overlay` 會由 entrypoint 強制啟用 `READONLY_MODE=true`，並在 `READONLY_BASE` 未設定時自動指向 SSHFS 掛載點。程式會先把遠端 `data.sqlite` 複製到本地 overlay DB，後續寫入留在本地 overlay，檔案讀取則可 fallback 到遠端 data root。
+透過目前的 Compose 檔啟動時，如果希望 overlay 寫到 `REMOTE_DEBUG_OVERLAY_DIR`，請明確設定 `OVERLAY_DIR`；否則 Compose 會帶入預設 `data/overlay`。
 
 目前實作還有一個 Dashboard 顯示 fallback：如果 `emails` 表某筆信件的 `preview`、`stored_content`、`plain_content`、`html_content` 全部為空，Dashboard API 會用使用者信箱、主旨與接收時間，到 `data/mail_spool/<user>/<message>/meta.txt` 找最接近的 archived mail，並解析 `raw.eml` 或 `body.txt` 回傳給前端顯示。這是為了處理遠端同步資料中「DB 有信件列，但內容欄位空；mail_spool 仍有原始信」的情況。
 

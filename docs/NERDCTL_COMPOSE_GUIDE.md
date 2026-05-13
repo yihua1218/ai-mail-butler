@@ -1,125 +1,157 @@
-# Running the Application with nerdctl and Compose
+# Running with nerdctl or Docker Compose
 
-This guide explains how to run the AI Mail Butler application using a pre-built Docker image from GitHub Container Registry (ghcr.io) with `nerdctl compose` or `docker compose`.
+This guide explains how to run AI Mail Butler with the repository's current `docker-compose.yml` using either `nerdctl compose` or `docker compose`.
 
-This approach is ideal for production or staging environments where you want to deploy a specific version of the application without building it from the source code on the host machine.
+The compose file already supports both source builds and GHCR images:
+
+```yaml
+image: ${IMAGE_NAME:-ghcr.io/yihua/ai-mail-butler}:${IMAGE_TAG:-latest}
+build: .
+```
+
+If the image is available locally or remotely, Compose can use it. If you are developing from source, Compose can also build from the local `Dockerfile`.
 
 ## Prerequisites
 
-- **`nerdctl`**: Ensure you have `nerdctl` and `nerdctl-compose` installed. Installation instructions can be found on the [containerd website](https://containerd.io/).
-- **Docker (Alternative)**: If you prefer to use Docker, the same commands apply. Just replace `nerdctl` with `docker`.
-- **GitHub Repository**: The image will be pulled from `ghcr.io/yihua1218/ai-mail-butler:latest`.
+- `nerdctl` plus `nerdctl-compose`, or Docker with the Compose plugin.
+- A `.env` file based on `.env.example`.
+- A host directory for persistent data. The default compose file mounts `./ai-mail-butler-data` to `/app/data`.
 
-## Step 1: Create Configuration File
+Related production docs:
 
-The application requires environment variables for its configuration. These are managed in a `.env` file.
+- [EC2 Production Checklist](EC2-PRODUCTION-CHECKLIST.md)
+- [Environment Examples](ENV-EXAMPLES.md)
+- [EC2 Host Firewall Agent](EC2-HOST-FIREWALL-AGENT.md)
+- [Cloudflare Cache Purge Token and Operations](CLOUDFLARE-CACHE-PURGE.md)
+- [SSHFS Remote Debug Workflow](SSHFS-CLI-REMOTE-DEBUG.md)
 
-1.  Copy the example configuration file to a new `.env` file:
-    ```bash
-    cp .env.example .env
-    ```
+## Configure `.env`
 
-2.  **Edit the `.env` file** with your specific settings. You must at least configure your SMTP relay, AI provider details, and administrator email.
-    ```ini
-    # Server Configuration
-    PORT=3000
-    HOST=0.0.0.0 # Use 0.0.0.0 to be accessible from outside the container
-    PUBLIC_URL=https://your-domain.com # Public base URL used in magic login links sent by email
-    RUST_LOG=info,ai_mail_butler=debug
-    ADMIN_EMAIL=your-admin-email@example.com
+Start from the example:
 
-    # Database Configuration
-    DATABASE_URL=sqlite:/app/data/data.sqlite # Path inside the container
+```bash
+cp .env.example .env
+```
 
-    # Mail Configuration
-    SMTP_RELAY_HOST=smtp.your-provider.com
-    SMTP_RELAY_PORT=587
-    SMTP_RELAY_USER=your-smtp-username
-    SMTP_RELAY_PASS=your-smtp-password
-    ASSISTANT_EMAIL=assistant@your-domain.com
+Minimum production-oriented values:
 
-    # AI Configuration (e.g., OpenAI, LM Studio)
-    AI_API_BASE_URL=http://your-ai-provider-host:1234/v1
-    AI_API_KEY=your-api-key
-    AI_MODEL_NAME=your-model-name
+```env
+PORT=3000
+HOST=0.0.0.0
+SMTP_HOST_PORT=25
+PUBLIC_URL=https://butler.example.com
+ADMIN_EMAIL=admin@example.com
 
-    # ... other settings ...
-    ```
-    **Important**:
-    - Set `HOST` to `0.0.0.0` to allow the server to accept connections from outside the container.
-    - Set `PUBLIC_URL` to your public domain (e.g. `https://your-domain.com`) so magic login links in emails point to the correct address instead of `localhost`.
-    - The `DATABASE_URL` should point to the path inside the container, which is `/app/data/data.sqlite` as defined by the volume mount.
+DATABASE_URL=sqlite:/app/data/data.sqlite
 
-## Step 2: Modify the Compose File
+SMTP_RELAY_HOST=smtp.example.com
+SMTP_RELAY_PORT=587
+SMTP_RELAY_USER=assistant@example.com
+SMTP_RELAY_PASS=your-smtp-secret
+ASSISTANT_EMAIL=assistant@mail.example.com
 
-The default `docker-compose.yml` is configured to build the image from the source. You need to modify it to pull the pre-built image from `ghcr.io`.
+AI_API_BASE_URL=https://api.openai.com/v1
+AI_API_KEY=your-ai-api-key
+AI_MODEL_NAME=your-model-name
+```
 
-1.  Open `docker-compose.yml`.
-2.  Find the `ai-mail-butler` service definition.
-3.  **Replace `build: .` with `image: ghcr.io/yihua1218/ai-mail-butler:latest`**.
+Important path rule:
 
-The updated service should look like this:
+- In Docker/nerdctl Compose, `DATABASE_URL` should normally be `sqlite:/app/data/data.sqlite`.
+- On the host, the same DB file lives under `./ai-mail-butler-data/data.sqlite`.
+
+## Image Name and Tag
+
+The current default image is:
+
+```env
+IMAGE_NAME=ghcr.io/yihua/ai-mail-butler
+IMAGE_TAG=latest
+```
+
+For staging or production, prefer immutable tags when your CI publishes them:
+
+```env
+IMAGE_NAME=ghcr.io/yihua/ai-mail-butler
+IMAGE_TAG=sha-<git-sha>
+```
+
+Pull explicitly when you want to verify image access before starting:
+
+```bash
+nerdctl pull ghcr.io/yihua/ai-mail-butler:latest
+docker pull ghcr.io/yihua/ai-mail-butler:latest
+```
+
+## Port Guidance
+
+The compose file maps:
 
 ```yaml
-version: '3.8'
-
-services:
-  ai-mail-butler:
-    # build: .  <-- Comment out or remove this line
-    image: ghcr.io/yihua1218/ai-mail-butler:latest # <-- Add this line
-    container_name: ai-mail-butler
-    ports:
-      - "3000:3000" # Web UI
-      - "2525:25"   # SMTP Server (using 2525 on host to avoid requiring root)
-    env_file:
-      - .env
-    volumes:
-      # Mounts a local directory for persistent data (database, mail spool, etc.)
-      - ./ai-mail-butler-data:/app/data
-    restart: unless-stopped
+- "${PORT:-3000}:${PORT:-3000}"
+- "${SMTP_HOST_PORT:-25}:25"
 ```
-**Note on Port 25**: We map host port `2525` to container port `25`. This is because binding to ports below 1024 on the host typically requires root privileges. You can change `2525` to `25` if you are running `nerdctl` or `docker` as root.
 
-## Step 3: Run the Application
+Use these common settings:
 
-Now you can start the application using `nerdctl compose`.
+| Scenario | `PORT` | `SMTP_HOST_PORT` | Notes |
+|---|---:|---:|---|
+| Production MX target | `3000` | `25` | Needed for direct inbound SMTP from the internet. |
+| Local or staging without public SMTP | `3000` | `2525` | Avoids host port 25 conflicts and privileged bind issues. |
+| Behind reverse proxy | `3000` | `25` or `2525` | Proxy handles HTTP/TLS; SMTP still needs direct TCP routing. |
 
-1.  **Pull the latest image**:
-    ```bash
-    nerdctl pull ghcr.io/yihua1218/ai-mail-butler:latest:latest
-    ```
-    *(For Docker users: `docker pull ghcr.io/yihua1218/ai-mail-butler:latest`)*
+Cloudflare proxy does not proxy SMTP. DNS records for SMTP must be DNS-only.
 
-2.  **Start the service in detached mode**:
-    ```bash
-    nerdctl compose up -d
-    ```
-    *(For Docker users: `docker compose up -d`)*
+## Start
 
-## Step 4: Verify the Application
+With nerdctl:
 
-1.  **Check if the container is running**:
-    ```bash
-    nerdctl compose ps
-    ```
-    You should see the `ai-mail-butler` container in the `running` state.
+```bash
+nerdctl compose up -d
+```
 
-2.  **Check the logs** to ensure everything started correctly:
-    ```bash
-    nerdctl compose logs -f
-    ```
-    *(For Docker users: `docker compose logs -f`)*
+With Docker:
 
-    You should see log output from the Rust application, indicating that the server is listening on port 3000.
+```bash
+docker compose up -d
+```
 
-3.  **Access the Web UI**: Open your web browser and navigate to `http://localhost:3000`.
+If you need SSHFS remote debug inside the container, add the SSHFS override:
 
-## Step 5: Stopping the Application
+```bash
+nerdctl compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d
+```
 
-To stop the application and remove the container, run:
+Keep SSHFS disabled for normal production operation.
+
+## Verify
+
+```bash
+nerdctl compose ps
+nerdctl compose logs --tail=100
+```
+
+Docker equivalent:
+
+```bash
+docker compose ps
+docker compose logs --tail=100
+```
+
+Check the data directory:
+
+```bash
+ls -lah ai-mail-butler-data
+```
+
+You should see `data.sqlite` after the app initializes.
+
+## Stop
+
 ```bash
 nerdctl compose down
+docker compose down
 ```
-*(For Docker users: `docker compose down`)*
 
-This command will stop and remove the container, but the data in the `./ai-mail-butler-data` volume will be preserved.
+This removes the container but preserves `./ai-mail-butler-data`.

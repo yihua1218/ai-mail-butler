@@ -2,6 +2,14 @@
 
 This guide explains how to mount a remote AI Mail Butler server spool directory via SSHFS and use your local development CLI to debug failed or stuck `.eml` processing.
 
+Related docs:
+
+- [EC2 Production Checklist](EC2-PRODUCTION-CHECKLIST.md)
+- [Environment Examples](ENV-EXAMPLES.md)
+- [Running with nerdctl or Docker Compose](NERDCTL_COMPOSE_GUIDE.md)
+- [EC2 Host Firewall Agent](EC2-HOST-FIREWALL-AGENT.md)
+- [Cloudflare Cache Purge Token and Operations](CLOUDFLARE-CACHE-PURGE.md)
+
 ## When to Use This
 
 Use this workflow when:
@@ -58,9 +66,11 @@ REMOTE_DEBUG_ACCESS_MODE=readonly
 REMOTE_DEBUG_REMOTE=devuser@your-server:/opt/ai-mail-butler/data
 REMOTE_DEBUG_MOUNT_POINT=/mnt/ai-mail-butler-data
 REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
+OVERLAY_DIR=/tmp/ai-mail-butler-overlay
 ```
 
 Use `REMOTE_DEBUG_MODE=overlay` for full remote-data debugging. The entrypoint sets `READONLY_MODE=true` and defaults `READONLY_BASE` to the SSHFS mount point, so `data.sqlite` is copied into the local overlay before startup and file reads fall back to the mounted remote data root. Use `REMOTE_DEBUG_MODE=readonly` only when you want the mount indicator without enabling the app overlay workflow.
+When running through the provided Compose file, set `OVERLAY_DIR` explicitly if you want the overlay under `REMOTE_DEBUG_OVERLAY_DIR`; otherwise Compose supplies the default `data/overlay`.
 The Admin Dashboard also stores an admin-selected access posture (`readonly` by default, or `readwrite` for controlled retry windows). It reports intent only; the actual SSHFS mount/remount still happens outside the web app.
 
 The current Dashboard API also has a display fallback for empty email rows. If an `emails` row has empty `preview`, `stored_content`, `plain_content`, and `html_content`, the backend looks for the closest archived mail under `data/mail_spool/<user>/<message>/meta.txt` using user email, subject, and received time, then parses `raw.eml` or `body.txt` for display.

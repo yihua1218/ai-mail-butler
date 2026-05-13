@@ -152,8 +152,12 @@ docker-compose up --build -d
 Detailed Deployment Guides (including AWS EC2 implementation):
 - [Docker Deployment Guide (English)](DOCKER_AWS_GUIDE.md)
 - [Docker 部署指南 (繁體中文)](DOCKER_AWS_GUIDE.zh-TW.md)
+- [Running with nerdctl or Docker Compose](docs/NERDCTL_COMPOSE_GUIDE.md)
+- [EC2 Production Checklist](docs/EC2-PRODUCTION-CHECKLIST.md)
+- [Environment Examples](docs/ENV-EXAMPLES.md)
 - [Current Implementation and Execution Plan](docs/IMPLEMENTATION-EXECUTION-PLAN.md)
 - [目前實作狀況與執行計畫](docs/IMPLEMENTATION-EXECUTION-PLAN.zh-TW.md)
+- [EC2 Host Firewall Agent](docs/EC2-HOST-FIREWALL-AGENT.md)
 - [Cloudflare Cache Purge Token and Operations](docs/CLOUDFLARE-CACHE-PURGE.md)
 - [Cloudflare Cache Purge Token 與快取清除操作](docs/CLOUDFLARE-CACHE-PURGE.zh-TW.md)
 

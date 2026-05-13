@@ -87,10 +87,10 @@ This document summarizes the current implementation, the drift from older docume
 
 ### P3: Consolidate Deployment and Security Docs
 
-- [ ] Update `NERDCTL_COMPOSE_GUIDE` image name/tag and port guidance.
-- [ ] Add an EC2 production checklist covering DNS, TLS, SMTP, firewall agent, backup, and restore.
-- [ ] Cross-link Cloudflare purge, host firewall agent, and remote debug docs.
-- [ ] Split `.env` examples for production, staging, and remote-debug overlay.
+- [x] Update `NERDCTL_COMPOSE_GUIDE` image name/tag and port guidance.
+- [x] Add an EC2 production checklist covering DNS, TLS, SMTP, firewall agent, backup, and restore.
+- [x] Cross-link Cloudflare purge, host firewall agent, and remote debug docs.
+- [x] Split `.env` examples for production, staging, and remote-debug overlay.
 
 ### P4: Operations Automation
 

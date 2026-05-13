@@ -1,125 +1,157 @@
-# 使用 nerdctl 與 Compose 執行應用程式
+# 使用 nerdctl 或 Docker Compose 執行
 
-本指南說明如何使用 `nerdctl compose` 或 `docker compose`，從 GitHub Container Registry (ghcr.io) 拉取預先建置的 Docker 映像來執行 AI Mail Butler 應用程式。
+本指南說明如何用目前 repo 內的 `docker-compose.yml`，透過 `nerdctl compose` 或 `docker compose` 啟動 AI Mail Butler。
 
-這種方法非常適合生產或預備環境，因為您可以在不安裝原始碼編譯環境的主機上，直接部署特定版本的應用程式。
-
-## 先決條件
-
-- **`nerdctl`**: 請確保您已安裝 `nerdctl` 和 `nerdctl-compose`。安裝說明可以在 [containerd 網站](https://containerd.io/) 找到。
-- **Docker (替代方案)**: 如果您偏好使用 Docker，本文件的指令同樣適用，只需將 `nerdctl` 替換為 `docker` 即可。
-- **GitHub 儲存庫**: 映像將從 `ghcr.io/yihua1218/ai-mail-butler:latest` 拉取。
-
-## 步驟 1：建立設定檔
-
-應用程式需要環境變數來進行設定，這些變數由 `.env` 檔案管理。
-
-1.  將範例設定檔複製為一個新的 `.env` 檔案：
-    ```bash
-    cp .env.example .env
-    ```
-
-2.  **編輯 `.env` 檔案**，填入您的具體設定。您至少需要設定您的 SMTP 中繼、AI 供應商詳細資訊和管理員電子郵件。
-    ```ini
-    # 伺服器設定
-    PORT=3000
-    HOST=0.0.0.0 # 使用 0.0.0.0 以便從容器外部存取
-    PUBLIC_URL=https://your-domain.com # 對外公開的基礎網址，用於郵件中的魔術登入連結
-    RUST_LOG=info,ai_mail_butler=debug
-    ADMIN_EMAIL=your-admin-email@example.com
-
-    # 資料庫設定
-    DATABASE_URL=sqlite:/app/data/data.sqlite # 指向容器內的路徑
-
-    # 郵件設定
-    SMTP_RELAY_HOST=smtp.your-provider.com
-    SMTP_RELAY_PORT=587
-    SMTP_RELAY_USER=your-smtp-username
-    SMTP_RELAY_PASS=your-smtp-password
-    ASSISTANT_EMAIL=assistant@your-domain.com
-
-    # AI 設定 (例如 OpenAI, LM Studio)
-    AI_API_BASE_URL=http://your-ai-provider-host:1234/v1
-    AI_API_KEY=your-api-key
-    AI_MODEL_NAME=your-model-name
-
-    # ... 其他設定 ...
-    ```
-    **重要提示**:
-    - 將 `HOST` 設定為 `0.0.0.0` 以允許伺服器接受來自容器外部的連線。
-    - 將 `PUBLIC_URL` 設定為您的公開網域（例如 `https://your-domain.com`），以確保郵件中的魔術登入連結指向正確的位址，而非 `localhost`。
-    - `DATABASE_URL` 應指向容器內的路徑，根據 volume 掛載的定義，這裡是 `/app/data/data.sqlite`。
-
-## 步驟 2：修改 Compose 檔案
-
-預設的 `docker-compose.yml` 設定為從原始碼建置映像。您需要修改它，以便從 `ghcr.io` 拉取預先建置的映像。
-
-1.  開啟 `docker-compose.yml` 檔案。
-2.  找到 `ai-mail-butler` 服務的定義。
-3.  **將 `build: .` 替換為 `image: ghcr.io/yihua1218/ai-mail-butler:latest`**。
-
-更新後的服務應如下所示：
+目前 compose 檔已同時支援 GHCR image 與本機原始碼 build：
 
 ```yaml
-version: '3.8'
-
-services:
-  ai-mail-butler:
-    # build: .  <-- 註解或刪除此行
-    image: ghcr.io/yihua1218/ai-mail-butler:latest # <-- 新增此行
-    container_name: ai-mail-butler
-    ports:
-      - "3000:3000" # Web UI
-      - "2525:25"   # SMTP 伺服器 (在主機上使用 2525 以避免需要 root 權限)
-    env_file:
-      - .env
-    volumes:
-      # 掛載本地目錄以持久化儲存資料 (資料庫、郵件池等)
-      - ./ai-mail-butler-data:/app/data
-    restart: unless-stopped
+image: ${IMAGE_NAME:-ghcr.io/yihua/ai-mail-butler}:${IMAGE_TAG:-latest}
+build: .
 ```
-**關於 Port 25 的說明**: 我們將主機的 `2525` 連接埠對應到容器的 `25` 連接埠。這是因為在主機上綁定低於 1024 的連接埠通常需要 root 權限。如果您以 root 身分執行 `nerdctl` 或 `docker`，可以將 `2525` 改回 `25`。
 
-## 步驟 3：執行應用程式
+若 image 已存在於本機或 registry，Compose 可以使用 image；若你正在開發原始碼，也可以用本機 `Dockerfile` build。
 
-現在您可以使用 `nerdctl compose` 來啟動應用程式。
+## 前置需求
 
-1.  **拉取最新的映像**：
-    ```bash
-    nerdctl pull ghcr.io/yihua1218/ai-mail-butler:latest:latest
-    ```
-    *(對於 Docker 用戶: `docker pull ghcr.io/yihua1218/ai-mail-butler:latest:latest`)*
+- `nerdctl` 與 `nerdctl-compose`，或 Docker Compose plugin。
+- 依 `.env.example` 建立 `.env`。
+- 準備持久化資料目錄。預設 compose 會把 host `./ai-mail-butler-data` 掛到容器 `/app/data`。
 
-2.  **以分離模式啟動服務**：
-    ```bash
-    nerdctl compose up -d
-    ```
-    *(對於 Docker 用戶: `docker compose up -d`)*
+相關 production 文件：
 
-## 步驟 4：驗證應用程式
+- [EC2 production checklist](EC2-PRODUCTION-CHECKLIST.zh-TW.md)
+- [環境變數範本](ENV-EXAMPLES.zh-TW.md)
+- [EC2 host firewall agent](EC2-HOST-FIREWALL-AGENT.md)
+- [Cloudflare cache purge token 與操作](CLOUDFLARE-CACHE-PURGE.zh-TW.md)
+- [SSHFS remote debug workflow](SSHFS-CLI-REMOTE-DEBUG.zh-TW.md)
 
-1.  **檢查容器是否正在執行**：
-    ```bash
-    nerdctl compose ps
-    ```
-    您應該會看到 `ai-mail-butler` 容器處於 `running` 狀態。
+## 設定 `.env`
 
-2.  **檢查日誌**以確保一切正常啟動：
-    ```bash
-    nerdctl compose logs -f
-    ```
-    *(對於 Docker 用戶: `docker compose logs -f`)*
+先複製範本：
 
-    您應該會看到 Rust 應用程式的日誌輸出，顯示伺服器正在監聽 3000 連接埠。
+```bash
+cp .env.example .env
+```
 
-3.  **存取 Web UI**: 打開您的網頁瀏覽器，並前往 `http://localhost:3000`。
+Production 常用的最小設定：
 
-## 步驟 5：停止應用程式
+```env
+PORT=3000
+HOST=0.0.0.0
+SMTP_HOST_PORT=25
+PUBLIC_URL=https://butler.example.com
+ADMIN_EMAIL=admin@example.com
 
-若要停止應用程式並移除容器，請執行：
+DATABASE_URL=sqlite:/app/data/data.sqlite
+
+SMTP_RELAY_HOST=smtp.example.com
+SMTP_RELAY_PORT=587
+SMTP_RELAY_USER=assistant@example.com
+SMTP_RELAY_PASS=your-smtp-secret
+ASSISTANT_EMAIL=assistant@mail.example.com
+
+AI_API_BASE_URL=https://api.openai.com/v1
+AI_API_KEY=your-ai-api-key
+AI_MODEL_NAME=your-model-name
+```
+
+重要路徑規則：
+
+- Docker/nerdctl Compose 內，`DATABASE_URL` 通常應該是 `sqlite:/app/data/data.sqlite`。
+- 在 host 上，同一個 DB 檔案位於 `./ai-mail-butler-data/data.sqlite`。
+
+## Image 名稱與 Tag
+
+目前預設 image 是：
+
+```env
+IMAGE_NAME=ghcr.io/yihua/ai-mail-butler
+IMAGE_TAG=latest
+```
+
+Staging 或 production 建議使用 CI 發出的不可變 tag：
+
+```env
+IMAGE_NAME=ghcr.io/yihua/ai-mail-butler
+IMAGE_TAG=sha-<git-sha>
+```
+
+若要先確認 registry 權限，可手動 pull：
+
+```bash
+nerdctl pull ghcr.io/yihua/ai-mail-butler:latest
+docker pull ghcr.io/yihua/ai-mail-butler:latest
+```
+
+## Port 說明
+
+Compose 目前映射：
+
+```yaml
+- "${PORT:-3000}:${PORT:-3000}"
+- "${SMTP_HOST_PORT:-25}:25"
+```
+
+常見設定：
+
+| 情境 | `PORT` | `SMTP_HOST_PORT` | 說明 |
+|---|---:|---:|---|
+| Production MX 目標 | `3000` | `25` | 網際網路直接投遞 SMTP 時需要 host port 25。 |
+| 本機或不公開 SMTP 的 staging | `3000` | `2525` | 避免 host port 25 權限或衝突問題。 |
+| HTTP/TLS 走 reverse proxy | `3000` | `25` 或 `2525` | Proxy 處理 HTTP/TLS；SMTP 仍需直接 TCP routing。 |
+
+Cloudflare proxy 不代理 SMTP。SMTP 相關 DNS record 必須維持 DNS-only。
+
+## 啟動
+
+使用 nerdctl：
+
+```bash
+nerdctl compose up -d
+```
+
+使用 Docker：
+
+```bash
+docker compose up -d
+```
+
+若需要在容器內使用 SSHFS remote debug，疊加 SSHFS override：
+
+```bash
+nerdctl compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.sshfs.yml up -d
+```
+
+一般 production 運行請保持 SSHFS 關閉。
+
+## 驗證
+
+```bash
+nerdctl compose ps
+nerdctl compose logs --tail=100
+```
+
+Docker 對應指令：
+
+```bash
+docker compose ps
+docker compose logs --tail=100
+```
+
+檢查資料目錄：
+
+```bash
+ls -lah ai-mail-butler-data
+```
+
+App 初始化後應該會看到 `data.sqlite`。
+
+## 停止
+
 ```bash
 nerdctl compose down
+docker compose down
 ```
-*(對於 Docker 用戶: `docker compose down`)*
 
-此命令將停止並移除容器，但 `./ai-mail-butler-data` 卷宗中的資料將被保留。
+這會移除容器，但保留 `./ai-mail-butler-data`。

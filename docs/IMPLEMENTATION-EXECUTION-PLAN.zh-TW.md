@@ -87,10 +87,10 @@
 
 ### P3: 部署與安全文件收斂
 
-- [ ] 整理 `NERDCTL_COMPOSE_GUIDE`，修正 image name/tag 與 port 說明。
-- [ ] 補一份 EC2 production checklist：DNS、TLS、SMTP、firewall agent、backup、restore。
-- [ ] 將 Cloudflare purge、host firewall agent、remote debug 三份文件互相加上交叉連結。
-- [ ] 明確區分 production、staging、remote-debug overlay 三種 `.env` 範本。
+- [x] 整理 `NERDCTL_COMPOSE_GUIDE`，修正 image name/tag 與 port 說明。
+- [x] 補一份 EC2 production checklist：DNS、TLS、SMTP、firewall agent、backup、restore。
+- [x] 將 Cloudflare purge、host firewall agent、remote debug 三份文件互相加上交叉連結。
+- [x] 明確區分 production、staging、remote-debug overlay 三種 `.env` 範本。
 
 ### P4: 維運自動化
 
