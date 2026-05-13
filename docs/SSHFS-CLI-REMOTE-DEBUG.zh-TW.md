@@ -137,6 +137,7 @@ REPL 常用指令：
 - `show <index|path>`
 - `process <index|path>`
 - `retry-unknown`
+- `list-empty-archive`
 - `report`
 
 ## 4. 針對卡住/失敗信件的建議流程
@@ -177,6 +178,14 @@ wc -c path/to/message/raw.eml path/to/message/body.txt
 ```
 
 只要 `raw.eml` 或 `body.txt` 有內容，新的 Dashboard fallback 應可顯示該信。
+
+也可以在 CLI REPL 中直接執行：
+
+```text
+list-empty-archive
+```
+
+此指令會列出 DB 內容欄位為空、但 archived `raw.eml` 或 `body.txt` 有內容的信件，輸出 email id、狀態、時間、archive 大小、主旨與來源路徑。
 
 ## 5. 對照遠端服務日誌
 

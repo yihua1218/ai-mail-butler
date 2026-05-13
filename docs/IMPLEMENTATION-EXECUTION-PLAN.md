@@ -73,10 +73,10 @@ This document summarizes the current implementation, the drift from older docume
 
 ### P1: Make Remote Debug Less Error-Prone
 
-- [ ] Show actual DB path, overlay DB path, and readonly base in Admin Runtime.
-- [ ] Mark email content source in Dashboard detail: DB, archived raw, or archived body.
-- [ ] Record archived-mail fallback hits in processing log details.
-- [ ] Add a CLI command to list emails whose DB content is empty but archive content exists.
+- [x] Show actual DB path, overlay DB path, and readonly base in Admin Runtime.
+- [x] Mark email content source in Dashboard detail: DB, archived raw, or archived body.
+- [x] Record archived-mail fallback hits in processing log details.
+- [x] Add CLI REPL command `list-empty-archive` to list emails whose DB content is empty but archive content exists.
 
 ### P2: Stabilize Reprocessing
 

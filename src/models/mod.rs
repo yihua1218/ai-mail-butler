@@ -111,6 +111,8 @@ mod tests {
             status: "pending".to_string(),
             matched_rule_label: Some("label".to_string()),
             received_at: Some("2024-01-01".to_string()),
+            content_source: Some("db".to_string()),
+            content_source_path: None,
         };
 
         let json = serde_json::to_string(&record).unwrap();
@@ -131,6 +133,8 @@ pub struct EmailRecord {
     pub status: String,
     pub matched_rule_label: Option<String>,
     pub received_at: Option<String>,
+    pub content_source: Option<String>,
+    pub content_source_path: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]

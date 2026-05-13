@@ -124,6 +124,7 @@ Useful REPL commands:
 - `show <index|path>`
 - `process <index|path>`
 - `retry-unknown`
+- `list-empty-archive`
 - `report`
 
 ## 4. Investigate Stuck or Failing Files
@@ -164,6 +165,14 @@ wc -c path/to/message/raw.eml path/to/message/body.txt
 ```
 
 If `raw.eml` or `body.txt` has content, the Dashboard fallback should display the mail.
+
+You can also run this directly in CLI REPL:
+
+```text
+list-empty-archive
+```
+
+This lists DB-empty emails that still have archived `raw.eml` or `body.txt` content, including email id, status, time, archive size, subject, and source path.
 
 ## 5. Cross-check with Remote Logs
 

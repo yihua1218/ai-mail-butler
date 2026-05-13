@@ -190,6 +190,169 @@ async fn write_cli_report(path: &str, report: &mail::CliRunReport) -> Result<()>
     Ok(())
 }
 
+fn parse_mail_meta_field(meta: &str, field: &str) -> Option<String> {
+    let prefix = format!("{}:", field);
+    meta.lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(|v| v.trim().to_string()))
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_mail_timestamp(value: &str) -> Option<i64> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(dt.timestamp());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Some(dt.and_utc().timestamp());
+    }
+    None
+}
+
+fn sanitize_path_component(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+async fn archived_content_size(dir: &Path) -> Option<(u64, String)> {
+    let raw_path = dir.join("raw.eml");
+    if let Ok(meta) = tokio::fs::metadata(&raw_path).await {
+        if meta.len() > 0 {
+            return Some((meta.len(), raw_path.to_string_lossy().to_string()));
+        }
+    }
+
+    let body_path = dir.join("body.txt");
+    if let Ok(meta) = tokio::fs::metadata(&body_path).await {
+        if meta.len() > 0 {
+            return Some((meta.len(), body_path.to_string_lossy().to_string()));
+        }
+    }
+
+    None
+}
+
+async fn find_archived_mail_for_empty_row(
+    config: &config::Config,
+    runtime_spool_dir: &str,
+    user_email: &str,
+    subject: &str,
+    received_at: Option<&str>,
+) -> Option<(u64, String)> {
+    let mut user_dirs =
+        vec![PathBuf::from(runtime_spool_dir).join(sanitize_path_component(user_email))];
+    if let Some(db_parent) = sqlite_url_to_path(&config.database_url).parent() {
+        let sibling = db_parent
+            .join("mail_spool")
+            .join(sanitize_path_component(user_email));
+        if !user_dirs.iter().any(|existing| existing == &sibling) {
+            user_dirs.push(sibling);
+        }
+    }
+
+    let target_ts = received_at.and_then(parse_mail_timestamp);
+    let mut best: Option<(i64, PathBuf)> = None;
+    for user_dir in user_dirs {
+        let Ok(mut entries) = tokio::fs::read_dir(&user_dir).await else {
+            continue;
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let meta = tokio::fs::read_to_string(path.join("meta.txt"))
+                .await
+                .unwrap_or_default();
+            if parse_mail_meta_field(&meta, "subject").as_deref() != Some(subject) {
+                continue;
+            }
+
+            let distance = match (
+                target_ts,
+                parse_mail_meta_field(&meta, "received_at").and_then(|v| parse_mail_timestamp(&v)),
+            ) {
+                (Some(target), Some(candidate)) => (target - candidate).abs(),
+                _ => 0,
+            };
+
+            if best
+                .as_ref()
+                .map(|(best_distance, _)| distance < *best_distance)
+                .unwrap_or(true)
+            {
+                best = Some((distance, path));
+            }
+        }
+    }
+
+    let (_, dir) = best?;
+    archived_content_size(&dir).await
+}
+
+async fn list_empty_db_rows_with_archive(
+    pool: &sqlx::SqlitePool,
+    config: &config::Config,
+    runtime_spool_dir: &str,
+) -> Result<()> {
+    let rows: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT e.id, u.email, COALESCE(e.subject, ''), CAST(e.received_at AS TEXT), e.status
+         FROM emails e
+         JOIN users u ON u.id = e.user_id
+         WHERE length(coalesce(e.preview,'')) = 0
+           AND length(coalesce(e.stored_content,'')) = 0
+           AND length(coalesce(e.plain_content,'')) = 0
+           AND length(coalesce(e.html_content,'')) = 0
+         ORDER BY e.received_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut found = 0usize;
+    for (id, user_email, subject, received_at, status) in rows {
+        if subject.trim().is_empty() {
+            continue;
+        }
+        if let Some((size, path)) = find_archived_mail_for_empty_row(
+            config,
+            runtime_spool_dir,
+            &user_email,
+            &subject,
+            received_at.as_deref(),
+        )
+        .await
+        {
+            found += 1;
+            println!(
+                "{} | {} | {} | {} bytes | {} | {}",
+                id,
+                status.unwrap_or_else(|| "-".to_string()),
+                received_at.unwrap_or_else(|| "-".to_string()),
+                size,
+                subject,
+                path
+            );
+        }
+    }
+
+    println!("Found {found} empty DB email rows with archived content.");
+    Ok(())
+}
+
 async fn run_cli_repl(
     pool: &sqlx::SqlitePool,
     ai_client: &ai::AiClient,
@@ -233,6 +396,9 @@ async fn run_cli_repl(
                 println!("  show <index|path>     Show first 40 lines of a spool file");
                 println!("  process <index|path>  Process one spool file");
                 println!("  retry-unknown         Requeue unknown_sender files from logs");
+                println!(
+                    "  list-empty-archive    List DB-empty emails with archived raw/body content"
+                );
                 println!("  report                Show aggregate report");
                 println!("  exit                  Exit REPL");
             }
@@ -281,6 +447,9 @@ async fn run_cli_repl(
             "retry-unknown" => {
                 let count = mail::requeue_unknown_sender_errors(pool, &runtime_spool_dir).await?;
                 println!("Requeued {count} files from unknown_sender logs");
+            }
+            "list-empty-archive" => {
+                list_empty_db_rows_with_archive(pool, &config, &runtime_spool_dir).await?;
             }
             "report" => {
                 println!("{}", serde_json::to_string_pretty(&aggregate)?);

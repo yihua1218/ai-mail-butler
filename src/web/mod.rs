@@ -1693,6 +1693,13 @@ struct RenderedMailContent {
     html_content: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ArchivedMailContent {
+    rendered: RenderedMailContent,
+    source: String,
+    path: PathBuf,
+}
+
 fn collect_mail_body_parts(
     part: &mailparse::ParsedMail<'_>,
     plain: &mut Vec<String>,
@@ -1792,7 +1799,7 @@ fn parse_mail_timestamp(value: &str) -> Option<i64> {
     None
 }
 
-async fn render_archived_mail_dir(dir: &std::path::Path) -> Option<RenderedMailContent> {
+async fn render_archived_mail_dir(dir: &std::path::Path) -> Option<ArchivedMailContent> {
     let raw_path = dir.join("raw.eml");
     if let Ok(raw) = fs::read(&raw_path).await {
         if let Ok(parsed) = mailparse::parse_mail(&raw) {
@@ -1809,7 +1816,11 @@ async fn render_archived_mail_dir(dir: &std::path::Path) -> Option<RenderedMailC
                     .map(|s| !s.trim().is_empty())
                     .unwrap_or(false)
             {
-                return Some(rendered);
+                return Some(ArchivedMailContent {
+                    rendered,
+                    source: "archived_raw".to_string(),
+                    path: raw_path,
+                });
             }
         }
     }
@@ -1824,11 +1835,15 @@ async fn render_archived_mail_dir(dir: &std::path::Path) -> Option<RenderedMailC
         || body.contains("<body")
         || body.contains("</table>")
         || body.contains("</div>");
-    Some(RenderedMailContent {
-        content_format: if looks_html { "html" } else { "plain" }.to_string(),
-        content: body.clone(),
-        plain_content: (!looks_html).then(|| body.clone()),
-        html_content: looks_html.then_some(body),
+    Some(ArchivedMailContent {
+        rendered: RenderedMailContent {
+            content_format: if looks_html { "html" } else { "plain" }.to_string(),
+            content: body.clone(),
+            plain_content: (!looks_html).then(|| body.clone()),
+            html_content: looks_html.then_some(body),
+        },
+        source: "archived_body".to_string(),
+        path: body_path,
     })
 }
 
@@ -1836,7 +1851,7 @@ async fn find_archived_mail_content_for_record(
     state: &AppState,
     user_email: &str,
     record: &EmailRecord,
-) -> Option<RenderedMailContent> {
+) -> Option<ArchivedMailContent> {
     let subject = record.subject.as_deref()?.trim();
     if subject.is_empty() {
         return None;
@@ -1913,13 +1928,16 @@ async fn hydrate_missing_email_content(
             continue;
         }
 
-        if let Some(rendered) =
+        if let Some(archived) =
             find_archived_mail_content_for_record(state, user_email, record).await
         {
+            let rendered = archived.rendered;
             record.stored_content = Some(rendered.content.clone());
             record.plain_content = rendered.plain_content;
             record.html_content = rendered.html_content;
             record.preview = Some(rendered.content.chars().take(100).collect());
+            record.content_source = Some(archived.source);
+            record.content_source_path = Some(archived.path.to_string_lossy().to_string());
         }
     }
 }
@@ -2002,7 +2020,7 @@ async fn get_dashboard(
                 .unwrap_or(None);
 
             if let Some((uid,)) = user_id {
-                let mut personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at FROM emails WHERE user_id = ? ORDER BY received_at DESC")
+                let mut personal_emails = sqlx::query_as::<_, EmailRecord>("SELECT id, subject, preview, stored_content, plain_content, html_content, original_from, status, matched_rule_label, CAST(received_at AS TEXT) as received_at, 'db' as content_source, NULL as content_source_path FROM emails WHERE user_id = ? ORDER BY received_at DESC")
                     .bind(&uid)
                     .fetch_all(pool).await.unwrap_or(vec![]);
                 hydrate_missing_email_content(&state, &email, &mut personal_emails).await;
@@ -2612,6 +2630,10 @@ struct AdminRuntimeInfo {
     remote_debug_api_writes_enabled: bool,
     readonly_base: Option<String>,
     overlay_dir: Option<String>,
+    configured_db_path: String,
+    active_db_path: String,
+    overlay_db_path: Option<String>,
+    resolved_readonly_base_db_path: Option<String>,
     remote_debug_sshfs_enabled: bool,
     remote_debug_mode: String,
     remote_debug_access_mode: String,
@@ -2691,6 +2713,15 @@ async fn get_admin_runtime_info(
     let write_apis_blocked = state.config.readonly_mode_enabled
         && state.config.readonly_block_writes
         && !remote_debug_api_writes_enabled;
+    let configured_db_path = sqlite_url_to_path(&state.config.database_url);
+    let active_db_path = configured_db_path.to_string_lossy().to_string();
+    let overlay_db_path = state
+        .config
+        .readonly_mode_enabled
+        .then(|| configured_db_path.to_string_lossy().to_string());
+    let resolved_readonly_base_db_path = resolve_remote_debug_base_db_path(&state)
+        .await
+        .map(|path| path.to_string_lossy().to_string());
 
     Json(AdminRuntimeInfo {
         readonly_mode_enabled: state.config.readonly_mode_enabled,
@@ -2699,6 +2730,10 @@ async fn get_admin_runtime_info(
         remote_debug_api_writes_enabled,
         readonly_base: state.config.readonly_base.clone(),
         overlay_dir: state.config.overlay_dir.clone(),
+        configured_db_path: configured_db_path.to_string_lossy().to_string(),
+        active_db_path,
+        overlay_db_path,
+        resolved_readonly_base_db_path,
         remote_debug_sshfs_enabled: state.config.remote_debug_sshfs_enabled,
         remote_debug_mode: state.config.remote_debug_mode.clone(),
         remote_debug_access_mode: load_remote_debug_access_mode(&state).await,
@@ -4570,12 +4605,22 @@ async fn post_manual_process_emails(
                 status: status.clone(),
                 matched_rule_label: None,
                 received_at: received_at.clone(),
+                content_source: None,
+                content_source_path: None,
             };
-            if let Some(rendered) =
+            if let Some(archived) =
                 find_archived_mail_content_for_record(&state, &user.email, &lookup_record).await
             {
-                source_text = rendered.content;
-                source_name = "archived_raw".to_string();
+                source_text = archived.rendered.content;
+                source_name = archived.source;
+                processing_steps.push(serde_json::json!({
+                    "key": "source_fallback",
+                    "label": "Load archived email content",
+                    "status": "finish",
+                    "detail": format!("Using {} from {}", source_name, archived.path.display()),
+                    "source": source_name,
+                    "path": archived.path.to_string_lossy(),
+                }));
             }
         }
         let extracted_finance_records = crate::mail::analyze_and_store_financial_records(

@@ -39,6 +39,8 @@ type EmailRow = {
   status: string;
   matched_rule_label?: string;
   received_at?: string;
+  content_source?: string;
+  content_source_path?: string;
 };
 
 type ProcessingStepStatus = 'wait' | 'process' | 'finish' | 'error';
@@ -1086,6 +1088,12 @@ const DashboardPage: React.FC = () => {
             <code>{runtimeInfo.remote_debug_mount_point || '-'}</code>
             <span>{t('remote_debug_overlay_dir')}</span>
             <code>{runtimeInfo.remote_debug_overlay_dir || runtimeInfo.overlay_dir || '-'}</code>
+            <span>{t('remote_debug_active_db')}</span>
+            <code>{runtimeInfo.active_db_path || '-'}</code>
+            <span>{t('remote_debug_overlay_db')}</span>
+            <code>{runtimeInfo.overlay_db_path || '-'}</code>
+            <span>{t('remote_debug_base_db')}</span>
+            <code>{runtimeInfo.resolved_readonly_base_db_path || runtimeInfo.readonly_base || '-'}</code>
           </div>
         </Space>
       </Card>
@@ -1267,6 +1275,12 @@ const DashboardPage: React.FC = () => {
     const effectivePlain = plainContent || (!legacyIsHtml ? legacyContent : '');
     const hasHtml = !!effectiveHtml.trim();
     const hasPlain = !!effectivePlain.trim();
+    const contentSource = viewingEmail?.content_source || (viewingEmail ? 'db' : '');
+    const contentSourceLabel = contentSource === 'archived_raw'
+      ? t('content_source_archived_raw')
+      : contentSource === 'archived_body'
+        ? t('content_source_archived_body')
+        : t('content_source_db');
     const defaultContentKey = hasHtml ? 'html' : 'plain';
     const tabs = [
       ...(hasHtml ? [{
@@ -1331,8 +1345,16 @@ const DashboardPage: React.FC = () => {
               <Tag>{t('email_received_at')}: {formatInUserTimezone(viewingEmail.received_at)}</Tag>
               {hasHtml ? <Tag color="blue">{t('email_format_html')}</Tag> : null}
               {hasPlain ? <Tag color="green">{t('email_format_plain')}</Tag> : null}
+              <Tag color={contentSource.startsWith('archived') ? 'purple' : 'default'}>
+                {t('content_source')}: {contentSourceLabel}
+              </Tag>
               <Tag color="gold">{t('email_safe_view')}</Tag>
             </Space>
+            {viewingEmail.content_source_path ? (
+              <div style={{ color: '#86868b', wordBreak: 'break-all' }}>
+                {t('content_source_path')}: <code>{viewingEmail.content_source_path}</code>
+              </div>
+            ) : null}
             {tabs.length ? (
               <Tabs
                 key={viewingEmail.id}

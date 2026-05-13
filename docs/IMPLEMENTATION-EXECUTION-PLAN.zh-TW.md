@@ -73,10 +73,10 @@
 
 ### P1: 降低遠端除錯踩雷
 
-- [ ] 在 Admin Runtime 區塊顯示目前實際 DB path、overlay DB path、readonly base。
-- [ ] 在 Dashboard 郵件詳情中標示內容來源：DB、archived raw、archived body。
-- [ ] 將 archived mail fallback 的命中結果寫入 processing log details，方便支援包檢查。
-- [ ] 提供 CLI 指令列出「DB 內容空但 archive 有內容」的郵件。
+- [x] 在 Admin Runtime 區塊顯示目前實際 DB path、overlay DB path、readonly base。
+- [x] 在 Dashboard 郵件詳情中標示內容來源：DB、archived raw、archived body。
+- [x] 將 archived mail fallback 的命中結果寫入 processing log details，方便支援包檢查。
+- [x] 提供 CLI REPL 指令 `list-empty-archive` 列出「DB 內容空但 archive 有內容」的郵件。
 
 ### P2: 穩定重新處理流程
 
