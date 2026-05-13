@@ -18,7 +18,7 @@ cargo llvm-cov --summary-only
 目前結果：
 
 ```text
-48 passed; 0 failed
+61 passed; 0 failed
 ```
 
 Coverage 快照：
@@ -26,9 +26,9 @@ Coverage 快照：
 | 指標                      |   目前數值 |
 |---------------------------|-----------:|
 | 日期                      | 2026-05-13 |
-| Backend line coverage     |     29.19% |
-| Backend function coverage |     29.77% |
-| Backend region coverage   |     27.87% |
+| Backend line coverage     |     33.00% |
+| Backend function coverage |     34.43% |
+| Backend region coverage   |     31.86% |
 | Frontend coverage         |   尚未量測 |
 
 先前 2026-04-22 的 backend 實測 snapshot：
@@ -38,6 +38,14 @@ Coverage 快照：
 | Backend line coverage     |   15.41% |
 | Backend function coverage |   23.20% |
 | Backend region coverage   |   15.80% |
+
+同日稍早的本地 snapshot：
+
+| 指標                      | 先前數值 |
+|---------------------------|---------:|
+| Backend line coverage     |   29.19% |
+| Backend function coverage |   29.77% |
+| Backend region coverage   |   27.87% |
 
 環境備註：
 
@@ -77,6 +85,19 @@ Coverage 快照：
 
 ### 2026-05-13
 
+- 新增 `main.rs` helper 測試：
+  - SQLite URL 轉 path。
+  - readonly runtime directory remapping。
+  - mail metadata/timestamp parsing。
+  - archive raw/body size preference。
+  - closest archived mail matching。
+  - readonly overlay DB preparation。
+  - CLI JSON report writing。
+- 新增 `ai` response parser 測試：
+  - OpenAI-compatible chat JSON。
+  - SSE `data:` responses。
+  - 簡易 `content` / `response` / `text` 相容格式。
+  - response body summarization。
 - 新增 `Config::load()` 測試：
   - 預設值。
   - runtime env parsing。
@@ -86,7 +107,7 @@ Coverage 快照：
   - SQLite URL 轉 path。
   - overlay-relative DB path resolution。
   - 標準化 processing step JSON contract。
-- 已安裝並執行 `cargo-llvm-cov`；backend line coverage 目前實測為 29.19%。
+- 已安裝並執行 `cargo-llvm-cov`；backend line coverage 目前實測為 33.00%。
 - 先前 P2 已新增手動重新處理測試：
   - 財務 rollback。
   - 規則重新命中。

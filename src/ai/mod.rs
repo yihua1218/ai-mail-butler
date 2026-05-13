@@ -207,3 +207,78 @@ fn parse_compatible_chat_response(value: Value) -> Result<ChatResponse> {
 
     serde_json::from_value(value).map_err(anyhow::Error::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_body_normalizes_whitespace_and_truncates() {
+        assert_eq!(
+            summarize_body("hello\n\n  world\tagain"),
+            "hello world again"
+        );
+
+        let long = "x ".repeat(900);
+        let summary = summarize_body(&long);
+        assert!(summary.ends_with("..."));
+        assert!(summary.chars().count() <= 803);
+    }
+
+    #[test]
+    fn parse_chat_response_handles_openai_shape() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": { "content": "hello" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "total_tokens": 12,
+                "completion_tokens": 5,
+                "prompt_tokens": 7
+            }
+        })
+        .to_string();
+
+        let parsed = parse_chat_response(&body).expect("parse openai response");
+        assert_eq!(parsed.choices[0].message.content.as_deref(), Some("hello"));
+        assert_eq!(parsed.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(parsed.usage.map(|u| u.total_tokens), Some(12));
+    }
+
+    #[test]
+    fn parse_chat_response_handles_sse_data_line() {
+        let body = "event: message\n\
+                    data: {\"choices\":[{\"message\":{\"content\":\"from sse\"},\"finish_reason\":\"stop\"}]}\n\
+                    data: [DONE]\n";
+
+        let parsed = parse_chat_response(body).expect("parse sse response");
+        assert_eq!(
+            parsed.choices[0].message.content.as_deref(),
+            Some("from sse")
+        );
+    }
+
+    #[test]
+    fn parse_chat_response_handles_compatible_content_response_and_text() {
+        for (key, expected) in [
+            ("content", "from content"),
+            ("response", "from response"),
+            ("text", "from text"),
+        ] {
+            let body = serde_json::json!({ key: expected }).to_string();
+            let parsed = parse_chat_response(&body).expect("parse compatible response");
+            assert_eq!(parsed.choices[0].message.content.as_deref(), Some(expected));
+            assert!(parsed.usage.is_none());
+        }
+    }
+
+    #[test]
+    fn extract_sse_chat_json_skips_done_and_empty_lines() {
+        let body = "data:\n\ndata: [DONE]\n\ndata: {\"content\":\"ok\"}\n";
+        assert_eq!(
+            extract_sse_chat_json(body).as_deref(),
+            Some("{\"content\":\"ok\"}")
+        );
+    }
+}

@@ -648,3 +648,253 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(database_url: impl Into<String>) -> config::Config {
+        config::Config {
+            database_url: database_url.into(),
+            server_port: 3000,
+            ai_api_key: String::new(),
+            developer_email: None,
+            smtp_relay_host: None,
+            smtp_relay_port: 587,
+            smtp_relay_user: None,
+            smtp_relay_pass: None,
+            assistant_email: "assistant@example.com".to_string(),
+            docs_whitelist: vec![],
+            readonly_mode_enabled: false,
+            readonly_block_writes: false,
+            readonly_base: None,
+            overlay_dir: None,
+            remote_debug_sshfs_enabled: false,
+            remote_debug_mode: "readonly".to_string(),
+            remote_debug_access_mode: "readonly".to_string(),
+            remote_debug_remote: None,
+            remote_debug_mount_point: None,
+            remote_debug_overlay_dir: None,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
+        }
+    }
+
+    #[test]
+    fn sqlite_url_to_path_handles_file_and_relative_urls() {
+        assert_eq!(
+            sqlite_url_to_path("sqlite:data/data.sqlite"),
+            PathBuf::from("data/data.sqlite")
+        );
+        assert_eq!(
+            sqlite_url_to_path("sqlite:/app/data/data.sqlite"),
+            PathBuf::from("/app/data/data.sqlite")
+        );
+        assert_eq!(
+            sqlite_url_to_path("sqlite://data/data.sqlite"),
+            PathBuf::from("data/data.sqlite")
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_dir_uses_overlay_in_readonly_mode() {
+        let mut config = test_config("sqlite:data/data.sqlite");
+        assert_eq!(
+            resolve_runtime_dir(&config, "data/mail_spool"),
+            "data/mail_spool"
+        );
+
+        config.readonly_mode_enabled = true;
+        config.overlay_dir = Some("data/overlay".to_string());
+        assert_eq!(
+            resolve_runtime_dir(&config, "data/mail_spool"),
+            "data/overlay/data/mail_spool"
+        );
+        assert_eq!(
+            resolve_runtime_dir(&config, "data/overlay/data/mail_spool"),
+            "data/overlay/data/mail_spool"
+        );
+        assert_eq!(
+            resolve_runtime_dir(&config, "/app/data/mail_spool"),
+            "data/overlay/app/data/mail_spool"
+        );
+    }
+
+    #[test]
+    fn parse_mail_meta_and_timestamp_are_conservative() {
+        let meta = "subject: Hello\nreceived_at: 2026-05-12T10:20:30Z\nempty:   \n";
+        assert_eq!(
+            parse_mail_meta_field(meta, "subject").as_deref(),
+            Some("Hello")
+        );
+        assert_eq!(parse_mail_meta_field(meta, "empty"), None);
+        assert_eq!(parse_mail_meta_field(meta, "missing"), None);
+        assert_eq!(
+            parse_mail_timestamp("2026-05-12T10:20:30Z"),
+            Some(1_778_581_230)
+        );
+        assert_eq!(
+            parse_mail_timestamp("2026-05-12 10:20:30"),
+            Some(1_778_581_230)
+        );
+        assert_eq!(parse_mail_timestamp("not a timestamp"), None);
+    }
+
+    #[test]
+    fn sanitize_path_component_replaces_unsafe_chars() {
+        assert_eq!(
+            sanitize_path_component("alice+bob@example.com/path"),
+            "alice_bob@example.com_path"
+        );
+        assert_eq!(sanitize_path_component(""), "unknown");
+    }
+
+    #[tokio::test]
+    async fn archived_content_size_prefers_raw_then_body() {
+        let root =
+            std::env::temp_dir().join(format!("ai-mail-butler-main-test-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("create temp dir");
+
+        tokio::fs::write(root.join("body.txt"), "body")
+            .await
+            .expect("write body");
+        let body = archived_content_size(&root).await.expect("body fallback");
+        assert_eq!(body.0, 4);
+        assert!(body.1.ends_with("body.txt"));
+
+        tokio::fs::write(root.join("raw.eml"), "raw mail")
+            .await
+            .expect("write raw");
+        let raw = archived_content_size(&root).await.expect("raw preferred");
+        assert_eq!(raw.0, 8);
+        assert!(raw.1.ends_with("raw.eml"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn find_archived_mail_for_empty_row_picks_closest_received_at() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-archive-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let user_dir = root.join("spool").join("user@example.com");
+        let older = user_dir.join("older");
+        let newer = user_dir.join("newer");
+        tokio::fs::create_dir_all(&older)
+            .await
+            .expect("create older");
+        tokio::fs::create_dir_all(&newer)
+            .await
+            .expect("create newer");
+        tokio::fs::write(
+            older.join("meta.txt"),
+            "subject: Receipt\nreceived_at: 2026-05-12 09:00:00\n",
+        )
+        .await
+        .expect("write older meta");
+        tokio::fs::write(older.join("raw.eml"), "old")
+            .await
+            .expect("write old");
+        tokio::fs::write(
+            newer.join("meta.txt"),
+            "subject: Receipt\nreceived_at: 2026-05-12 10:00:00\n",
+        )
+        .await
+        .expect("write newer meta");
+        tokio::fs::write(newer.join("raw.eml"), "newer")
+            .await
+            .expect("write newer");
+
+        let config = test_config("sqlite::memory:");
+        let found = find_archived_mail_for_empty_row(
+            &config,
+            root.join("spool").to_string_lossy().as_ref(),
+            "user@example.com",
+            "Receipt",
+            Some("2026-05-12 09:55:00"),
+        )
+        .await
+        .expect("find archived mail");
+
+        assert_eq!(found.0, 5);
+        assert!(found.1.contains("newer"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn prepare_readonly_overlay_db_copies_base_db_and_rewrites_config() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-overlay-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let base = root.join("base");
+        let overlay = root.join("overlay");
+        let base_db = base.join("data.sqlite");
+        tokio::fs::create_dir_all(&base).await.expect("create base");
+        tokio::fs::write(&base_db, "sqlite bytes")
+            .await
+            .expect("write base db");
+
+        let mut config = test_config("sqlite:/app/data/data.sqlite");
+        config.readonly_mode_enabled = true;
+        config.readonly_base = Some(base.to_string_lossy().to_string());
+        config.overlay_dir = Some(overlay.to_string_lossy().to_string());
+
+        prepare_readonly_overlay_db(&mut config)
+            .await
+            .expect("prepare overlay db");
+
+        let overlay_db = overlay.join("data.sqlite");
+        assert!(overlay_db.exists());
+        assert_eq!(
+            tokio::fs::read_to_string(&overlay_db)
+                .await
+                .expect("read overlay"),
+            "sqlite bytes"
+        );
+        assert_eq!(
+            config.database_url,
+            format!("sqlite:{}", overlay_db.to_string_lossy())
+        );
+        assert_eq!(
+            config.overlay_dir.as_deref(),
+            Some(overlay.to_str().unwrap())
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn write_cli_report_creates_parent_and_writes_json() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-report-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let report_path = root.join("nested").join("report.json");
+        let mut report = mail::CliRunReport::default();
+        report.push_result(mail::CliFileResult {
+            file_path: "mail.eml".to_string(),
+            status: "processed".to_string(),
+            message: "ok".to_string(),
+            error_type: None,
+            processed_path: Some("processed/mail.eml".to_string()),
+            simulation_logs: vec!["step".to_string()],
+        });
+
+        write_cli_report(report_path.to_string_lossy().as_ref(), &report)
+            .await
+            .expect("write report");
+
+        let content = tokio::fs::read_to_string(&report_path)
+            .await
+            .expect("read report");
+        assert!(content.contains("\"processed\": 1"));
+        assert!(content.contains("\"file_path\": \"mail.eml\""));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+}

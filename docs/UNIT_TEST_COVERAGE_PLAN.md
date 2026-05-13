@@ -18,7 +18,7 @@ cargo llvm-cov --summary-only
 Current result:
 
 ```text
-48 passed; 0 failed
+61 passed; 0 failed
 ```
 
 Coverage snapshot:
@@ -26,9 +26,9 @@ Coverage snapshot:
 | Metric                    |    Current Value |
 |---------------------------|-----------------:|
 | Date                      |       2026-05-13 |
-| Backend line coverage     |           29.19% |
-| Backend function coverage |           29.77% |
-| Backend region coverage   |           27.87% |
+| Backend line coverage     |           33.00% |
+| Backend function coverage |           34.43% |
+| Backend region coverage   |           31.86% |
 | Frontend coverage         | Not measured yet |
 
 Previous measured backend snapshot from 2026-04-22:
@@ -38,6 +38,14 @@ Previous measured backend snapshot from 2026-04-22:
 | Backend line coverage     |         15.41% |
 | Backend function coverage |         23.20% |
 | Backend region coverage   |         15.80% |
+
+Previous local snapshot from earlier on 2026-05-13:
+
+| Metric                    | Previous Value |
+|---------------------------|---------------:|
+| Backend line coverage     |         29.19% |
+| Backend function coverage |         29.77% |
+| Backend region coverage   |         27.87% |
 
 Environment note:
 
@@ -77,6 +85,19 @@ Environment note:
 
 ### 2026-05-13
 
+- Added `main.rs` helper tests for:
+  - SQLite URL to path conversion,
+  - readonly runtime directory remapping,
+  - mail metadata/timestamp parsing,
+  - archive raw/body size preference,
+  - closest archived mail matching,
+  - readonly overlay DB preparation,
+  - CLI JSON report writing.
+- Added `ai` response parser tests for:
+  - OpenAI-compatible chat JSON,
+  - SSE `data:` responses,
+  - simple `content` / `response` / `text` compatibility formats,
+  - response body summarization.
 - Added `Config::load()` tests for:
   - default values,
   - runtime env parsing,
@@ -86,7 +107,7 @@ Environment note:
   - SQLite URL to path conversion,
   - overlay-relative DB path resolution,
   - standardized processing step JSON contract.
-- Installed and ran `cargo-llvm-cov`; backend line coverage is now measured at 29.19%.
+- Installed and ran `cargo-llvm-cov`; backend line coverage is now measured at 33.00%.
 - Previous P2 work added manual reprocessing tests for:
   - finance rollback,
   - rule rematch,
