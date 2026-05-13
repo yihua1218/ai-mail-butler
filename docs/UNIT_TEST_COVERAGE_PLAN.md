@@ -18,7 +18,7 @@ cargo llvm-cov --summary-only
 Current result:
 
 ```text
-61 passed; 0 failed
+97 passed; 0 failed
 ```
 
 Coverage snapshot:
@@ -26,9 +26,9 @@ Coverage snapshot:
 | Metric                    |    Current Value |
 |---------------------------|-----------------:|
 | Date                      |       2026-05-13 |
-| Backend line coverage     |           33.00% |
-| Backend function coverage |           34.43% |
-| Backend region coverage   |           31.86% |
+| Backend line coverage     |           52.72% |
+| Backend function coverage |           58.07% |
+| Backend region coverage   |           53.06% |
 | Frontend coverage         | Not measured yet |
 
 Previous measured backend snapshot from 2026-04-22:
@@ -39,13 +39,16 @@ Previous measured backend snapshot from 2026-04-22:
 | Backend function coverage |         23.20% |
 | Backend region coverage   |         15.80% |
 
-Previous local snapshot from earlier on 2026-05-13:
+Previous local snapshots from 2026-05-13:
 
-| Metric                    | Previous Value |
-|---------------------------|---------------:|
-| Backend line coverage     |         29.19% |
-| Backend function coverage |         29.77% |
-| Backend region coverage   |         27.87% |
+| Snapshot | Line | Function | Region |
+|---|---:|---:|---:|
+| After config/web helper tests | 29.19% | 29.77% | 27.87% |
+| After main/AI parser tests | 33.00% | 34.43% | 31.86% |
+| After mail/web/firewall helper tests | 42.67% | 49.50% | 43.27% |
+| After rule chat command tests | 44.65% | 50.33% | 45.57% |
+| After dashboard/rules/auto-reply API tests | 48.38% | 53.91% | 48.82% |
+| After auth/settings/privacy API tests | 52.72% | 58.07% | 53.06% |
 
 Environment note:
 
@@ -72,12 +75,13 @@ Environment note:
 | Processing step API contract                     | Covered     | `key`, `label_key`, `metadata` contract test.                               |
 | SMTP security whitelist/blocking behavior        | Covered     | `smtp_security` tests.                                                      |
 | Host firewall agent validation                   | Covered     | `firewall_agent` tests.                                                     |
-| Settings persistence for consent timestamps      | Not Covered | Needs DB-level tests.                                                       |
+| Settings persistence and auth token verification | Covered     | DB-level settings and magic-token verification tests.                       |
 | Consent-gated training export endpoint auth      | Not Covered | Needs API authorization tests.                                              |
 | Transcript write on successful chat response     | Not Covered | Needs API flow tests.                                                       |
+| GDPR/DSAR privacy handler basics                 | Covered     | Consent, DSAR, privacy, age verification, and retention API tests.          |
 | GDPR deletion cleanup for `chat_transcripts`     | Not Covered | Needs transaction/cleanup tests.                                            |
 | Admin runtime API authorization and payload      | Not Covered | Important after remote-debug additions.                                     |
-| Support package redaction and content limits     | Not Covered | Privacy-sensitive support workflow.                                         |
+| Support package pseudonymization helpers         | Covered     | Stable pseudonymization and identity summary tests.                         |
 | Frontend settings consent switch behavior        | Not Covered | Needs Vitest/RTL tests.                                                     |
 | Dashboard multi-email reprocess UI state         | Not Covered | Needs frontend tests for independent row timelines.                         |
 
@@ -85,6 +89,44 @@ Environment note:
 
 ### 2026-05-13
 
+- Added `mail` CLI/overlay tests for:
+  - sorted `.eml` spool listing,
+  - readonly overlay/base file fallback,
+  - CLI target resolution by index and name,
+  - unknown-sender requeue from `mail_errors`.
+- Added additional `mail` helper tests for:
+  - CLI run report counters,
+  - runtime path/dir overlay mapping,
+  - inline plain/html body decoding,
+  - MIME fallback attachment names,
+  - login URL generation,
+  - fenced and embedded JSON extraction.
+- Added `web` remote-debug/admin helper tests for:
+  - access-mode normalization,
+  - runtime mail path remapping,
+  - persisted remote-debug access mode,
+  - write API enablement posture,
+  - remote base DB path fallback,
+  - SQLite identifier quoting and table column lookup.
+- Added `web` API/handler tests for:
+  - rule chat count/list/edit/disable/delete flows,
+  - dashboard anonymous/personal/admin views,
+  - rules API create/list/update/toggle/delete,
+  - auto-reply draft list/update/delete including draft body,
+  - magic-token verification and settings persistence,
+  - consent, DSAR, privacy settings, age verification, and retention policy flows.
+- Added `web` helper tests for:
+  - support package pseudonymization,
+  - rule label generation and AI label sanitization,
+  - rule command helper intent parsing,
+  - docs query terms and best-matching snippets,
+  - archived/raw mail rendering helpers.
+- Added `firewall_agent` tests for:
+  - backend alias parsing and serialized names,
+  - private/local IP detection,
+  - YAML bool/unquote parsing,
+  - nested YAML config subset loading,
+  - state and audit JSONL file round trips.
 - Added `main.rs` helper tests for:
   - SQLite URL to path conversion,
   - readonly runtime directory remapping,
@@ -107,7 +149,7 @@ Environment note:
   - SQLite URL to path conversion,
   - overlay-relative DB path resolution,
   - standardized processing step JSON contract.
-- Installed and ran `cargo-llvm-cov`; backend line coverage is now measured at 33.00%.
+- Installed and ran `cargo-llvm-cov`; backend line coverage is now measured at 52.72%.
 - Previous P2 work added manual reprocessing tests for:
   - finance rollback,
   - rule rematch,
@@ -176,9 +218,10 @@ Target: cover UI state that can regress without backend failures.
 ## Coverage Milestones
 
 - Milestone A: fresh `cargo llvm-cov` baseline restored in CI.
-- Milestone B: 25% backend line coverage with privacy/auth tests complete.
-- Milestone C: 35% backend line coverage with workflow integrity tests complete.
-- Milestone D: frontend Vitest coverage enabled for settings and dashboard flows.
+- Milestone B: 25% backend line coverage with privacy/auth tests complete. Status: reached.
+- Milestone C: 35% backend line coverage with workflow integrity tests complete. Status: reached.
+- Milestone D: 50% backend line coverage with key web/mail/firewall handlers covered. Status: reached at 52.72%.
+- Milestone E: frontend Vitest coverage enabled for settings and dashboard flows.
 
 ## Tooling Recommendation
 

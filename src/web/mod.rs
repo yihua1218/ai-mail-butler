@@ -3521,6 +3521,45 @@ mod web_tests {
         }
     }
 
+    fn test_user(id: &str, language: &str) -> User {
+        User {
+            id: id.to_string(),
+            email: format!("{id}@example.com"),
+            is_onboarded: true,
+            preferences: None,
+            magic_token: None,
+            role: "user".to_string(),
+            auto_reply: false,
+            dry_run: true,
+            email_format: "both".to_string(),
+            display_name: None,
+            assistant_name_zh: None,
+            assistant_name_en: None,
+            assistant_tone_zh: None,
+            assistant_tone_en: None,
+            onboarding_step: 0,
+            pdf_passwords: None,
+            timezone: "UTC".to_string(),
+            preferred_language: language.to_string(),
+            training_data_consent: false,
+            training_consent_updated_at: None,
+            mail_send_method: "dry_run".to_string(),
+            rule_label_mode: "local".to_string(),
+            time_format: "24h".to_string(),
+            date_format: "YYYY-MM-DD".to_string(),
+        }
+    }
+
+    fn test_state(pool: SqlitePool, config: crate::config::Config) -> AppState {
+        AppState {
+            pool,
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: Some("admin@example.com".to_string()),
+            developer_email: Some("dev@example.com".to_string()),
+            config: std::sync::Arc::new(config),
+        }
+    }
+
     fn find_header_end(buf: &[u8]) -> Option<usize> {
         buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
     }
@@ -3743,6 +3782,838 @@ mod web_tests {
     }
 
     #[test]
+    fn support_package_pseudonymizer_is_stable_per_identity_type() {
+        let mut pseudonymizer = SupportPackagePseudonymizer::default();
+        let raw = "Alice alice@example.com again ALICE@example.com +1 212-555-1234 0912-345-678 abcdefghijklmnopqrstuvwxyz123456 1234567890123456";
+        let redacted = pseudonymizer.pseudonymize(raw);
+
+        assert!(!redacted.contains("alice@example.com"));
+        assert!(!redacted.contains("212-555-1234"));
+        assert!(!redacted.contains("0912-345-678"));
+        assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(!redacted.contains("1234567890123456"));
+        assert_eq!(redacted.matches("person1@example.test").count(), 2);
+        assert!(redacted.contains("+1-555-0101"));
+        assert!(redacted.contains("+1-555-0102"));
+        assert!(redacted.contains("token_1_redacted"));
+        assert_eq!(
+            pseudonymizer.virtual_number("1234567890123456"),
+            "4111111111110001"
+        );
+
+        let summary = pseudonymizer.identity_summary();
+        assert_eq!(summary["emails"][0], "person1@example.test");
+        assert!(summary["phones"].as_array().expect("phones").len() >= 2);
+        assert_eq!(summary["tokens"][0], "token_1_redacted");
+        assert_eq!(summary["numbers"][0], "4111111111110001");
+        assert_eq!(
+            pseudonymizer.pseudonymize_opt(Some("bob@example.com".to_string())),
+            Some("person2@example.test".to_string())
+        );
+        assert_eq!(pseudonymizer.pseudonymize_opt(None), None);
+    }
+
+    #[test]
+    fn rule_label_helpers_normalize_generated_and_ai_labels() {
+        assert_eq!(generate_rule_label(""), "RULE");
+        assert_eq!(
+            generate_rule_label("When invoice email arrives, remind accounting"),
+            "RULE-when-invoice-email"
+        );
+        assert_eq!(
+            generate_rule_label("如果 收到 Uber Eats 訂單 請提醒我"),
+            "RULE-收到ubereats"
+        );
+
+        assert_eq!(
+            sanitize_ai_rule_label("Label: `RULE-Uber Eats 訂單!!`\nextra"),
+            Some("RULE-UberEats訂單".to_string())
+        );
+        assert_eq!(sanitize_ai_rule_label("!!!"), None);
+    }
+
+    #[test]
+    fn rule_command_helpers_detect_ids_labels_delimiters_and_intents() {
+        assert_eq!(extract_first_rule_id("請刪除規則 42"), Some(42));
+        assert_eq!(
+            extract_rule_label_token("disable RULE-Invoice_2026 now"),
+            Some("RULE-Invoice_2026".to_string())
+        );
+        assert_eq!(
+            extract_text_after_delimiter("修改規則：收到帳單時提醒"),
+            Some("收到帳單時提醒".to_string())
+        );
+
+        assert!(is_confirm_delete_phrase("yes, delete it"));
+        assert!(is_cancel_delete_phrase("取消"));
+        assert!(is_rule_count_query("how many rules do i have?"));
+        assert!(is_rule_list_query("列出規則"));
+        assert!(is_rule_edit_intent("edit rule 3"));
+        assert!(is_rule_disable_intent("停用規則 3"));
+        assert!(is_rule_delete_intent("delete rule 3"));
+    }
+
+    #[tokio::test]
+    async fn rule_chat_command_counts_lists_edits_and_disables_rules() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let ai_client = crate::ai::AiClient::new(&config);
+        let user = test_user("rule-chat-user", "en");
+
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO email_rules (user_id, rule_text, rule_label, matched_count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&user.id)
+        .bind("forward invoices to accounting")
+        .bind("RULE-INVOICE")
+        .bind(3_i64)
+        .execute(&pool)
+        .await
+        .expect("insert rule");
+
+        let count = handle_rule_chat_command(&pool, &ai_client, &user, "how many rules?")
+            .await
+            .expect("count response");
+        assert!(count.contains("1 rules"));
+
+        let list = handle_rule_chat_command(&pool, &ai_client, &user, "list rules")
+            .await
+            .expect("list response");
+        assert!(list.contains("RULE-INVOICE"));
+        assert!(list.contains("matched 3"));
+
+        let edit_help = handle_rule_chat_command(&pool, &ai_client, &user, "edit rule")
+            .await
+            .expect("edit help");
+        assert!(edit_help.contains("Use format"));
+
+        let edited = handle_rule_chat_command(
+            &pool,
+            &ai_client,
+            &user,
+            "edit rule 1: send Uber Eats receipts to finance",
+        )
+        .await
+        .expect("edit response");
+        assert!(edited.contains("Updated rule #1"));
+
+        let updated: (String, String) =
+            sqlx::query_as("SELECT rule_text, rule_label FROM email_rules WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch updated");
+        assert_eq!(updated.0, "send Uber Eats receipts to finance");
+        assert_eq!(updated.1, "RULE-send-uber-eats");
+
+        let disable_help = handle_rule_chat_command(&pool, &ai_client, &user, "disable rule")
+            .await
+            .expect("disable help");
+        assert!(disable_help.contains("provide the rule id"));
+
+        let disabled = handle_rule_chat_command(&pool, &ai_client, &user, "disable rule 1")
+            .await
+            .expect("disable response");
+        assert!(disabled.contains("Disabled rule #1"));
+        let is_enabled: i64 = sqlx::query_scalar("SELECT is_enabled FROM email_rules WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch enabled");
+        assert_eq!(is_enabled, 0);
+    }
+
+    #[tokio::test]
+    async fn rule_chat_command_delete_flow_supports_label_confirm_and_cancel() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let ai_client = crate::ai::AiClient::new(&config);
+        let user = test_user("rule-delete-user", "zh-TW");
+
+        pending_rule_delete_map().write().await.remove(&user.id);
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        let missing = handle_rule_chat_command(&pool, &ai_client, &user, "刪除規則")
+            .await
+            .expect("missing delete target");
+        assert!(missing.contains("請指定"));
+
+        sqlx::query("INSERT INTO email_rules (user_id, rule_text, rule_label) VALUES (?, ?, ?)")
+            .bind(&user.id)
+            .bind("收到帳單時提醒我")
+            .bind("RULE-BILL")
+            .execute(&pool)
+            .await
+            .expect("insert rule");
+
+        let prompt = handle_rule_chat_command(&pool, &ai_client, &user, "刪除規則 RULE-BILL")
+            .await
+            .expect("delete prompt");
+        assert!(prompt.contains("你即將刪除規則 #1"));
+        assert!(prompt.contains("收到帳單時提醒我"));
+
+        let canceled = handle_rule_chat_command(&pool, &ai_client, &user, "取消")
+            .await
+            .expect("cancel response");
+        assert_eq!(canceled, "已取消刪除。");
+
+        let prompt = handle_rule_chat_command(&pool, &ai_client, &user, "刪除規則 1")
+            .await
+            .expect("delete prompt by id");
+        assert!(prompt.contains("請回覆「確認刪除」"));
+
+        let deleted = handle_rule_chat_command(&pool, &ai_client, &user, "確認刪除")
+            .await
+            .expect("delete response");
+        assert_eq!(deleted, "已刪除規則 #1。");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_rules WHERE user_id = ?")
+            .bind(&user.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count rules");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn dashboard_handler_returns_anonymous_personal_and_admin_views() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let state = test_state(pool.clone(), config);
+
+        let anon = get_dashboard(State(state.clone()), Query(AuthQuery { email: None }))
+            .await
+            .0;
+        assert_eq!(anon["type"], "anonymous");
+        assert_eq!(anon["global_stats"]["registered_users"], 0);
+
+        sqlx::query(
+            "INSERT INTO users (id, email, is_onboarded) VALUES ('u1', 'person@example.com', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert user");
+        sqlx::query(
+            "INSERT INTO users (id, email, is_onboarded) VALUES ('admin', 'admin@example.com', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert admin");
+        sqlx::query(
+            "INSERT INTO emails (id, user_id, subject, preview, stored_content, original_from, status) VALUES ('m1', 'u1', 'Hello', 'Preview', 'Body', 'sender@example.com', 'replied')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert email");
+        sqlx::query("INSERT INTO chat_logs (user_email) VALUES ('person@example.com')")
+            .execute(&pool)
+            .await
+            .expect("insert chat log");
+
+        let personal = get_dashboard(
+            State(state.clone()),
+            Query(AuthQuery {
+                email: Some("person@example.com".to_string()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(personal["type"], "personal");
+        assert_eq!(personal["personal_stats"]["emails_received"], 1);
+        assert_eq!(personal["personal_emails"][0]["content_source"], "db");
+
+        let admin = get_dashboard(
+            State(state),
+            Query(AuthQuery {
+                email: Some("admin@example.com".to_string()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(admin["type"], "admin");
+        assert_eq!(admin["global_stats"]["registered_users"], 2);
+        assert_eq!(admin["global_stats"]["ai_replies"], 1);
+    }
+
+    #[tokio::test]
+    async fn rule_api_handlers_create_list_update_toggle_and_delete() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let state = test_state(pool.clone(), config);
+        let user = test_user("rules-api-user", "en");
+        sqlx::query("INSERT INTO users (id, email, is_onboarded, rule_label_mode) VALUES (?, ?, 1, 'local')")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+
+        let missing = get_rules(
+            State(state.clone()),
+            Query(AuthQuery {
+                email: Some("missing@example.com".to_string()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(missing["status"], "error");
+
+        let empty_create = post_create_rule(
+            State(state.clone()),
+            Json(CreateRuleRequest {
+                email: user.email.clone(),
+                rule_text: "   ".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(empty_create["message"], "Rule cannot be empty");
+
+        let created = post_create_rule(
+            State(state.clone()),
+            Json(CreateRuleRequest {
+                email: user.email.clone(),
+                rule_text: "route invoices to finance".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(created["status"], "success");
+
+        let listed = get_rules(
+            State(state.clone()),
+            Query(AuthQuery {
+                email: Some(user.email.clone()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(listed["status"], "success");
+        assert_eq!(listed["rules"].as_array().expect("rules").len(), 1);
+        assert_eq!(listed["rules"][0]["rule_label"], "RULE-route-invoices-fin");
+
+        let updated = post_update_rule(
+            State(state.clone()),
+            Json(UpdateRuleRequest {
+                email: user.email.clone(),
+                id: 1,
+                rule_text: "archive receipts from shops".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(updated["status"], "success");
+
+        let toggled = post_toggle_rule(
+            State(state.clone()),
+            Json(ToggleRuleRequest {
+                email: user.email.clone(),
+                id: 1,
+                is_enabled: false,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(toggled["status"], "success");
+        let enabled: i64 = sqlx::query_scalar("SELECT is_enabled FROM email_rules WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch enabled");
+        assert_eq!(enabled, 0);
+
+        let deleted = post_delete_rule(
+            State(state.clone()),
+            Json(DeleteRuleRequest {
+                email: user.email.clone(),
+                id: 1,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(deleted["status"], "success");
+
+        let missing_delete = post_delete_rule(
+            State(state),
+            Json(DeleteRuleRequest {
+                email: user.email,
+                id: 1,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(missing_delete["message"], "Rule not found");
+    }
+
+    #[tokio::test]
+    async fn auto_reply_handlers_expose_update_and_delete_draft_body() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let state = test_state(pool.clone(), config);
+        let user = test_user("reply-user", "en");
+        sqlx::query("INSERT INTO users (id, email, is_onboarded) VALUES (?, ?, 1)")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO email_rules (id, user_id, rule_text, rule_label) VALUES (7, ?, 'reply to VIP', 'RULE-VIP')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("insert rule");
+        sqlx::query(
+            "INSERT INTO auto_replies (id, user_id, source_email_id, email_rule_id, original_from, original_subject, reply_body, reply_status) VALUES ('draft-1', ?, 'mail-1', 7, 'vip@example.com', 'Question', 'Original draft', 'draft')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("insert draft");
+
+        let missing = get_auto_replies(State(state.clone()), Query(AuthQuery { email: None }))
+            .await
+            .0;
+        assert_eq!(missing["message"], "Missing email");
+
+        let replies = get_auto_replies(
+            State(state.clone()),
+            Query(AuthQuery {
+                email: Some(user.email.clone()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(replies["status"], "success");
+        assert_eq!(replies["replies"][0]["body"], "Original draft");
+        assert_eq!(replies["replies"][0]["source_email_id"], "mail-1");
+
+        let empty_update = post_update_auto_reply(
+            State(state.clone()),
+            Json(UpdateAutoReplyRequest {
+                email: user.email.clone(),
+                reply_id: "draft-1".to_string(),
+                reply_body: "   ".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(empty_update["message"], "Reply body cannot be empty");
+
+        let updated = post_update_auto_reply(
+            State(state.clone()),
+            Json(UpdateAutoReplyRequest {
+                email: user.email.clone(),
+                reply_id: "draft-1".to_string(),
+                reply_body: " Updated draft body ".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(updated["status"], "success");
+
+        let body: String =
+            sqlx::query_scalar("SELECT reply_body FROM auto_replies WHERE id = 'draft-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch body");
+        assert_eq!(body, "Updated draft body");
+
+        let deleted = post_delete_auto_reply(
+            State(state.clone()),
+            Json(DeleteAutoReplyRequest {
+                email: user.email.clone(),
+                reply_id: "draft-1".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(deleted["status"], "success");
+
+        let missing_delete = post_delete_auto_reply(
+            State(state),
+            Json(DeleteAutoReplyRequest {
+                email: user.email,
+                reply_id: "draft-1".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(missing_delete["message"], "Reply not found");
+    }
+
+    #[tokio::test]
+    async fn auth_and_settings_handlers_verify_token_and_persist_preferences() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let state = test_state(pool.clone(), config);
+
+        sqlx::query(
+            "INSERT INTO users (id, email, is_onboarded, magic_token, role) VALUES ('settings-user', 'settings@example.com', 1, 'token-1', 'user')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert user");
+
+        let me_missing = get_me(
+            State(state.clone()),
+            Query(AuthQuery {
+                email: Some(String::new()),
+            }),
+        )
+        .await
+        .0;
+        assert!(me_missing.is_none());
+
+        let me = get_me(
+            State(state.clone()),
+            Query(AuthQuery {
+                email: Some("settings@example.com".to_string()),
+            }),
+        )
+        .await
+        .0
+        .expect("get user");
+        assert_eq!(me.email, "settings@example.com");
+
+        let verified = post_verify(
+            State(state.clone()),
+            Json(VerifyRequest {
+                token: "token-1".to_string(),
+            }),
+        )
+        .await
+        .0
+        .expect("verified user");
+        assert_eq!(verified.email, "settings@example.com");
+        assert!(verified.magic_token.is_none());
+
+        let token_after: Option<String> =
+            sqlx::query_scalar("SELECT magic_token FROM users WHERE id = 'settings-user'")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch token");
+        assert!(token_after.is_none());
+
+        let not_verified = post_verify(
+            State(state.clone()),
+            Json(VerifyRequest {
+                token: "missing".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert!(not_verified.is_none());
+
+        let settings = post_settings(
+            State(state),
+            Json(SettingsRequest {
+                email: "settings@example.com".to_string(),
+                auto_reply: true,
+                dry_run: true,
+                email_format: "html".to_string(),
+                mail_send_method: Some("relay".to_string()),
+                rule_label_mode: Some("deterministic_only".to_string()),
+                training_data_consent: true,
+                timezone: Some("Asia/Taipei".to_string()),
+                preferred_language: Some("zh-TW".to_string()),
+                display_name: Some("Settings User".to_string()),
+                assistant_name_zh: Some("管家".to_string()),
+                assistant_name_en: Some("Butler".to_string()),
+                assistant_tone_zh: Some("溫和".to_string()),
+                assistant_tone_en: Some("warm".to_string()),
+                pdf_passwords: Some(vec!["1234".to_string(), "5678".to_string()]),
+                time_format: Some("12h".to_string()),
+                date_format: Some("tw".to_string()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(settings["status"], "success");
+
+        let row: (bool, String, String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT auto_reply, mail_send_method, rule_label_mode, timezone, preferred_language, pdf_passwords FROM users WHERE id = 'settings-user'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch settings");
+        assert!(row.0);
+        assert_eq!(row.1, "relay");
+        assert_eq!(row.2, "deterministic_only");
+        assert_eq!(row.3, "Asia/Taipei");
+        assert_eq!(row.4, "zh-TW");
+        assert_eq!(row.5.as_deref(), Some("[\"1234\",\"5678\"]"));
+    }
+
+    #[tokio::test]
+    async fn privacy_age_and_retention_handlers_round_trip_records() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let config = test_config("sqlite::memory:");
+        let state = test_state(pool.clone(), config);
+        sqlx::query(
+            "INSERT INTO users (id, email, is_onboarded) VALUES ('privacy-user', 'privacy@example.com', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert user");
+
+        let consent_missing = post_consent_update(
+            State(state.clone()),
+            Json(ConsentUpdateRequest {
+                email: String::new(),
+                consent_type: "training".to_string(),
+                consent_granted: true,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(consent_missing["message"], "Email required");
+
+        let consent = post_consent_update(
+            State(state.clone()),
+            Json(ConsentUpdateRequest {
+                email: "privacy@example.com".to_string(),
+                consent_type: "training".to_string(),
+                consent_granted: true,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(consent["status"], "success");
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("email".to_string(), "privacy@example.com".to_string());
+        let history = get_consent_history(State(state.clone()), Query(params.clone()))
+            .await
+            .0;
+        assert_eq!(history["status"], "success");
+
+        let invalid_dsar = post_dsar_request(
+            State(state.clone()),
+            Json(DsarRequestInput {
+                email: "privacy@example.com".to_string(),
+                request_type: "bad".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(invalid_dsar["message"], "Invalid request type");
+
+        let dsar = post_dsar_request(
+            State(state.clone()),
+            Json(DsarRequestInput {
+                email: "privacy@example.com".to_string(),
+                request_type: "access".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(dsar["status"], "success");
+        let dsar_status = get_dsar_status(State(state.clone()), Query(params.clone()))
+            .await
+            .0;
+        assert_eq!(dsar_status["status"], "success");
+
+        let privacy = post_privacy_settings(
+            State(state.clone()),
+            Json(PrivacySettingsInput {
+                email: "privacy@example.com".to_string(),
+                do_not_sell_share: Some(true),
+                cross_border_disclosure_given: Some(true),
+                data_location_preference: Some("tw".to_string()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(privacy["status"], "success");
+        let privacy_settings = get_privacy_settings(State(state.clone()), Query(params.clone()))
+            .await
+            .0;
+        assert_eq!(
+            privacy_settings["settings"]["data_location_preference"],
+            "tw"
+        );
+
+        let minor_error = post_age_verification(
+            State(state.clone()),
+            Json(AgeVerificationInput {
+                email: "privacy@example.com".to_string(),
+                is_minor: true,
+                guardian_consent_given: Some(false),
+                guardian_email: None,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(
+            minor_error["message"],
+            "Guardian consent required for minors"
+        );
+
+        let age = post_age_verification(
+            State(state.clone()),
+            Json(AgeVerificationInput {
+                email: "privacy@example.com".to_string(),
+                is_minor: true,
+                guardian_consent_given: Some(true),
+                guardian_email: Some("guardian@example.com".to_string()),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(age["status"], "success");
+        let age_settings = get_age_verification(State(state.clone()), Query(params))
+            .await
+            .0;
+        assert_eq!(
+            age_settings["verification"]["guardian_email"],
+            "guardian@example.com"
+        );
+
+        let policy = post_retention_policy(
+            State(state.clone()),
+            Json(DataRetentionPolicy {
+                id: String::new(),
+                data_type: "chat_feedback".to_string(),
+                retention_days: 30,
+                is_active: true,
+                updated_at: None,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(policy["status"], "success");
+        let policies = get_retention_policies(State(state)).await.0;
+        assert_eq!(policies["policies"][0]["data_type"], "chat_feedback");
+        assert_eq!(policies["policies"][0]["retention_days"], 30);
+    }
+
+    #[test]
+    fn docs_query_terms_and_snippets_prefer_matching_context() {
+        assert_eq!(
+            extract_query_terms("  Remote debug SSHFS, Gmail@example.com! "),
+            vec![
+                "com".to_string(),
+                "debug".to_string(),
+                "gmail@example".to_string(),
+                "remote".to_string(),
+                "remote debug sshfs, gmail@example.com!".to_string(),
+                "sshfs".to_string()
+            ]
+        );
+        assert!(is_zh_tw_doc("UNIT_TEST_COVERAGE_PLAN.zh-TW.md"));
+        assert!(!is_zh_tw_doc("UNIT_TEST_COVERAGE_PLAN.md"));
+
+        let content = "one\ntwo\nremote debug target\nfour\nfive\nsix\nseven";
+        let snippet = best_matching_snippet(content, &["debug".to_string()]);
+        assert!(snippet.contains("remote debug target"));
+        assert!(snippet.contains("one"));
+
+        let fallback = best_matching_snippet("a\nb\nc\nd\ne\nf\ng", &["missing".to_string()]);
+        assert_eq!(fallback, "a\nb\nc\nd\ne\nf");
+    }
+
+    #[test]
+    fn render_mail_content_collects_inline_plain_and_html_bodies() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "To: user@example.com\r\n",
+            "Subject: Render me\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=\"outer\"\r\n",
+            "\r\n",
+            "--outer\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "plain body\r\n",
+            "--outer\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<html><body>html body</body></html>\r\n",
+            "--outer\r\n",
+            "Content-Type: text/plain; name=\"ignored.txt\"\r\n",
+            "Content-Disposition: attachment; filename=\"ignored.txt\"\r\n",
+            "\r\n",
+            "attachment text\r\n",
+            "--outer--\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("parse mail");
+
+        assert_eq!(
+            mail_header_value(&parsed, "subject"),
+            Some("Render me".to_string())
+        );
+
+        let rendered = render_mail_content(&parsed);
+        assert_eq!(rendered.content_format, "html");
+        assert!(rendered.content.contains("html body"));
+        assert_eq!(
+            rendered.plain_content.as_deref().map(str::trim),
+            Some("plain body")
+        );
+        assert!(!rendered.content.contains("attachment text"));
+    }
+
+    #[tokio::test]
+    async fn render_archived_mail_path_reads_raw_or_body_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-render-archive-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let raw_dir = root.join("raw");
+        tokio::fs::create_dir_all(&raw_dir)
+            .await
+            .expect("create raw dir");
+        tokio::fs::write(
+            raw_dir.join("raw.eml"),
+            "Subject: Archived\r\nContent-Type: text/plain; charset=utf-8\r\n\r\narchived raw",
+        )
+        .await
+        .expect("write raw");
+
+        let raw = render_archived_mail_path(&raw_dir)
+            .await
+            .expect("render raw archive");
+        assert_eq!(raw.source, "archived_raw");
+        assert_eq!(raw.rendered.content_format, "plain");
+        assert!(raw.rendered.content.contains("archived raw"));
+
+        let body_path = root.join("body.txt");
+        tokio::fs::write(&body_path, "<html><body>archived body</body></html>")
+            .await
+            .expect("write body");
+        let body = render_archived_mail_path(&body_path)
+            .await
+            .expect("render body archive");
+        assert_eq!(body.source, "archived_body");
+        assert_eq!(body.rendered.content_format, "html");
+        assert!(body.path.ends_with("body.txt"));
+    }
+
+    #[test]
     fn sqlite_url_to_path_handles_common_url_shapes() {
         assert_eq!(
             sqlite_url_to_path("sqlite:data/data.sqlite"),
@@ -3784,6 +4655,160 @@ mod web_tests {
         assert_eq!(step["status"], "finish");
         assert_eq!(step["detail"], "Extracted records");
         assert_eq!(step["metadata"]["count"], 2);
+    }
+
+    #[test]
+    fn normalize_remote_debug_access_mode_accepts_common_write_aliases() {
+        for value in ["readwrite", "read-write", "rw", "writable"] {
+            assert_eq!(normalize_remote_debug_access_mode(value), "readwrite");
+        }
+        for value in ["", "readonly", "read-only", "nope"] {
+            assert_eq!(normalize_remote_debug_access_mode(value), "readonly");
+        }
+    }
+
+    #[test]
+    fn quote_sqlite_ident_escapes_double_quotes() {
+        assert_eq!(quote_sqlite_ident("emails"), "\"emails\"");
+        assert_eq!(quote_sqlite_ident("bad\"name"), "\"bad\"\"name\"");
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_mail_path_remaps_only_in_readonly_mode() {
+        let config = test_config("sqlite:data/data.sqlite");
+        let state = AppState {
+            pool: SqlitePool::connect_lazy("sqlite::memory:").expect("lazy pool"),
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+        assert_eq!(
+            resolve_runtime_mail_path(&state, "data/mail_spool"),
+            PathBuf::from("data/mail_spool")
+        );
+
+        let mut config = test_config("sqlite:data/data.sqlite");
+        config.readonly_mode_enabled = true;
+        config.overlay_dir = Some("data/overlay".to_string());
+        let state = AppState {
+            pool: SqlitePool::connect_lazy("sqlite::memory:").expect("lazy pool"),
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+        assert_eq!(
+            resolve_runtime_mail_path(&state, "data/mail_spool"),
+            PathBuf::from("data/overlay/data/mail_spool")
+        );
+        assert_eq!(
+            resolve_runtime_mail_path(&state, "/app/data/mail_spool"),
+            PathBuf::from("data/overlay/app/data/mail_spool")
+        );
+        assert_eq!(
+            resolve_runtime_mail_path(&state, "data/overlay/data/mail_spool"),
+            PathBuf::from("data/overlay/data/mail_spool")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_debug_access_mode_prefers_persisted_setting() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let mut config = test_config("sqlite::memory:");
+        config.remote_debug_access_mode = "readwrite".to_string();
+        let state = AppState {
+            pool: pool.clone(),
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+        assert_eq!(load_remote_debug_access_mode(&state).await, "readwrite");
+
+        sqlx::query(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('remote_debug_access_mode', 'readonly', CURRENT_TIMESTAMP)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert setting");
+        assert_eq!(load_remote_debug_access_mode(&state).await, "readonly");
+    }
+
+    #[tokio::test]
+    async fn remote_debug_api_writes_enabled_requires_full_overlay_posture() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let mut config = test_config("sqlite::memory:");
+        config.readonly_mode_enabled = true;
+        config.readonly_block_writes = true;
+        config.remote_debug_sshfs_enabled = true;
+        config.remote_debug_mode = "overlay".to_string();
+        config.remote_debug_access_mode = "readonly".to_string();
+        let state = AppState {
+            pool: pool.clone(),
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+        assert!(!remote_debug_api_writes_enabled(&state).await);
+
+        sqlx::query(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('remote_debug_access_mode', 'rw', CURRENT_TIMESTAMP)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert setting");
+        assert!(remote_debug_api_writes_enabled(&state).await);
+    }
+
+    #[tokio::test]
+    async fn resolve_remote_debug_base_db_path_checks_primary_then_data_root() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-web-base-db-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let base = root.join("base");
+        tokio::fs::create_dir_all(&base).await.expect("create base");
+        tokio::fs::write(base.join("data.sqlite"), "db")
+            .await
+            .expect("write db");
+
+        let mut config = test_config("sqlite:data/data.sqlite");
+        config.readonly_base = Some(base.to_string_lossy().to_string());
+        let state = AppState {
+            pool: SqlitePool::connect_lazy("sqlite::memory:").expect("lazy pool"),
+            ai_client: crate::ai::AiClient::new(&config),
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+        assert_eq!(
+            resolve_remote_debug_base_db_path(&state).await,
+            Some(base.join("data.sqlite"))
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_table_columns_returns_quoted_table_columns() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        sqlx::query("CREATE TABLE \"odd table\" (\"id\" TEXT, \"bad\"\"name\" TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create odd table");
+        let mut conn = pool.acquire().await.expect("acquire conn");
+        let columns = sqlite_table_columns(&mut conn, "main", "odd table")
+            .await
+            .expect("read columns");
+        assert_eq!(columns, vec!["id", "bad\"name"]);
     }
 
     #[tokio::test]

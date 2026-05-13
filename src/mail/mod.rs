@@ -887,6 +887,35 @@ pub(crate) async fn analyze_and_store_financial_records(
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_config() -> Config {
+        Config {
+            database_url: "sqlite::memory:".to_string(),
+            server_port: 3000,
+            ai_api_key: String::new(),
+            developer_email: None,
+            smtp_relay_host: None,
+            smtp_relay_port: 587,
+            smtp_relay_user: None,
+            smtp_relay_pass: None,
+            assistant_email: "assistant@example.com".to_string(),
+            docs_whitelist: vec![],
+            readonly_mode_enabled: false,
+            readonly_block_writes: false,
+            readonly_base: None,
+            overlay_dir: None,
+            remote_debug_sshfs_enabled: false,
+            remote_debug_mode: "readonly".to_string(),
+            remote_debug_access_mode: "readonly".to_string(),
+            remote_debug_remote: None,
+            remote_debug_mount_point: None,
+            remote_debug_overlay_dir: None,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
+        }
+    }
+
     #[test]
     fn first_email_address_handles_common_formats() {
         assert_eq!(
@@ -1051,6 +1080,289 @@ mod tests {
     #[test]
     fn parse_mx_records_handles_empty() {
         assert_eq!(parse_mx_records(""), None);
+    }
+
+    #[test]
+    fn cli_run_report_counts_result_statuses() {
+        let mut report = CliRunReport::default();
+        for status in ["processed", "skipped", "failed"] {
+            report.push_result(CliFileResult {
+                file_path: format!("{status}.eml"),
+                status: status.to_string(),
+                message: status.to_string(),
+                error_type: None,
+                processed_path: None,
+                simulation_logs: Vec::new(),
+            });
+        }
+
+        assert_eq!(report.scanned, 3);
+        assert_eq!(report.processed, 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.results.len(), 3);
+    }
+
+    #[test]
+    fn push_step_always_records_log_lines() {
+        let mut logs = Vec::new();
+        let options = CliProcessOptions {
+            keep_files: true,
+            simulate_agent: false,
+            simulate_rules: false,
+            simulate_memory: false,
+            as_user_email: None,
+            step: false,
+        };
+
+        push_step(&mut logs, &options, "loaded message");
+        assert_eq!(logs, vec!["loaded message".to_string()]);
+    }
+
+    #[test]
+    fn runtime_paths_remap_to_overlay_in_readonly_mode() {
+        let mut config = test_config();
+        assert_eq!(
+            resolve_runtime_path(&config, "data/mail_spool"),
+            PathBuf::from("data/mail_spool")
+        );
+
+        config.readonly_mode_enabled = true;
+        config.overlay_dir = Some("data/overlay".to_string());
+        assert_eq!(
+            resolve_runtime_path(&config, "/var/spool/mail"),
+            PathBuf::from("data/overlay/var/spool/mail")
+        );
+        assert_eq!(
+            resolve_runtime_dir(&config, "data/mail_spool"),
+            "data/overlay/data/mail_spool"
+        );
+        assert_eq!(
+            resolve_runtime_path(&config, "data/overlay/already"),
+            PathBuf::from("data/overlay/already")
+        );
+    }
+
+    #[test]
+    fn inline_body_collection_decodes_plain_and_html() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "To: user@example.com\r\n",
+            "Subject: bodies\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=\"b\"\r\n",
+            "\r\n",
+            "--b\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "plain body\r\n",
+            "--b\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>html body</p>\r\n",
+            "--b--\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("parse mail");
+        let bodies = collect_inline_text_bodies(&parsed);
+
+        assert_eq!(bodies.plain.as_deref().map(str::trim), Some("plain body"));
+        assert_eq!(
+            bodies.html.as_deref().map(str::trim),
+            Some("<p>html body</p>")
+        );
+        assert_eq!(
+            bodies.preferred_preview_source("fallback").trim(),
+            "plain body"
+        );
+        assert_eq!(bodies.ai_source("fallback").trim(), "plain body");
+    }
+
+    #[test]
+    fn inferred_attachment_filename_uses_mime_fallback() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "To: user@example.com\r\n",
+            "Subject: attachment\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: image/png\r\n",
+            "Content-Disposition: attachment\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "iVBORw0KGgo=\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("parse mail");
+        assert_eq!(infer_attachment_filename(&parsed, 7), "attachment_07.png");
+    }
+
+    #[test]
+    fn build_login_url_uses_public_url_when_present() {
+        let guard = ENV_LOCK.lock().expect("env lock");
+        let old_public_url = std::env::var("PUBLIC_URL").ok();
+        std::env::set_var("PUBLIC_URL", "https://mail.example.com/app/");
+
+        let url = build_login_url(&test_config(), "token-123");
+
+        match old_public_url {
+            Some(v) => std::env::set_var("PUBLIC_URL", v),
+            None => std::env::remove_var("PUBLIC_URL"),
+        }
+        drop(guard);
+
+        assert_eq!(url, "https://mail.example.com/app//login?token=token-123");
+    }
+
+    #[test]
+    fn extract_json_segment_handles_fenced_arrays_and_raw_text() {
+        assert_eq!(
+            extract_json_segment("before ```json\n[{\"a\":1}]\n``` after"),
+            "[{\"a\":1}]"
+        );
+        assert_eq!(
+            extract_json_segment("prefix [{\"b\":2}] suffix"),
+            "[{\"b\":2}]"
+        );
+        assert_eq!(extract_json_segment("  no json  "), "no json");
+    }
+
+    #[tokio::test]
+    async fn list_spool_eml_files_filters_and_sorts_eml_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-list-spool-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.expect("create root");
+        tokio::fs::write(root.join("b.eml"), "b")
+            .await
+            .expect("write b");
+        tokio::fs::write(root.join("a.eml"), "a")
+            .await
+            .expect("write a");
+        tokio::fs::write(root.join("note.txt"), "ignore")
+            .await
+            .expect("write txt");
+
+        let files = list_spool_eml_files(root.to_string_lossy().as_ref())
+            .await
+            .expect("list files");
+        let names: Vec<_> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|s| s.to_str()))
+            .collect();
+        assert_eq!(names, vec!["a.eml", "b.eml"]);
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn union_read_file_falls_back_to_readonly_base() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-union-read-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let base = root.join("base");
+        let overlay = root.join("overlay");
+        tokio::fs::create_dir_all(base.join("data/mail_spool"))
+            .await
+            .expect("create base spool");
+        tokio::fs::create_dir_all(overlay.join("data/mail_spool"))
+            .await
+            .expect("create overlay spool");
+        tokio::fs::write(base.join("data/mail_spool/base.eml"), "from base")
+            .await
+            .expect("write base");
+        tokio::fs::write(overlay.join("data/mail_spool/overlay.eml"), "from overlay")
+            .await
+            .expect("write overlay");
+
+        let mut config = test_config();
+        config.readonly_mode_enabled = true;
+        config.readonly_base = Some(base.to_string_lossy().to_string());
+        config.overlay_dir = Some(overlay.to_string_lossy().to_string());
+
+        let overlay_data = union_read_file(&config, &overlay.join("data/mail_spool/overlay.eml"))
+            .await
+            .expect("read overlay");
+        assert_eq!(overlay_data, b"from overlay");
+
+        let base_data = union_read_file(&config, &overlay.join("data/mail_spool/base.eml"))
+            .await
+            .expect("fallback to base");
+        assert_eq!(base_data, b"from base");
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_cli_target_path_supports_index_name_and_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-cli-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.expect("create root");
+        tokio::fs::write(root.join("one.eml"), "one")
+            .await
+            .expect("write one");
+        tokio::fs::write(root.join("two.eml"), "two")
+            .await
+            .expect("write two");
+
+        let config = test_config();
+        let by_index = resolve_cli_target_path(&config, root.to_string_lossy().as_ref(), "1")
+            .await
+            .expect("resolve index");
+        assert!(by_index.ends_with("two.eml"));
+
+        let by_name = resolve_cli_target_path(&config, root.to_string_lossy().as_ref(), "one.eml")
+            .await
+            .expect("resolve name");
+        assert!(by_name.ends_with("one.eml"));
+
+        let missing = resolve_cli_target_path(&config, root.to_string_lossy().as_ref(), "9").await;
+        assert!(missing.is_err());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn requeue_unknown_sender_errors_copies_known_artifacts() {
+        let root =
+            std::env::temp_dir().join(format!("ai-mail-butler-requeue-{}", uuid::Uuid::new_v4()));
+        let spool = root.join("spool");
+        let unknown = spool.join("unknown_sender");
+        tokio::fs::create_dir_all(&unknown)
+            .await
+            .expect("create unknown sender dir");
+        tokio::fs::write(unknown.join("mail.eml"), "raw mail")
+            .await
+            .expect("write unknown mail");
+
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        sqlx::query(
+            "INSERT INTO mail_errors (level, error_type, message, context) VALUES ('ERROR', 'unknown_sender', 'missing sender', ?)",
+        )
+        .bind("mail.eml")
+        .execute(&pool)
+        .await
+        .expect("insert mail error");
+
+        let copied = requeue_unknown_sender_errors(&pool, spool.to_string_lossy().as_ref())
+            .await
+            .expect("requeue");
+        assert_eq!(copied, 1);
+
+        let files = list_spool_eml_files(spool.to_string_lossy().as_ref())
+            .await
+            .expect("list spool");
+        assert_eq!(files.len(), 1);
+        assert!(files[0]
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .starts_with("retry_"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }
 

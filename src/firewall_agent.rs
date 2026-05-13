@@ -999,6 +999,143 @@ mod tests {
         assert!(validate_ip("mail.example.com").is_err());
     }
 
+    #[test]
+    fn backend_parser_accepts_aliases_and_serializes_names() {
+        assert_eq!(
+            HostFirewallBackend::parse("nft"),
+            HostFirewallBackend::Nftables
+        );
+        assert_eq!(
+            HostFirewallBackend::parse("docker-user"),
+            HostFirewallBackend::IptablesDockerUser
+        );
+        assert_eq!(
+            HostFirewallBackend::parse("iptables-input"),
+            HostFirewallBackend::IptablesInput
+        );
+        assert_eq!(
+            HostFirewallBackend::parse("unknown"),
+            HostFirewallBackend::Disabled
+        );
+
+        assert_eq!(HostFirewallBackend::Nftables.as_str(), "nftables");
+        assert_eq!(
+            HostFirewallBackend::IptablesDockerUser.as_str(),
+            "iptables_docker_user"
+        );
+        assert_eq!(
+            HostFirewallBackend::IptablesInput.as_str(),
+            "iptables_input"
+        );
+        assert_eq!(HostFirewallBackend::Disabled.as_str(), "disabled");
+    }
+
+    #[test]
+    fn private_or_local_detection_covers_ipv4_and_ipv6() {
+        assert!(is_private_or_local("10.10.0.1".parse().expect("ip")));
+        assert!(is_private_or_local("127.0.0.1".parse().expect("ip")));
+        assert!(is_private_or_local("169.254.1.1".parse().expect("ip")));
+        assert!(is_private_or_local("::1".parse().expect("ip")));
+        assert!(is_private_or_local("fd00::1".parse().expect("ip")));
+        assert!(!is_private_or_local("198.51.100.42".parse().expect("ip")));
+        assert!(!is_private_or_local("2001:db8::42".parse().expect("ip")));
+    }
+
+    #[test]
+    fn bool_and_quote_helpers_parse_common_yaml_values() {
+        assert!(parse_bool("true"));
+        assert!(parse_bool("YES"));
+        assert!(parse_bool("1"));
+        assert!(!parse_bool("false"));
+        assert!(!parse_bool("0"));
+        assert_eq!(unquote("'quoted value'"), "quoted value");
+        assert_eq!(unquote("\"quoted value\""), "quoted value");
+    }
+
+    #[test]
+    fn config_yaml_subset_updates_nested_scalars_and_lists() {
+        let mut config = FirewallAgentConfig::default();
+        config.apply_yaml_subset(
+            r#"
+firewall_agent:
+  enabled: false
+  socket_path: "/tmp/firewall.sock"
+  backend:
+    preferred: iptables-input
+    fallback: disabled
+  smtp:
+    ports:
+      - 25
+      - 2525
+  blocking:
+    default_duration: 30m
+    max_duration: 2h
+    allow_private_ip_blocking: true
+    allow_cidr_blocking: yes
+  whitelist:
+    - "203.0.113.7"
+  audit:
+    log_path: "/tmp/audit.jsonl"
+  state:
+    path: "/tmp/state.json"
+  cleanup:
+    interval_seconds: 5
+"#,
+        );
+
+        assert!(!config.enabled);
+        assert_eq!(config.socket_path, PathBuf::from("/tmp/firewall.sock"));
+        assert_eq!(config.preferred_backend, HostFirewallBackend::IptablesInput);
+        assert_eq!(config.fallback_backend, HostFirewallBackend::Disabled);
+        assert_eq!(config.smtp_ports, vec![25, 2525]);
+        assert_eq!(config.default_duration, "30m");
+        assert_eq!(config.max_duration, "2h");
+        assert!(config.allow_private_ip_blocking);
+        assert!(config.allow_cidr_blocking);
+        assert!(config.whitelist.contains(&"203.0.113.7".to_string()));
+        assert_eq!(config.audit_log_path, PathBuf::from("/tmp/audit.jsonl"));
+        assert_eq!(config.state_path, PathBuf::from("/tmp/state.json"));
+        assert_eq!(config.cleanup_interval_seconds, 5);
+    }
+
+    #[tokio::test]
+    async fn state_and_audit_helpers_round_trip_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-mail-butler-firewall-state-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state_path = root.join("nested").join("state.json");
+        let audit_path = root.join("audit").join("firewall.jsonl");
+
+        let ip: IpAddr = "198.51.100.42".parse().expect("ip");
+        let mut state = FirewallState::default();
+        state.blocked.insert(
+            ip,
+            BlockRecord {
+                ip,
+                reason: "too many SMTP failures".to_string(),
+                source: "test".to_string(),
+                backend: HostFirewallBackend::Disabled.as_str().to_string(),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            },
+        );
+
+        save_state(&state_path, &state).await.expect("save state");
+        let loaded = load_state(&state_path).await.expect("load state");
+        assert_eq!(loaded.blocked.len(), 1);
+        assert_eq!(
+            loaded.blocked.get(&ip).expect("record").reason,
+            state.blocked[&ip].reason
+        );
+
+        append_jsonl(&audit_path, "{\"event\":\"one\"}").await;
+        append_jsonl(&audit_path, "{\"event\":\"two\"}").await;
+        let audit = fs::read_to_string(&audit_path).await.expect("read audit");
+        assert_eq!(audit.lines().count(), 2);
+        assert!(audit.contains("\"event\":\"one\""));
+        assert!(audit.contains("\"event\":\"two\""));
+    }
+
     #[tokio::test]
     async fn whitelisted_block_is_rejected() {
         let agent = FirewallAgent::new(FirewallAgentConfig {
