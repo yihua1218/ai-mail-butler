@@ -28,10 +28,24 @@ Linux:
 ## Directory Strategy
 
 Mount the remote data root so the local debug runtime can see both the database and spool:
-- Remote: `/opt/ai-mail-butler/data`
+- Remote: the production data root, for example `/home/ec2-user/ai-mail-butler/ai-mail-butler-data`
 - Local mount point: `~/mnt/ai-mail-butler-data`
 
 This lets the app copy the remote `data.sqlite` into the local overlay database while reading remote files such as `mail_spool` through SSHFS.
+
+The current Docker Compose production data directory is host `./ai-mail-butler-data` mounted to container `/app/data`. With `REMOTE_DEBUG_MODE=overlay`, startup copies the base DB into an overlay DB. If `DATABASE_URL=sqlite:data/data.sqlite` and `OVERLAY_DIR=data/overlay`, the runtime DB is:
+
+```text
+data/overlay/data/data.sqlite
+```
+
+When debugging locally with synced remote data, check this first:
+
+```bash
+sqlite3 ai-mail-butler-data/overlay/data/data.sqlite 'select count(*) from emails;'
+```
+
+Do not rely only on `data/data.sqlite` or `ai-mail-butler-data/data.sqlite`; those may be stale local DBs or empty base DBs.
 
 ## Container Startup Mount
 
@@ -48,6 +62,10 @@ REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
 
 Use `REMOTE_DEBUG_MODE=overlay` for full remote-data debugging. The entrypoint sets `READONLY_MODE=true` and defaults `READONLY_BASE` to the SSHFS mount point, so `data.sqlite` is copied into the local overlay before startup and file reads fall back to the mounted remote data root. Use `REMOTE_DEBUG_MODE=readonly` only when you want the mount indicator without enabling the app overlay workflow.
 The Admin Dashboard also stores an admin-selected access posture (`readonly` by default, or `readwrite` for controlled retry windows). It reports intent only; the actual SSHFS mount/remount still happens outside the web app.
+
+The current Dashboard API also has a display fallback for empty email rows. If an `emails` row has empty `preview`, `stored_content`, `plain_content`, and `html_content`, the backend looks for the closest archived mail under `data/mail_spool/<user>/<message>/meta.txt` using user email, subject, and received time, then parses `raw.eml` or `body.txt` for display.
+
+Manual reprocessing through `/api/emails/process-manual` uses the same fallback so empty DB content does not cause finance extraction and rule matching to run against an empty preview.
 
 By default, `READONLY_MODE=true` also blocks write APIs. To keep overlay enabled while allowing writes into the local overlay database/files, set:
 
@@ -116,6 +134,37 @@ Suggested sequence:
 3. `process <index>` and capture result JSON
 4. Check generated report (`--report-json`) for `parse_error`, `unknown_sender`, and counts
 
+If Dashboard cannot show an email body, first inspect content lengths in the overlay DB:
+
+```bash
+sqlite3 ai-mail-butler-data/overlay/data/data.sqlite "
+select id, subject, status,
+       length(coalesce(preview,'')),
+       length(coalesce(stored_content,'')),
+       length(coalesce(plain_content,'')),
+       length(coalesce(html_content,'')),
+       received_at
+from emails
+where subject like '%keyword%'
+order by received_at desc
+limit 20;"
+```
+
+If all content lengths are 0, inspect the spool archive:
+
+```bash
+find ai-mail-butler-data/overlay/data/mail_spool -type f -name meta.txt \
+  -print | xargs rg -n "subject keyword"
+```
+
+Then verify the archived content:
+
+```bash
+wc -c path/to/message/raw.eml path/to/message/body.txt
+```
+
+If `raw.eml` or `body.txt` has content, the Dashboard fallback should display the mail.
+
 ## 5. Cross-check with Remote Logs
 
 Use SSH in a separate terminal:
@@ -180,3 +229,15 @@ If busy, close open terminals/editors using that path and retry.
 3. REPL one-file deep inspection
 4. Controlled read-write retry only if needed
 5. Unmount and document findings
+
+## Documentation and Implementation Drift
+
+Current implementation adds or clarifies:
+
+- Compose-first deployment: `docker-compose.yml` is the main entrypoint; SSHFS uses `docker-compose.sshfs.yml`.
+- Overlay DB path is derived from `DATABASE_URL` and `OVERLAY_DIR`; a common path is `data/overlay/data/data.sqlite`.
+- Dashboard falls back to archived `raw.eml` / `body.txt` for empty email-content rows.
+- Manual reprocessing reruns finance extraction, rule matching, and draft generation; it also uses archived-mail fallback when DB content is empty.
+- The web app only reports and stores remote debug posture; actual SSHFS mount/remount still happens in the entrypoint or system layer.
+
+See [Current Implementation and Execution Plan](IMPLEMENTATION-EXECUTION-PLAN.md).

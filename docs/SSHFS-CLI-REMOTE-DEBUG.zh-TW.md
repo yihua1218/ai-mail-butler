@@ -28,10 +28,24 @@ Linux：
 ## 掛載目錄建議
 
 建議掛載遠端 data root，讓本地除錯環境同時看到資料庫和 spool：
-- 遠端：`/opt/ai-mail-butler/data`
+- 遠端：production 實際 data root，例如 `/home/ec2-user/ai-mail-butler/ai-mail-butler-data`
 - 本地掛載點：`~/mnt/ai-mail-butler-data`
 
 這樣 app 啟動時可以把遠端 `data.sqlite` 複製成 local overlay DB，同時透過 SSHFS 讀取遠端 `mail_spool` 等檔案。
+
+目前 Docker Compose 的正式資料目錄是 host `./ai-mail-butler-data` 掛到容器 `/app/data`。若使用 `REMOTE_DEBUG_MODE=overlay`，程式啟動時會把 base DB 複製到 overlay DB；若 `DATABASE_URL=sqlite:data/data.sqlite` 且 `OVERLAY_DIR=data/overlay`，實際使用的 DB 會是：
+
+```text
+data/overlay/data/data.sqlite
+```
+
+如果你是在本地同步遠端資料除錯，請優先檢查：
+
+```bash
+sqlite3 ai-mail-butler-data/overlay/data/data.sqlite 'select count(*) from emails;'
+```
+
+不要只看 `data/data.sqlite` 或 `ai-mail-butler-data/data.sqlite`；那些可能是舊本地 DB 或空的 base DB。
 
 ## 容器啟動時自動掛載
 
@@ -46,6 +60,10 @@ REMOTE_DEBUG_OVERLAY_DIR=/tmp/ai-mail-butler-overlay
 ```
 
 `REMOTE_DEBUG_MODE=overlay` 會由 entrypoint 強制啟用 `READONLY_MODE=true`，並在 `READONLY_BASE` 未設定時自動指向 SSHFS 掛載點。程式會先把遠端 `data.sqlite` 複製到本地 overlay DB，後續寫入留在本地 overlay，檔案讀取則可 fallback 到遠端 data root。
+
+目前實作還有一個 Dashboard 顯示 fallback：如果 `emails` 表某筆信件的 `preview`、`stored_content`、`plain_content`、`html_content` 全部為空，Dashboard API 會用使用者信箱、主旨與接收時間，到 `data/mail_spool/<user>/<message>/meta.txt` 找最接近的 archived mail，並解析 `raw.eml` 或 `body.txt` 回傳給前端顯示。這是為了處理遠端同步資料中「DB 有信件列，但內容欄位空；mail_spool 仍有原始信」的情況。
+
+手動重新處理 `/api/emails/process-manual` 也會使用同樣 fallback，避免重新處理空內容信件時只拿空 `preview` 進行財務抽取與規則比對。
 
 預設情況下，`READONLY_MODE=true` 也會封鎖 Web 寫入 API。如果要維持 overlay，但允許寫入本地 overlay DB/檔案，請設定：
 
@@ -129,6 +147,37 @@ REPL 常用指令：
 3. 用 `process <index>` 觀察單封處理結果
 4. 檢查 `--report-json` 報表中的 `parse_error`、`unknown_sender` 與統計
 
+若 Dashboard 某封信看不到內容，請先查 overlay DB 內容長度：
+
+```bash
+sqlite3 ai-mail-butler-data/overlay/data/data.sqlite "
+select id, subject, status,
+       length(coalesce(preview,'')),
+       length(coalesce(stored_content,'')),
+       length(coalesce(plain_content,'')),
+       length(coalesce(html_content,'')),
+       received_at
+from emails
+where subject like '%關鍵字%'
+order by received_at desc
+limit 20;"
+```
+
+如果內容長度皆為 0，再檢查 spool archive：
+
+```bash
+find ai-mail-butler-data/overlay/data/mail_spool -type f -name meta.txt \
+  -print | xargs rg -n "主旨關鍵字"
+```
+
+找到對應目錄後確認：
+
+```bash
+wc -c path/to/message/raw.eml path/to/message/body.txt
+```
+
+只要 `raw.eml` 或 `body.txt` 有內容，新的 Dashboard fallback 應可顯示該信。
+
 ## 5. 對照遠端服務日誌
 
 另開一個終端 SSH 到遠端：
@@ -193,3 +242,15 @@ umount ~/mnt/ai-mail-butler-data
 3. 用 REPL 對單封深入分析
 4. 必要時才短時間切可寫重試
 5. 完成後卸載並整理結論
+
+## 文件與實作差異整理
+
+目前實作相較舊文件新增或修正：
+
+- Compose-first 部署：`docker-compose.yml` 是主要入口，SSHFS 用 `docker-compose.sshfs.yml` 疊加。
+- Overlay DB 實際位置依 `DATABASE_URL` 與 `OVERLAY_DIR` 組合決定，常見為 `data/overlay/data/data.sqlite`。
+- Dashboard 會對內容空白的信件嘗試從 archived `raw.eml` / `body.txt` fallback 顯示。
+- 手動重新處理會重新執行財務抽取、規則比對與草稿產生；若 DB 內容空，也會嘗試 archived mail fallback。
+- Web App 只顯示與記錄 remote debug posture；實際 SSHFS mount/remount 仍在 entrypoint 或系統層處理。
+
+後續執行計畫請見 [目前實作狀況與執行計畫](IMPLEMENTATION-EXECUTION-PLAN.zh-TW.md)。
