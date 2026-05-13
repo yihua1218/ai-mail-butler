@@ -80,10 +80,10 @@
 
 ### P2: 穩定重新處理流程
 
-- [ ] 後端回傳更標準化的 processing step keys 與 localized labels，前端只負責翻譯。
-- [ ] 針對手動重新處理補單元測試：財務 rollback、規則命中、草稿重建、archive fallback。
-- [ ] 針對同主旨短時間重複郵件，加入更嚴格的 archive matching 條件，例如 message id 或 archive message key。
-- [ ] 讓 Dashboard 可手動選擇「用哪個 archived raw mail 補這封 DB row」。
+- [x] 後端回傳標準化 processing step keys 與翻譯 key，Dashboard 在前端翻譯顯示文字。
+- [x] 針對手動重新處理補單元測試：財務 rollback、規則命中、草稿重建、archive fallback。
+- [x] 針對同主旨重複郵件，Dashboard 重新處理時會帶入目前顯示的 archived source path，避免再次只靠 subject/received_at 猜測。
+- [x] Dashboard 重新處理可把目前顯示的 archived raw/body path 傳給後端，後端會用該精確來源 hydrate 這封 DB row。
 
 ### P3: 部署與安全文件收斂
 

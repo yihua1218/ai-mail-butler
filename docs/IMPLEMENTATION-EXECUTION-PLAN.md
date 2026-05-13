@@ -80,10 +80,10 @@ This document summarizes the current implementation, the drift from older docume
 
 ### P2: Stabilize Reprocessing
 
-- [ ] Return standardized processing step keys and localized labels from backend.
-- [ ] Add tests for finance rollback, rule match, draft rebuild, and archive fallback.
-- [ ] Strengthen archive matching for duplicate subjects, using message ID or archive message key when possible.
-- [ ] Allow Dashboard to manually choose which archived raw mail hydrates a DB row.
+- [x] Return standardized processing step keys and translation keys from backend; Dashboard translates labels locally.
+- [x] Add tests for finance rollback, rule match, draft rebuild, and archive fallback.
+- [x] Strengthen duplicate-subject behavior by pinning reprocess requests to the archived source path already shown in Dashboard when available.
+- [x] Allow Dashboard reprocess to pass the displayed archived raw/body path so the backend hydrates the DB row from that exact source.
 
 ### P3: Consolidate Deployment and Security Docs
 

@@ -47,9 +47,11 @@ type ProcessingStepStatus = 'wait' | 'process' | 'finish' | 'error';
 
 type ProcessingStep = {
   key: string;
+  label_key?: string;
   label: string;
   status: ProcessingStepStatus;
   detail?: string;
+  metadata?: Record<string, unknown>;
 };
 
 type EmailProcessingState = {
@@ -654,6 +656,7 @@ const DashboardPage: React.FC = () => {
 
   const processEmail = async (emailId: string) => {
     if (!user?.email) return null;
+    const archivePath = personalEmails.find((row) => row.id === emailId)?.content_source_path;
     setExpandedEmailRowKeys((keys) => Array.from(new Set([...keys, emailId])));
     setEmailProcessingState(emailId, () => ({ running: true, steps: initialProcessingSteps() }));
 
@@ -662,6 +665,7 @@ const DashboardPage: React.FC = () => {
         email: user.email,
         email_ids: [emailId],
         force_reextract: true,
+        archive_path_by_email_id: archivePath ? { [emailId]: archivePath } : undefined,
       });
       const result = res.data?.results?.[0];
       const backendSteps = (result?.processing_steps || []) as ProcessingStep[];
@@ -1382,7 +1386,7 @@ const DashboardPage: React.FC = () => {
       color: step.status === 'error' ? 'red' : step.status === 'finish' ? 'green' : step.status === 'process' ? 'blue' : 'gray',
       children: (
         <div>
-          <div style={{ fontWeight: 600 }}>{step.label}</div>
+          <div style={{ fontWeight: 600 }}>{t(step.label_key || step.label || `processing_step_${step.key}`, { defaultValue: step.label || step.key })}</div>
           {step.detail ? <div style={{ color: '#86868b', marginTop: 2 }}>{step.detail}</div> : null}
         </div>
       ),
