@@ -3742,6 +3742,50 @@ mod web_tests {
         assert!(redacted.contains("[REDACTED_TOKEN]"));
     }
 
+    #[test]
+    fn sqlite_url_to_path_handles_common_url_shapes() {
+        assert_eq!(
+            sqlite_url_to_path("sqlite:data/data.sqlite"),
+            PathBuf::from("data/data.sqlite")
+        );
+        assert_eq!(
+            sqlite_url_to_path("sqlite:/app/data/data.sqlite"),
+            PathBuf::from("/app/data/data.sqlite")
+        );
+        assert_eq!(
+            sqlite_url_to_path("sqlite://data/data.sqlite"),
+            PathBuf::from("data/data.sqlite")
+        );
+    }
+
+    #[test]
+    fn resolve_overlay_relative_path_preserves_relative_and_flattens_absolute() {
+        assert_eq!(
+            resolve_overlay_relative_path(std::path::Path::new("data/data.sqlite")),
+            PathBuf::from("data/data.sqlite")
+        );
+        assert_eq!(
+            resolve_overlay_relative_path(std::path::Path::new("/app/data/data.sqlite")),
+            PathBuf::from("data.sqlite")
+        );
+    }
+
+    #[test]
+    fn processing_step_exposes_translation_key_and_metadata() {
+        let step = processing_step(
+            "finance_rules",
+            "finish",
+            "Extracted records",
+            serde_json::json!({ "count": 2 }),
+        );
+        assert_eq!(step["key"], "finance_rules");
+        assert_eq!(step["label_key"], "processing_step_finance_rules");
+        assert_eq!(step["label"], "processing_step_finance_rules");
+        assert_eq!(step["status"], "finish");
+        assert_eq!(step["detail"], "Extracted records");
+        assert_eq!(step["metadata"]["count"], 2);
+    }
+
     #[tokio::test]
     async fn capture_rule_from_chat_inserts_once_and_deduplicates() {
         let pool = SqlitePool::connect("sqlite::memory:")
