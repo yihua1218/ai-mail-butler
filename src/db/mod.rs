@@ -433,6 +433,33 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_logs_user_email_created ON email_processing_logs(user_id, email_id, created_at DESC)").execute(&pool).await;
 
+    // Live processing status for dashboard polling. Rows are overwritten as a run progresses and
+    // remain available briefly after completion so users can navigate away and return.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS email_processing_runs (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            email_id TEXT NOT NULL,
+            process_method TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result TEXT,
+            reason TEXT,
+            status_before TEXT,
+            status_after TEXT,
+            steps TEXT NOT NULL,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(email_id) REFERENCES emails(id)
+        );",
+    )
+    .execute(&pool)
+    .await?;
+
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_runs_user_email_updated ON email_processing_runs(user_id, email_id, updated_at DESC)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_runs_user_status_updated ON email_processing_runs(user_id, status, updated_at DESC)").execute(&pool).await;
+
     // Consent audit trail for legal proof (GDPR/CCPA compliance)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS consent_audit_trail (

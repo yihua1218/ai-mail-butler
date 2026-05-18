@@ -108,6 +108,22 @@ struct MonthlyFinanceSummaryRow {
     updated_at: String,
 }
 
+#[derive(sqlx::FromRow, Serialize)]
+struct EmailProcessingRunRow {
+    id: String,
+    email_id: String,
+    process_method: String,
+    status: String,
+    result: Option<String>,
+    reason: Option<String>,
+    status_before: Option<String>,
+    status_after: Option<String>,
+    steps: String,
+    started_at: Option<String>,
+    updated_at: Option<String>,
+    finished_at: Option<String>,
+}
+
 fn parse_training_consent_answer(message: &str) -> Option<bool> {
     let m = message.trim().to_lowercase();
     let yes_markers = [
@@ -1486,6 +1502,12 @@ struct ManualProcessRequest {
 }
 
 #[derive(Deserialize)]
+struct ProcessingRunsQuery {
+    email: Option<String>,
+    email_ids: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct RetryMailErrorRequest {
     email: String,
     error_id: i64,
@@ -1730,6 +1752,142 @@ fn processing_step(
         "detail": detail.into(),
         "metadata": metadata,
     })
+}
+
+fn default_processing_steps(force_reextract: bool) -> Vec<serde_json::Value> {
+    let reset_status = if force_reextract { "wait" } else { "finish" };
+    let reset_detail = if force_reextract {
+        "Waiting to reset previously derived data"
+    } else {
+        "No forced reprocess reset requested"
+    };
+    vec![
+        processing_step(
+            "submit",
+            "finish",
+            "Reprocess request accepted",
+            serde_json::json!({}),
+        ),
+        processing_step(
+            "load_email",
+            "wait",
+            "Waiting to load stored email row",
+            serde_json::json!({}),
+        ),
+        processing_step(
+            "reset_previous",
+            reset_status,
+            reset_detail,
+            serde_json::json!({ "force_reextract": force_reextract }),
+        ),
+        processing_step(
+            "source_fallback",
+            "wait",
+            "Use archived raw mail if stored content is empty",
+            serde_json::json!({}),
+        ),
+        processing_step(
+            "finance_rules",
+            "wait",
+            "Waiting to analyze financial records",
+            serde_json::json!({}),
+        ),
+        processing_step(
+            "match_rules",
+            "wait",
+            "Waiting to compare email processing rules",
+            serde_json::json!({}),
+        ),
+        processing_step(
+            "draft_reply",
+            "wait",
+            "Waiting to generate an auto-reply draft when a rule matches",
+            serde_json::json!({}),
+        ),
+        processing_step(
+            "finalize",
+            "wait",
+            "Waiting to save final email status",
+            serde_json::json!({}),
+        ),
+    ]
+}
+
+fn upsert_processing_step(steps: &mut Vec<serde_json::Value>, step: serde_json::Value) {
+    let key = step
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if let Some(existing) = steps
+        .iter_mut()
+        .find(|item| item.get("key").and_then(serde_json::Value::as_str) == Some(key))
+    {
+        *existing = step;
+    } else {
+        steps.push(step);
+    }
+}
+
+async fn create_processing_run(
+    pool: &SqlitePool,
+    user_id: &str,
+    email_id: &str,
+    process_method: &str,
+    force_reextract: bool,
+) -> Option<String> {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let steps = default_processing_steps(force_reextract);
+    let result = sqlx::query(
+        "INSERT INTO email_processing_runs
+         (id, user_id, email_id, process_method, status, steps)
+         VALUES (?, ?, ?, ?, 'running', ?)",
+    )
+    .bind(&run_id)
+    .bind(user_id)
+    .bind(email_id)
+    .bind(process_method)
+    .bind(serde_json::Value::Array(steps).to_string())
+    .execute(pool)
+    .await;
+
+    result.ok().map(|_| run_id)
+}
+
+async fn update_processing_run(
+    pool: &SqlitePool,
+    run_id: Option<&str>,
+    status: &str,
+    result: Option<&str>,
+    reason: Option<&str>,
+    status_before: Option<&str>,
+    status_after: Option<&str>,
+    steps: &[serde_json::Value],
+) {
+    let Some(run_id) = run_id else {
+        return;
+    };
+    let finished_at = if status == "running" {
+        None
+    } else {
+        Some(chrono::Utc::now().to_rfc3339())
+    };
+    let _ = sqlx::query(
+        "UPDATE email_processing_runs
+         SET status = ?, result = ?, reason = ?, status_before = COALESCE(?, status_before),
+             status_after = COALESCE(?, status_after), steps = ?, updated_at = CURRENT_TIMESTAMP,
+             finished_at = COALESCE(?, finished_at)
+         WHERE id = ?",
+    )
+    .bind(status)
+    .bind(result)
+    .bind(reason)
+    .bind(status_before)
+    .bind(status_after)
+    .bind(serde_json::Value::Array(steps.to_vec()).to_string())
+    .bind(finished_at)
+    .bind(run_id)
+    .execute(pool)
+    .await;
 }
 
 fn collect_mail_body_parts(
@@ -6227,10 +6385,11 @@ mod web_tests {
         let Json(resp) = post_manual_process_emails(State(state), Json(payload)).await;
         assert_eq!(resp["status"], "success");
         assert_eq!(resp["results"][0]["matched_rule_label"], "RULE-MOCK");
-        assert_eq!(
-            resp["results"][0]["processing_steps"][3]["label_key"],
-            "processing_step_match_rules"
-        );
+        assert!(resp["results"][0]["processing_steps"]
+            .as_array()
+            .expect("processing steps")
+            .iter()
+            .any(|step| step["label_key"] == "processing_step_match_rules"));
 
         let draft: (i64, Option<String>) = sqlx::query_as(
             "SELECT COUNT(*), MAX(reply_body) FROM auto_replies WHERE user_id = ? AND source_email_id = ? AND reply_status = 'draft'",
@@ -7083,21 +7242,83 @@ async fn post_manual_process_emails(
         } else {
             "manual_process"
         };
+        let run_id = create_processing_run(
+            &state.pool,
+            &user.id,
+            &email_id,
+            process_method,
+            force_reextract,
+        )
+        .await;
         let mut processing_steps = vec![processing_step(
-            "load_email",
+            "submit",
             "finish",
-            format!("Status before: {}", status),
-            serde_json::json!({ "status_before": status.clone() }),
+            "Reprocess request accepted",
+            serde_json::json!({ "run_id": run_id.clone() }),
         )];
+        upsert_processing_step(
+            &mut processing_steps,
+            processing_step(
+                "load_email",
+                "process",
+                "Loading stored email row and current status",
+                serde_json::json!({}),
+            ),
+        );
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "running",
+            None,
+            None,
+            None,
+            None,
+            &processing_steps,
+        )
+        .await;
+        upsert_processing_step(
+            &mut processing_steps,
+            processing_step(
+                "load_email",
+                "finish",
+                format!("Status before: {}", status),
+                serde_json::json!({ "status_before": status.clone() }),
+            ),
+        );
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "running",
+            None,
+            None,
+            Some(&status),
+            None,
+            &processing_steps,
+        )
+        .await;
 
         if status != "pending" && !force_reextract {
             skipped += 1;
-            processing_steps.push(processing_step(
-                "skip_status",
-                "finish",
-                "Status is not pending",
-                serde_json::json!({ "status": status.clone() }),
-            ));
+            upsert_processing_step(
+                &mut processing_steps,
+                processing_step(
+                    "skip_status",
+                    "finish",
+                    "Status is not pending",
+                    serde_json::json!({ "status": status.clone() }),
+                ),
+            );
+            update_processing_run(
+                &state.pool,
+                run_id.as_deref(),
+                "finished",
+                Some("skipped"),
+                Some("Status is not pending"),
+                Some(&status),
+                Some(&status),
+                &processing_steps,
+            )
+            .await;
             results.push(serde_json::json!({
                 "email_id": id,
                 "result": "skipped",
@@ -7122,6 +7343,26 @@ async fn post_manual_process_emails(
 
         let mut removed_finance_records = 0_i64;
         if force_reextract {
+            upsert_processing_step(
+                &mut processing_steps,
+                processing_step(
+                    "reset_previous",
+                    "process",
+                    "Removing previous finance records, draft replies, and matched rule label",
+                    serde_json::json!({}),
+                ),
+            );
+            update_processing_run(
+                &state.pool,
+                run_id.as_deref(),
+                "running",
+                None,
+                None,
+                Some(&status),
+                None,
+                &processing_steps,
+            )
+            .await;
             removed_finance_records =
                 rollback_financial_records_for_email(&state.pool, &user.id, &id).await;
             let _ = sqlx::query("DELETE FROM auto_replies WHERE user_id = ? AND source_email_id = ? AND reply_status = 'draft'")
@@ -7136,15 +7377,29 @@ async fn post_manual_process_emails(
             .bind(&user.id)
             .execute(&state.pool)
             .await;
-            processing_steps.push(processing_step(
-                "reset_previous",
-                "finish",
-                format!(
-                    "Removed {} finance records and old unsent drafts",
-                    removed_finance_records
+            upsert_processing_step(
+                &mut processing_steps,
+                processing_step(
+                    "reset_previous",
+                    "finish",
+                    format!(
+                        "Removed {} finance records and old unsent drafts",
+                        removed_finance_records
+                    ),
+                    serde_json::json!({ "removed_finance_records": removed_finance_records }),
                 ),
-                serde_json::json!({ "removed_finance_records": removed_finance_records }),
-            ));
+            );
+            update_processing_run(
+                &state.pool,
+                run_id.as_deref(),
+                "running",
+                None,
+                None,
+                Some(&status),
+                None,
+                &processing_steps,
+            )
+            .await;
         }
 
         let mut source_name = if plain_content
@@ -7177,6 +7432,26 @@ async fn post_manual_process_emails(
             .or(preview)
             .unwrap_or_default();
         if source_text.trim().is_empty() {
+            upsert_processing_step(
+                &mut processing_steps,
+                processing_step(
+                    "source_fallback",
+                    "process",
+                    "Stored email content is empty; looking for archived raw mail",
+                    serde_json::json!({}),
+                ),
+            );
+            update_processing_run(
+                &state.pool,
+                run_id.as_deref(),
+                "running",
+                None,
+                None,
+                Some(&status),
+                None,
+                &processing_steps,
+            )
+            .await;
             let override_archive = match payload
                 .archive_path_by_email_id
                 .as_ref()
@@ -7207,17 +7482,71 @@ async fn post_manual_process_emails(
             if let Some(archived) = archived {
                 source_text = archived.rendered.content;
                 source_name = archived.source.clone();
-                processing_steps.push(processing_step(
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "source_fallback",
+                        "finish",
+                        format!("Using {} from {}", source_name, archived.path.display()),
+                        serde_json::json!({
+                            "source": source_name.clone(),
+                            "path": archived.path.to_string_lossy(),
+                        }),
+                    ),
+                );
+            } else {
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "source_fallback",
+                        "finish",
+                        "No archived content found; continuing with empty content",
+                        serde_json::json!({}),
+                    ),
+                );
+            }
+            update_processing_run(
+                &state.pool,
+                run_id.as_deref(),
+                "running",
+                None,
+                None,
+                Some(&status),
+                None,
+                &processing_steps,
+            )
+            .await;
+        } else {
+            upsert_processing_step(
+                &mut processing_steps,
+                processing_step(
                     "source_fallback",
                     "finish",
-                    format!("Using {} from {}", source_name, archived.path.display()),
-                    serde_json::json!({
-                        "source": source_name.clone(),
-                        "path": archived.path.to_string_lossy(),
-                    }),
-                ));
-            }
+                    format!("Using stored {}", source_name),
+                    serde_json::json!({ "source": source_name.clone() }),
+                ),
+            );
         }
+        upsert_processing_step(
+            &mut processing_steps,
+            processing_step(
+                "finance_rules",
+                "process",
+                "Analyzing financial records with the active AI model",
+                serde_json::json!({ "source": source_name.clone() }),
+            ),
+        );
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "running",
+            None,
+            None,
+            Some(&status),
+            None,
+            &processing_steps,
+        )
+        .await;
         let extracted_finance_records = crate::mail::analyze_and_store_financial_records(
             &state.pool,
             &state.ai_client,
@@ -7228,18 +7557,32 @@ async fn post_manual_process_emails(
         )
         .await;
         let finance_records_after = count_financial_records(&state.pool, &user.id, &id).await;
-        processing_steps.push(processing_step(
-            "finance_rules",
-            "finish",
-            format!(
-                "Extracted {} finance records; total for this email is now {}",
-                extracted_finance_records, finance_records_after
+        upsert_processing_step(
+            &mut processing_steps,
+            processing_step(
+                "finance_rules",
+                "finish",
+                format!(
+                    "Extracted {} finance records; total for this email is now {}",
+                    extracted_finance_records, finance_records_after
+                ),
+                serde_json::json!({
+                    "extracted_finance_records": extracted_finance_records,
+                    "finance_records_after": finance_records_after,
+                }),
             ),
-            serde_json::json!({
-                "extracted_finance_records": extracted_finance_records,
-                "finance_records_after": finance_records_after,
-            }),
-        ));
+        );
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "running",
+            None,
+            None,
+            Some(&status),
+            None,
+            &processing_steps,
+        )
+        .await;
 
         let subject_text = subject.as_deref().unwrap_or("(no subject)");
         let original_from_text = original_from
@@ -7256,6 +7599,26 @@ async fn post_manual_process_emails(
 
         let mut matched_rule_label: Option<String> = None;
         let mut generated_reply_id: Option<String> = None;
+        upsert_processing_step(
+            &mut processing_steps,
+            processing_step(
+                "match_rules",
+                "process",
+                format!("Checking {} enabled rules", enabled_rule_count),
+                serde_json::json!({ "enabled_rule_count": enabled_rule_count }),
+            ),
+        );
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "running",
+            None,
+            None,
+            Some(&status),
+            None,
+            &processing_steps,
+        )
+        .await;
         match crate::services::EmailReplyService::find_matching_rule(
             &state.pool,
             &user.id,
@@ -7276,19 +7639,42 @@ async fn post_manual_process_emails(
                 .execute(&state.pool)
                 .await;
 
-                processing_steps.push(processing_step(
-                    "match_rules",
-                    "finish",
-                    format!(
-                        "Matched rule #{} [{}] from {} enabled rules",
-                        rule_id, rule_label, enabled_rule_count
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "match_rules",
+                        "finish",
+                        format!(
+                            "Matched rule #{} [{}] from {} enabled rules",
+                            rule_id, rule_label, enabled_rule_count
+                        ),
+                        serde_json::json!({
+                            "rule_id": rule_id,
+                            "rule_label": rule_label,
+                            "enabled_rule_count": enabled_rule_count,
+                        }),
                     ),
-                    serde_json::json!({
-                        "rule_id": rule_id,
-                        "rule_label": rule_label,
-                        "enabled_rule_count": enabled_rule_count,
-                    }),
-                ));
+                );
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "draft_reply",
+                        "process",
+                        format!("Generating draft reply for matched rule [{}]", rule_label),
+                        serde_json::json!({ "rule_id": rule_id, "rule_label": rule_label }),
+                    ),
+                );
+                update_processing_run(
+                    &state.pool,
+                    run_id.as_deref(),
+                    "running",
+                    None,
+                    None,
+                    Some(&status),
+                    None,
+                    &processing_steps,
+                )
+                .await;
 
                 match crate::services::EmailReplyService::generate_auto_reply(
                     &state.ai_client,
@@ -7315,50 +7701,105 @@ async fn post_manual_process_emails(
                         {
                             Ok(reply_id) => {
                                 generated_reply_id = Some(reply_id.clone());
-                                processing_steps.push(processing_step(
-                                    "draft_reply",
-                                    "finish",
-                                    format!("Draft saved: {}", reply_id),
-                                    serde_json::json!({ "reply_id": reply_id }),
-                                ));
+                                upsert_processing_step(
+                                    &mut processing_steps,
+                                    processing_step(
+                                        "draft_reply",
+                                        "finish",
+                                        format!("Draft saved: {}", reply_id),
+                                        serde_json::json!({ "reply_id": reply_id }),
+                                    ),
+                                );
                             }
                             Err(e) => {
-                                processing_steps.push(processing_step(
-                                    "draft_reply",
-                                    "error",
-                                    format!("Failed to save draft: {}", e),
-                                    serde_json::json!({ "error": e.to_string() }),
-                                ));
+                                upsert_processing_step(
+                                    &mut processing_steps,
+                                    processing_step(
+                                        "draft_reply",
+                                        "error",
+                                        format!("Failed to save draft: {}", e),
+                                        serde_json::json!({ "error": e.to_string() }),
+                                    ),
+                                );
                             }
                         }
                     }
                     Err(e) => {
-                        processing_steps.push(processing_step(
-                            "draft_reply",
-                            "error",
-                            format!("Failed to generate draft: {}", e),
-                            serde_json::json!({ "error": e.to_string() }),
-                        ));
+                        upsert_processing_step(
+                            &mut processing_steps,
+                            processing_step(
+                                "draft_reply",
+                                "error",
+                                format!("Failed to generate draft: {}", e),
+                                serde_json::json!({ "error": e.to_string() }),
+                            ),
+                        );
                     }
                 }
+                update_processing_run(
+                    &state.pool,
+                    run_id.as_deref(),
+                    "running",
+                    None,
+                    None,
+                    Some(&status),
+                    None,
+                    &processing_steps,
+                )
+                .await;
             }
             Ok(None) => {
-                processing_steps.push(processing_step(
-                    "match_rules",
-                    "finish",
-                    format!("No rule matched from {} enabled rules", enabled_rule_count),
-                    serde_json::json!({ "enabled_rule_count": enabled_rule_count }),
-                ));
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "match_rules",
+                        "finish",
+                        format!("No rule matched from {} enabled rules", enabled_rule_count),
+                        serde_json::json!({ "enabled_rule_count": enabled_rule_count }),
+                    ),
+                );
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "draft_reply",
+                        "finish",
+                        "No matching rule, so no reply draft was generated",
+                        serde_json::json!({}),
+                    ),
+                );
             }
             Err(e) => {
-                processing_steps.push(processing_step(
-                    "match_rules",
-                    "error",
-                    format!("Rule matching failed: {}", e),
-                    serde_json::json!({ "error": e.to_string() }),
-                ));
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "match_rules",
+                        "error",
+                        format!("Rule matching failed: {}", e),
+                        serde_json::json!({ "error": e.to_string() }),
+                    ),
+                );
+                upsert_processing_step(
+                    &mut processing_steps,
+                    processing_step(
+                        "draft_reply",
+                        "finish",
+                        "Skipped because rule matching failed",
+                        serde_json::json!({}),
+                    ),
+                );
             }
         }
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "running",
+            None,
+            None,
+            Some(&status),
+            None,
+            &processing_steps,
+        )
+        .await;
 
         let status_after = if status == "replied" {
             "replied"
@@ -7375,6 +7816,15 @@ async fn post_manual_process_emails(
             .bind(&id)
             .execute(&state.pool)
             .await;
+        upsert_processing_step(
+            &mut processing_steps,
+            processing_step(
+                "finalize",
+                "finish",
+                format!("Saved final status: {}", status_after),
+                serde_json::json!({ "status_after": status_after }),
+            ),
+        );
 
         processed += 1;
         log_email_processing(
@@ -7396,6 +7846,17 @@ async fn post_manual_process_emails(
                 "source": source_name,
                 "steps": processing_steps.clone(),
             }),
+        )
+        .await;
+        update_processing_run(
+            &state.pool,
+            run_id.as_deref(),
+            "finished",
+            Some("processed"),
+            None,
+            Some(&status),
+            Some(status_after),
+            &processing_steps,
         )
         .await;
         results.push(serde_json::json!({
@@ -7420,6 +7881,82 @@ async fn post_manual_process_emails(
         "failed": failed,
         "results": results,
     }))
+}
+
+async fn get_email_processing_runs(
+    State(state): State<AppState>,
+    Query(query): Query<ProcessingRunsQuery>,
+) -> Json<serde_json::Value> {
+    let Some(email) = query
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
+    };
+    let Some(user_id) = get_user_id_by_email(&state.pool, email).await else {
+        return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
+    };
+    let requested_ids = query
+        .email_ids
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<std::collections::HashSet<_>>();
+
+    let rows = sqlx::query_as::<_, EmailProcessingRunRow>(
+        "SELECT id, email_id, process_method, status, result, reason, status_before, status_after,
+                steps, CAST(started_at AS TEXT) as started_at, CAST(updated_at AS TEXT) as updated_at,
+                CAST(finished_at AS TEXT) as finished_at
+         FROM email_processing_runs
+         WHERE user_id = ?
+           AND (status = 'running' OR updated_at >= datetime('now', '-30 minutes'))
+         ORDER BY updated_at DESC
+         LIMIT 100",
+    )
+    .bind(&user_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut latest_by_email: HashMap<String, serde_json::Value> = HashMap::new();
+    for row in rows {
+        if !requested_ids.is_empty() && !requested_ids.contains(&row.email_id) {
+            continue;
+        }
+        if latest_by_email.contains_key(&row.email_id) {
+            continue;
+        }
+        let steps = serde_json::from_str::<serde_json::Value>(&row.steps)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        latest_by_email.insert(
+            row.email_id.clone(),
+            serde_json::json!({
+                "id": row.id,
+                "email_id": row.email_id,
+                "process_method": row.process_method,
+                "status": row.status,
+                "running": row.status == "running",
+                "result": row.result,
+                "reason": row.reason,
+                "status_before": row.status_before,
+                "status_after": row.status_after,
+                "steps": steps,
+                "started_at": row.started_at,
+                "updated_at": row.updated_at,
+                "finished_at": row.finished_at,
+            }),
+        );
+    }
+
+    let runs = latest_by_email.into_values().collect::<Vec<_>>();
+    Json(serde_json::json!({ "status": "success", "runs": runs }))
 }
 
 async fn get_finance_records(
@@ -8947,6 +9484,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/finance/records", get(get_finance_records))
         .route("/finance/monthly", get(get_finance_monthly))
         .route("/emails/process-manual", post(post_manual_process_emails))
+        .route("/emails/processing-runs", get(get_email_processing_runs))
         .route("/auto-replies", get(get_auto_replies))
         .route("/auto-replies/update", post(post_update_auto_reply))
         .route("/auto-replies/send", post(post_send_auto_reply))
