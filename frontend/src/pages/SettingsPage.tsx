@@ -66,6 +66,7 @@ const SettingsPage: React.FC = () => {
         email_format: user.email_format,
         mail_send_method: user.mail_send_method || 'direct_mx',
         rule_label_mode: user.rule_label_mode || 'ai_first',
+        unmatched_rule_guidance_enabled: !!user.unmatched_rule_guidance_enabled,
         training_data_consent: !!user.training_data_consent,
         timezone: user.timezone || 'UTC',
         preferred_language: user.preferred_language || 'en',
@@ -227,6 +228,15 @@ const SettingsPage: React.FC = () => {
                 <Radio value="ai_first">{t('rule_label_mode_ai_first')}</Radio>
                 <Radio value="deterministic_only">{t('rule_label_mode_deterministic')}</Radio>
               </Radio.Group>
+            </Form.Item>
+
+            <Form.Item
+              name="unmatched_rule_guidance_enabled"
+              label={t('unmatched_rule_guidance_label')}
+              valuePropName="checked"
+              tooltip={t('unmatched_rule_guidance_tooltip')}
+            >
+              <Switch />
             </Form.Item>
 
             <Form.Item

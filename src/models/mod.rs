@@ -39,6 +39,7 @@ pub struct User {
     pub time_format: String,
     #[serde(default = "default_date_format")]
     pub date_format: String,
+    pub unmatched_rule_guidance_enabled: Option<bool>,
 }
 
 fn default_both() -> String {
@@ -152,6 +153,7 @@ mod tests {
         assert_eq!(user.rule_label_mode, "ai_first");
         assert_eq!(user.time_format, "24h");
         assert_eq!(user.date_format, "auto");
+        assert_eq!(user.unmatched_rule_guidance_enabled, None);
     }
 
     #[test]

@@ -21,6 +21,7 @@ export const makeUser = (overrides: Partial<User> = {}): User => ({
   training_data_consent: false,
   training_consent_updated_at: null,
   rule_label_mode: 'ai_first',
+  unmatched_rule_guidance_enabled: false,
   time_format: '24h',
   date_format: 'auto',
   ...overrides,

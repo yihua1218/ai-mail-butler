@@ -103,6 +103,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT 'auto'")
         .execute(&pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN unmatched_rule_guidance_enabled BOOLEAN")
+        .execute(&pool)
+        .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS app_settings (

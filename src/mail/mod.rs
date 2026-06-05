@@ -773,8 +773,14 @@ fn extract_json_segment(raw: &str) -> String {
 fn should_send_unmatched_rule_guidance(
     financial_record_count: i64,
     handled_by_ai_rule: bool,
+    guidance_enabled: bool,
 ) -> bool {
-    financial_record_count == 0 && !handled_by_ai_rule
+    guidance_enabled && financial_record_count == 0 && !handled_by_ai_rule
+}
+
+fn unmatched_rule_guidance_enabled(user: &User, config: &Config) -> bool {
+    user.unmatched_rule_guidance_enabled
+        .unwrap_or(config.unmatched_rule_guidance_default)
 }
 
 pub(crate) async fn analyze_and_store_financial_records(
@@ -918,6 +924,7 @@ mod tests {
             remote_debug_overlay_dir: None,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
+            unmatched_rule_guidance_default: false,
         }
     }
 
@@ -958,6 +965,7 @@ mod tests {
             rule_label_mode: "local".to_string(),
             time_format: "24h".to_string(),
             date_format: "YYYY-MM-DD".to_string(),
+            unmatched_rule_guidance_enabled: None,
         }
     }
 
@@ -1194,17 +1202,22 @@ mod tests {
 
     #[test]
     fn unmatched_rule_guidance_is_skipped_after_financial_processing() {
-        assert!(!should_send_unmatched_rule_guidance(1, false));
+        assert!(!should_send_unmatched_rule_guidance(1, false, true));
     }
 
     #[test]
     fn unmatched_rule_guidance_is_skipped_after_ai_rule_processing() {
-        assert!(!should_send_unmatched_rule_guidance(0, true));
+        assert!(!should_send_unmatched_rule_guidance(0, true, true));
     }
 
     #[test]
-    fn unmatched_rule_guidance_is_sent_only_when_unhandled() {
-        assert!(should_send_unmatched_rule_guidance(0, false));
+    fn unmatched_rule_guidance_is_skipped_by_default() {
+        assert!(!should_send_unmatched_rule_guidance(0, false, false));
+    }
+
+    #[test]
+    fn unmatched_rule_guidance_is_sent_only_when_enabled_and_unhandled() {
+        assert!(should_send_unmatched_rule_guidance(0, false, true));
     }
 
     #[test]
@@ -3482,6 +3495,7 @@ impl MailService {
                                     } else if should_send_unmatched_rule_guidance(
                                         financial_record_count,
                                         matched_rule,
+                                        unmatched_rule_guidance_enabled(&u, &config),
                                     ) {
                                         let token = Uuid::new_v4().to_string();
                                         let _ = sqlx::query(

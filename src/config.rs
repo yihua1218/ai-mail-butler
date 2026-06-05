@@ -21,6 +21,7 @@ pub struct Config {
     pub remote_debug_overlay_dir: Option<String>,
     pub cloudflare_zone_id: Option<String>,
     pub cloudflare_api_token: Option<String>,
+    pub unmatched_rule_guidance_default: bool,
 }
 
 impl Config {
@@ -98,6 +99,9 @@ impl Config {
             cloudflare_api_token: std::env::var("CLOUDFLARE_API_TOKEN")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            unmatched_rule_guidance_default: Self::parse_bool_env(
+                "UNMATCHED_RULE_GUIDANCE_DEFAULT",
+            ),
         }
     }
 }
@@ -135,6 +139,7 @@ mod tests {
             "REMOTE_DEBUG_OVERLAY_DIR",
             "CLOUDFLARE_ZONE_ID",
             "CLOUDFLARE_API_TOKEN",
+            "UNMATCHED_RULE_GUIDANCE_DEFAULT",
         ] {
             std::env::remove_var(key);
         }
@@ -153,6 +158,7 @@ mod tests {
         assert!(!config.readonly_block_writes);
         assert_eq!(config.remote_debug_mode, "readonly");
         assert_eq!(config.remote_debug_access_mode, "readonly");
+        assert!(!config.unmatched_rule_guidance_default);
     }
 
     #[test]
@@ -176,6 +182,7 @@ mod tests {
         std::env::set_var("REMOTE_DEBUG_OVERLAY_DIR", "/tmp/remote-overlay");
         std::env::set_var("CLOUDFLARE_ZONE_ID", "zone-id");
         std::env::set_var("CLOUDFLARE_API_TOKEN", "token");
+        std::env::set_var("UNMATCHED_RULE_GUIDANCE_DEFAULT", "true");
 
         let config = Config::load();
         assert_eq!(config.database_url, "sqlite:/app/data/data.sqlite");
@@ -201,6 +208,7 @@ mod tests {
         );
         assert_eq!(config.cloudflare_zone_id.as_deref(), Some("zone-id"));
         assert_eq!(config.cloudflare_api_token.as_deref(), Some("token"));
+        assert!(config.unmatched_rule_guidance_default);
     }
 
     #[test]

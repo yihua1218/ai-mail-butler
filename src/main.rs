@@ -688,6 +688,7 @@ mod tests {
             remote_debug_overlay_dir: None,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
+            unmatched_rule_guidance_default: false,
         }
     }
 

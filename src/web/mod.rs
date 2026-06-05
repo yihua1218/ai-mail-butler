@@ -3833,6 +3833,7 @@ mod web_tests {
             remote_debug_overlay_dir: None,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
+            unmatched_rule_guidance_default: false,
         }
     }
 
@@ -3862,6 +3863,7 @@ mod web_tests {
             rule_label_mode: "local".to_string(),
             time_format: "24h".to_string(),
             date_format: "YYYY-MM-DD".to_string(),
+            unmatched_rule_guidance_enabled: None,
         }
     }
 
@@ -4664,6 +4666,7 @@ mod web_tests {
                 email_format: "html".to_string(),
                 mail_send_method: Some("relay".to_string()),
                 rule_label_mode: Some("deterministic_only".to_string()),
+                unmatched_rule_guidance_enabled: Some(true),
                 training_data_consent: true,
                 timezone: Some("Asia/Taipei".to_string()),
                 preferred_language: Some("zh-TW".to_string()),
@@ -6585,6 +6588,7 @@ struct SettingsRequest {
     email_format: String,
     mail_send_method: Option<String>,
     rule_label_mode: Option<String>,
+    unmatched_rule_guidance_enabled: Option<bool>,
     training_data_consent: bool,
     timezone: Option<String>,
     preferred_language: Option<String>,
@@ -6692,7 +6696,7 @@ async fn post_settings(
         .unwrap_or("auto")
         .to_string();
 
-    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, rule_label_mode = ?, training_data_consent = ?, \
+    let result = sqlx::query("UPDATE users SET auto_reply = ?, dry_run = ?, email_format = ?, mail_send_method = ?, rule_label_mode = ?, unmatched_rule_guidance_enabled = ?, training_data_consent = ?, \
                               training_consent_updated_at = CASE WHEN training_data_consent != ? THEN CURRENT_TIMESTAMP ELSE training_consent_updated_at END, \
                               timezone = ?, preferred_language = ?, display_name = ?, assistant_name_zh = ?, assistant_name_en = ?, assistant_tone_zh = ?, assistant_tone_en = ?, pdf_passwords = ?, time_format = ?, date_format = ? WHERE email = ?")
         .bind(payload.auto_reply)
@@ -6700,6 +6704,7 @@ async fn post_settings(
         .bind(&payload.email_format)
         .bind(&mail_send_method)
         .bind(&rule_label_mode)
+        .bind(payload.unmatched_rule_guidance_enabled.unwrap_or(false))
         .bind(payload.training_data_consent)
         .bind(payload.training_data_consent)
         .bind(&timezone)
