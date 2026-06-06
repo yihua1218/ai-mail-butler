@@ -7552,15 +7552,18 @@ async fn post_manual_process_emails(
             &processing_steps,
         )
         .await;
-        let extracted_finance_records = crate::mail::analyze_and_store_financial_records(
-            &state.pool,
-            &state.ai_client,
-            &user,
-            &id,
-            subject.as_deref().unwrap_or("(no subject)"),
-            &source_text,
-        )
-        .await;
+        let default_month_key = crate::mail::month_key_from_timestamp(received_at.as_deref());
+        let extracted_finance_records =
+            crate::mail::analyze_and_store_financial_records_with_month(
+                &state.pool,
+                &state.ai_client,
+                &user,
+                &id,
+                subject.as_deref().unwrap_or("(no subject)"),
+                &source_text,
+                default_month_key.as_deref(),
+            )
+            .await;
         let finance_records_after = count_financial_records(&state.pool, &user.id, &id).await;
         upsert_processing_step(
             &mut processing_steps,
