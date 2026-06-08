@@ -1635,6 +1635,222 @@ mod tests {
         let _ = tokio::fs::remove_file(&tmp_db).await;
     }
 
+    async fn rollback_test_financial_records_for_email(
+        pool: &SqlitePool,
+        user_id: &str,
+        email_id: &str,
+    ) {
+        let rows = sqlx::query_as::<_, (String, String, f64)>(
+            "SELECT month_key, category, SUM(amount) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
+        )
+        .bind(user_id)
+        .bind(email_id)
+        .fetch_all(pool)
+        .await
+        .expect("load existing finance records");
+
+        for (month_key, category, amount) in rows {
+            sqlx::query(
+                "UPDATE monthly_finance_summary
+                 SET total_amount = MAX(total_amount - ?, 0), updated_at = CURRENT_TIMESTAMP
+                 WHERE user_id = ? AND month_key = ? AND category = ?",
+            )
+            .bind(amount)
+            .bind(user_id)
+            .bind(&month_key)
+            .bind(&category)
+            .execute(pool)
+            .await
+            .expect("rollback monthly finance summary");
+
+            sqlx::query(
+                "DELETE FROM monthly_finance_summary
+                 WHERE user_id = ? AND month_key = ? AND category = ? AND total_amount <= 0.00001",
+            )
+            .bind(user_id)
+            .bind(&month_key)
+            .bind(&category)
+            .execute(pool)
+            .await
+            .expect("remove empty monthly finance summary row");
+        }
+
+        sqlx::query("DELETE FROM email_financial_records WHERE user_id = ? AND email_id = ?")
+            .bind(user_id)
+            .bind(email_id)
+            .execute(pool)
+            .await
+            .expect("delete existing finance records");
+    }
+
+    fn parse_test_received_at(raw: &str) -> Option<chrono::DateTime<Utc>> {
+        if let Ok(value) = chrono::DateTime::parse_from_rfc3339(raw.trim()) {
+            return Some(value.with_timezone(&Utc));
+        }
+        chrono::NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%d %H:%M:%S")
+            .ok()
+            .map(|value| value.and_utc())
+    }
+
+    fn read_archived_test_body(
+        mail_spool_dir: &Path,
+        user_email: &str,
+        subject: &str,
+        received_at: Option<&str>,
+    ) -> Option<String> {
+        let user_spool_dir = mail_spool_dir.join(user_email);
+        let target_time = received_at.and_then(parse_test_received_at);
+        let mut best: Option<(i64, PathBuf)> = None;
+
+        for entry in std::fs::read_dir(user_spool_dir).ok()?.flatten() {
+            let archive_dir = entry.path();
+            let meta_path = archive_dir.join("meta.txt");
+            let Ok(meta) = std::fs::read_to_string(&meta_path) else {
+                continue;
+            };
+            if !meta
+                .lines()
+                .any(|line| line.strip_prefix("subject: ") == Some(subject))
+            {
+                continue;
+            }
+
+            let archive_time = meta
+                .lines()
+                .find_map(|line| line.strip_prefix("received_at: "))
+                .and_then(parse_test_received_at);
+            let distance = match (target_time, archive_time) {
+                (Some(target), Some(archive)) => {
+                    target.signed_duration_since(archive).num_seconds().abs()
+                }
+                _ => 0,
+            };
+
+            match &best {
+                Some((best_distance, _)) if *best_distance <= distance => {}
+                _ => best = Some((distance, archive_dir)),
+            }
+        }
+
+        let (_, archive_dir) = best?;
+        let body_path = archive_dir.join("body.txt");
+        std::fs::read_to_string(&body_path)
+            .ok()
+            .filter(|content| !content.trim().is_empty())
+            .or_else(|| {
+                let decoded_parts_dir = archive_dir.join("decoded_parts");
+                std::fs::read_dir(decoded_parts_dir)
+                    .ok()?
+                    .flatten()
+                    .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                    .find(|content| !content.trim().is_empty())
+            })
+            .or_else(|| std::fs::read_to_string(archive_dir.join("raw.eml")).ok())
+    }
+
+    #[tokio::test]
+    #[ignore = "updates local synced overlay DB under ai-mail-butler-data/overlay"]
+    async fn local_synced_overlay_backfills_all_yihua_uber_finance_records() {
+        let source_db = Path::new("ai-mail-butler-data/overlay/data/data.sqlite");
+        assert!(
+            source_db.exists(),
+            "local synced overlay DB not found at {}",
+            source_db.display()
+        );
+
+        let database_url = format!("sqlite:{}", source_db.display());
+        let pool = crate::db::connect(&database_url)
+            .await
+            .expect("connect local synced overlay DB");
+
+        let user: User = sqlx::query_as("SELECT * FROM users WHERE email = ?")
+            .bind("yihua1218@gmail.com")
+            .fetch_one(&pool)
+            .await
+            .expect("load yihua user");
+        let mail_spool_dir = Path::new("ai-mail-butler-data/overlay/data/mail_spool");
+
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, subject, stored_content, CAST(received_at AS TEXT)
+             FROM emails
+             WHERE user_id = ?
+               AND (
+                    subject LIKE '%Uber%'
+                 OR subject LIKE '%Eats%'
+                 OR original_from LIKE '%uber%'
+               )
+             ORDER BY received_at ASC",
+        )
+        .bind(&user.id)
+        .fetch_all(&pool)
+        .await
+        .expect("load yihua uber emails");
+
+        assert!(!rows.is_empty(), "expected yihua Uber fixture emails");
+
+        let mut inserted_total = 0_i64;
+        let mut processed_email_count = 0_i64;
+        let mut failures = Vec::new();
+        let mut missing_sources = Vec::new();
+        for (email_id, subject, stored_content, received_at) in rows {
+            rollback_test_financial_records_for_email(&pool, &user.id, &email_id).await;
+
+            let content = if stored_content.trim().is_empty() {
+                match read_archived_test_body(
+                    mail_spool_dir,
+                    &user.email,
+                    &subject,
+                    received_at.as_deref(),
+                ) {
+                    Some(content) if !content.trim().is_empty() => content,
+                    _ => {
+                        missing_sources.push(format!("{email_id}: {subject}"));
+                        continue;
+                    }
+                }
+            } else {
+                stored_content
+            };
+            let entries = extract_vendor_financial_entries(&subject, &content);
+            if entries.is_empty() {
+                failures.push(format!("{email_id}: {subject}"));
+                continue;
+            }
+
+            let month_key = month_key_from_timestamp(received_at.as_deref())
+                .unwrap_or_else(|| Utc::now().format("%Y-%m").to_string());
+            let inserted =
+                store_financial_entries(&pool, &user, &email_id, &subject, entries, &month_key)
+                    .await;
+            if inserted == 0 {
+                failures.push(format!("{email_id}: {subject}"));
+                continue;
+            }
+            processed_email_count += 1;
+            inserted_total += inserted;
+        }
+
+        assert!(
+            failures.is_empty(),
+            "failed to parse or store Uber finance entries:\n{}",
+            failures.join("\n")
+        );
+        assert!(
+            processed_email_count > 0,
+            "expected at least one processable Uber email"
+        );
+        assert!(
+            inserted_total >= processed_email_count,
+            "expected at least one finance record per processed Uber email"
+        );
+        if !missing_sources.is_empty() {
+            eprintln!(
+                "skipped Uber emails without DB or archived content:\n{}",
+                missing_sources.join("\n")
+            );
+        }
+    }
+
     #[test]
     fn unmatched_rule_guidance_is_skipped_after_financial_processing() {
         assert!(!should_send_unmatched_rule_guidance(1, false, true));
