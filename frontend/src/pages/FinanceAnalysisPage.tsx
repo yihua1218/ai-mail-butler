@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Empty, Segmented, Space, Table, Tag, Typography, type TableColumnsType } from 'antd';
+import { Alert, Button, Card, Empty, Select, Segmented, Space, Table, Tag, Typography, type TableColumnsType } from 'antd';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -33,6 +33,7 @@ type MonthlyFinance = {
 };
 
 type DailyFinanceChartMode = 'expense' | 'both' | 'income';
+type ExpensePeriodMode = 'week' | 'month' | 'quarter' | 'year';
 
 const PIE_COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2', '#a0d911'];
 const FINANCE_CARD_COLLAPSE_KEY = 'ai_mail_butler_finance_collapsed_cards';
@@ -45,6 +46,8 @@ const FinanceAnalysisPage: React.FC = () => {
   const [records, setRecords] = useState<FinanceRecord[]>([]);
   const [monthly, setMonthly] = useState<MonthlyFinance[]>([]);
   const [dailyChartMode, setDailyChartMode] = useState<DailyFinanceChartMode>('expense');
+  const [expensePeriodMode, setExpensePeriodMode] = useState<ExpensePeriodMode>('week');
+  const [selectedMonthKey, setSelectedMonthKey] = useState<string>('');
   const [selectedDailyKey, setSelectedDailyKey] = useState<string>('');
   const [recordPagination, setRecordPagination] = useState({ current: 1, pageSize: 10 });
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>(() => {
@@ -143,6 +146,16 @@ const FinanceAnalysisPage: React.FC = () => {
     return Number.isNaN(date.getTime()) ? '' : getDayKey(date);
   };
 
+  const getFinanceMonthKey = (row: FinanceRecord) => row.transaction_month_key || row.month_key;
+
+  const isExpenseRecord = (row: FinanceRecord) => (
+    row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill'
+  );
+
+  const isIncomeRecord = (row: FinanceRecord) => (
+    row.direction === 'income' || row.direction === 'deposit' || row.category === 'income' || row.category === 'deposit'
+  );
+
   const formatDayKey = (dayKey: string) => {
     if (!dayKey) return '';
     const [year, month, day] = dayKey.split('-');
@@ -228,18 +241,37 @@ const FinanceAnalysisPage: React.FC = () => {
     return `${year}-${month}`;
   }, [user?.timezone]);
 
+  const availableMonthKeys = useMemo(() => {
+    const keys = new Set<string>();
+    monthly.forEach((row) => {
+      if (/^\d{4}-\d{2}$/.test(row.month_key)) keys.add(row.month_key);
+    });
+    records.forEach((row) => {
+      const key = getFinanceMonthKey(row);
+      if (/^\d{4}-\d{2}$/.test(key)) keys.add(key);
+    });
+    keys.add(currentMonthKey);
+    return Array.from(keys).sort((a, b) => b.localeCompare(a));
+  }, [monthly, records, currentMonthKey]);
+
+  useEffect(() => {
+    setSelectedMonthKey((current) => current || currentMonthKey);
+  }, [currentMonthKey]);
+
+  const selectedIncomeExpenseMonthKey = selectedMonthKey || currentMonthKey;
+
   const incomeExpensePieData = useMemo(() => {
     const totals = new Map<string, number>([
       ['income', 0],
       ['expense', 0],
     ]);
     records
-      .filter((row) => (row.transaction_month_key || row.month_key) === currentMonthKey)
+      .filter((row) => getFinanceMonthKey(row) === selectedIncomeExpenseMonthKey)
       .forEach((row) => {
         const amount = Math.abs(Number(row.amount) || 0);
-        if (row.direction === 'income' || row.direction === 'deposit' || row.category === 'income' || row.category === 'deposit') {
+        if (isIncomeRecord(row)) {
           totals.set('income', (totals.get('income') || 0) + amount);
-        } else if (row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill') {
+        } else if (isExpenseRecord(row)) {
           totals.set('expense', (totals.get('expense') || 0) + amount);
         }
       });
@@ -251,7 +283,7 @@ const FinanceAnalysisPage: React.FC = () => {
       .map(([category, value]) => ({ category, value, color: colors[category] || PIE_COLORS[0] }))
       .filter((item) => item.value > 0)
       .sort((a, b) => b.value - a.value);
-  }, [records, currentMonthKey]);
+  }, [records, selectedIncomeExpenseMonthKey]);
 
   const incomeExpensePieTotal = incomeExpensePieData.reduce((sum, item) => sum + item.value, 0);
   const pieBackground = incomeExpensePieData.reduce<{ cursor: number; segments: string[] }>((acc, item) => {
@@ -280,8 +312,8 @@ const FinanceAnalysisPage: React.FC = () => {
     dayKeys.forEach((key) => totals.set(key, { income: 0, expense: 0 }));
 
     records.forEach((row) => {
-      const isExpense = row.direction === 'expense' || row.category === 'expense' || row.finance_type === 'bill';
-      const isIncome = row.direction === 'income' || row.direction === 'deposit' || row.category === 'income' || row.category === 'deposit';
+      const isExpense = isExpenseRecord(row);
+      const isIncome = isIncomeRecord(row);
       if (!isExpense && !isIncome) return;
       const amount = Math.abs(Number(row.amount) || 0);
       if (!amount) return;
@@ -339,6 +371,80 @@ const FinanceAnalysisPage: React.FC = () => {
     }
     return [{ key: 'expense', label: t('finance_chart_expense'), className: 'expense' }];
   }, [dailyChartMode, t]);
+
+  const expensePeriodSummary = useMemo(() => {
+    const timezone = user?.timezone || 'UTC';
+    const dayFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const labelLocale = i18n.language === 'zh-TW' ? 'zh-TW' : 'en-US';
+    const displayMonthFormatter = new Intl.DateTimeFormat(labelLocale, {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'short',
+    });
+
+    const weekStartKey = (date: Date) => {
+      const localDayKey = dayFormatter.format(date);
+      const [year, month, day] = localDayKey.split('-').map(Number);
+      const localDate = new Date(Date.UTC(year, month - 1, day));
+      const dayOfWeek = localDate.getUTCDay();
+      const diffToMonday = (dayOfWeek + 6) % 7;
+      localDate.setUTCDate(localDate.getUTCDate() - diffToMonday);
+      return localDate.toISOString().slice(0, 10);
+    };
+
+    const periodRows = new Map<string, { key: string; label: string; amount: number }>();
+    records.forEach((row) => {
+      if (!isExpenseRecord(row)) return;
+      const amount = Math.abs(Number(row.amount) || 0);
+      if (!amount) return;
+
+      let key = '';
+      let label = '';
+      if (expensePeriodMode === 'week') {
+        const iso = row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`;
+        const date = new Date(iso);
+        if (Number.isNaN(date.getTime())) return;
+        key = weekStartKey(date);
+        label = t('finance_period_week_label', { date: formatDayKey(key) });
+      } else {
+        const monthKey = getFinanceMonthKey(row);
+        if (!/^\d{4}-\d{2}$/.test(monthKey)) return;
+        const [year, month] = monthKey.split('-').map(Number);
+        if (expensePeriodMode === 'month') {
+          key = monthKey;
+          label = displayMonthFormatter.format(new Date(Date.UTC(year, month - 1, 1)));
+        } else if (expensePeriodMode === 'quarter') {
+          const quarter = Math.floor((month - 1) / 3) + 1;
+          key = `${year}-Q${quarter}`;
+          label = t('finance_period_quarter_label', { year, quarter });
+        } else {
+          key = String(year);
+          label = String(year);
+        }
+      }
+
+      const current = periodRows.get(key) || { key, label, amount: 0 };
+      periodRows.set(key, { ...current, amount: current.amount + amount });
+    });
+
+    const bars = Array.from(periodRows.values()).sort((a, b) => a.key.localeCompare(b.key)).slice(-12);
+    const maxValue = bars.reduce((max, item) => Math.max(max, item.amount), 0);
+    const niceMaxValue = (() => {
+      if (maxValue <= 0) return 0;
+      const exponent = Math.floor(Math.log10(maxValue));
+      const magnitude = 10 ** exponent;
+      const normalized = maxValue / magnitude;
+      const niceNormalized = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+      return niceNormalized * magnitude;
+    })();
+    const yAxisTicks = Array.from({ length: 5 }, (_, index) => Math.round(niceMaxValue * ((4 - index) / 4)));
+    return { bars, maxValue: niceMaxValue, yAxisTicks };
+  }, [records, user?.timezone, i18n.language, expensePeriodMode, dayKeyFormatter, t]);
 
   useEffect(() => {
     setRecordPagination((prev) => ({ ...prev, current: 1 }));
@@ -407,12 +513,24 @@ const FinanceAnalysisPage: React.FC = () => {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <CollapsibleCard storageKey="income-expense-ratio" title={t('finance_income_expense_pie')}>
+      <CollapsibleCard
+        storageKey="income-expense-ratio"
+        title={t('finance_income_expense_pie')}
+        extra={
+          <Select
+            size="small"
+            value={selectedIncomeExpenseMonthKey}
+            style={{ minWidth: 120 }}
+            onChange={setSelectedMonthKey}
+            options={availableMonthKeys.map((key) => ({ label: key, value: key }))}
+          />
+        }
+      >
         {incomeExpensePieData.length > 0 ? (
           <div className="finance-pie-layout">
             <div className="finance-pie-chart" style={{ background: `conic-gradient(${pieBackground})` }}>
               <div className="finance-pie-center">
-                <Text type="secondary">{currentMonthKey}</Text>
+                <Text type="secondary">{selectedIncomeExpenseMonthKey}</Text>
                 <strong>{incomeExpensePieTotal.toLocaleString()}</strong>
               </div>
             </div>
@@ -430,6 +548,62 @@ const FinanceAnalysisPage: React.FC = () => {
           </div>
         ) : (
           <Empty description={t('finance_no_income_expense_mix')} />
+        )}
+      </CollapsibleCard>
+      <CollapsibleCard
+        storageKey="expense-period-summary"
+        title={t('finance_expense_period_summary')}
+        extra={
+          <Segmented
+            size="small"
+            value={expensePeriodMode}
+            onChange={(value) => setExpensePeriodMode(value as ExpensePeriodMode)}
+            options={[
+              { label: t('finance_period_week'), value: 'week' },
+              { label: t('finance_period_month'), value: 'month' },
+              { label: t('finance_period_quarter'), value: 'quarter' },
+              { label: t('finance_period_year'), value: 'year' },
+            ]}
+          />
+        }
+      >
+        {expensePeriodSummary.maxValue > 0 ? (
+          <div className="finance-bar-chart-scroll">
+            <div className="finance-bar-chart">
+              <div className="finance-bar-y-axis" aria-hidden="true">
+                {expensePeriodSummary.yAxisTicks.map((tick, index) => (
+                  <span key={`${tick}-${index}`}>{tick.toLocaleString()}</span>
+                ))}
+              </div>
+              <div className="finance-bar-plot">
+                <div className="finance-bar-grid" aria-hidden="true">
+                  {expensePeriodSummary.yAxisTicks.map((tick, index) => (
+                    <span key={`${tick}-${index}`} />
+                  ))}
+                </div>
+                <div className="finance-bar-chart-layout finance-period-chart-layout" style={{ '--finance-period-columns': expensePeriodSummary.bars.length } as React.CSSProperties}>
+                  {expensePeriodSummary.bars.map((item) => {
+                    const heightPercent = expensePeriodSummary.maxValue > 0
+                      ? Math.max(4, Math.round((item.amount / expensePeriodSummary.maxValue) * 100))
+                      : 0;
+                    const tooltip = `${item.label}: ${item.amount.toLocaleString()}`;
+                    return (
+                      <div className="finance-bar-column" key={item.key} title={tooltip}>
+                        <div className="finance-bar-series is-single">
+                          <div className="finance-bar-track" data-tooltip={tooltip} aria-label={tooltip}>
+                            <div className="finance-bar-fill expense" style={{ height: `${heightPercent}%` }} />
+                          </div>
+                        </div>
+                        <span className="finance-bar-label">{item.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <Empty description={t('finance_no_expense_period_data')} />
         )}
       </CollapsibleCard>
       <CollapsibleCard

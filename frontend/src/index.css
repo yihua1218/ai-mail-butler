@@ -126,6 +126,10 @@ body {
   z-index: 1;
 }
 
+.finance-period-chart-layout {
+  grid-template-columns: repeat(var(--finance-period-columns, 12), minmax(42px, 1fr));
+}
+
 .finance-bar-column {
   display: grid;
   grid-template-rows: 180px 18px;
@@ -230,6 +234,10 @@ body {
     grid-template-columns: repeat(30, minmax(8px, 1fr));
     gap: 4px;
     padding-bottom: 10px;
+  }
+
+  .finance-period-chart-layout {
+    grid-template-columns: repeat(var(--finance-period-columns, 12), minmax(46px, 1fr));
   }
 
   .finance-bar-column {
