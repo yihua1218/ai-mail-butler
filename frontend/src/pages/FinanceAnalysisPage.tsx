@@ -201,6 +201,23 @@ const FinanceAnalysisPage: React.FC = () => {
     return 'blue';
   };
 
+  const humanizeFinanceLabel = (value?: string) => {
+    if (!value) return '-';
+    return value
+      .split('_')
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  };
+
+  const financeCategoryLabel = (value?: string) => (
+    value ? t(`finance_cat_${value}`, { defaultValue: humanizeFinanceLabel(value) }) : '-'
+  );
+
+  const financeDirectionLabel = (value?: string) => (
+    value ? t(`finance_dir_${value}`, { defaultValue: humanizeFinanceLabel(value) }) : '-'
+  );
+
   const linkedEmailId = emailIdFromQuery || highlightedEmailIdFromQuery;
   const linkedRecord = linkedEmailId ? records.find((row) => row.email_id === linkedEmailId) : undefined;
   const linkedSubject = linkedRecord?.subject || subjectFromQuery || linkedEmailId;
@@ -460,7 +477,7 @@ const FinanceAnalysisPage: React.FC = () => {
 
   const monthlyColumns: TableColumnsType<MonthlyFinance> = [
     { title: t('finance_month_col'), dataIndex: 'month_key', key: 'month_key', width: 120 },
-    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color={monthlyCategoryColor(v)}>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
+    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag color={monthlyCategoryColor(v)}>{financeCategoryLabel(v)}</Tag> },
     { title: t('finance_total_amount_col'), dataIndex: 'total_amount', key: 'total_amount', width: 180, render: (v: number) => v?.toLocaleString() ?? '0' },
     { title: t('finance_updated_at_col'), dataIndex: 'updated_at', key: 'updated_at', width: 200, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
   ];
@@ -487,9 +504,9 @@ const FinanceAnalysisPage: React.FC = () => {
     { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
     { title: t('finance_subject_col'), dataIndex: 'subject', key: 'subject', ellipsis: true },
     { title: t('finance_reason_col'), dataIndex: 'reason', key: 'reason', ellipsis: true },
-    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 120, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> : '-' },
-    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{t(`finance_cat_${v}`, { defaultValue: v })}</Tag> },
-    { title: t('finance_direction_col'), dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{t(`finance_dir_${v}`, { defaultValue: v })}</Tag> },
+    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 160, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{financeCategoryLabel(v)}</Tag> : '-' },
+    { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{financeCategoryLabel(v)}</Tag> },
+    { title: t('finance_direction_col'), dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{financeDirectionLabel(v)}</Tag> },
     { title: t('finance_amount_col'), dataIndex: 'amount', key: 'amount', width: 130, render: (v: number) => v?.toLocaleString() ?? '0' },
     { title: t('statement_amount'), dataIndex: 'statement_amount', key: 'statement_amount', width: 150, render: (v?: number) => (typeof v === 'number' ? v.toLocaleString() : '-') },
     { title: t('due_date'), dataIndex: 'due_date', key: 'due_date', width: 130, render: (v?: string) => v || '-' },
@@ -538,7 +555,7 @@ const FinanceAnalysisPage: React.FC = () => {
               {incomeExpensePieData.map((item) => (
                 <div className="finance-pie-legend-row" key={item.category}>
                   <span className="finance-pie-swatch" style={{ background: item.color }} />
-                  <span>{t(`finance_cat_${item.category}`, { defaultValue: item.category })}</span>
+                  <span>{financeCategoryLabel(item.category)}</span>
                   <Text type="secondary">
                     {item.value.toLocaleString()} ({Math.round((item.value / incomeExpensePieTotal) * 100)}%)
                   </Text>
