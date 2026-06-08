@@ -1494,6 +1494,12 @@ struct AuthQuery {
 }
 
 #[derive(Deserialize)]
+struct FinanceRecordsQuery {
+    email: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct ManualProcessRequest {
     email: String,
     email_ids: Vec<String>,
@@ -5528,13 +5534,21 @@ mod web_tests {
             .expect("insert monthly");
 
         let finance_missing =
-            get_finance_records(State(state.clone()), Query(AuthQuery { email: None })).await;
+            get_finance_records(
+                State(state.clone()),
+                Query(FinanceRecordsQuery {
+                    email: None,
+                    limit: None,
+                }),
+            )
+            .await;
         assert_eq!(finance_missing["status"], "error");
 
         let finance_unknown = get_finance_records(
             State(state.clone()),
-            Query(AuthQuery {
+            Query(FinanceRecordsQuery {
                 email: Some("missing@example.com".to_string()),
+                limit: None,
             }),
         )
         .await;
@@ -5542,8 +5556,9 @@ mod web_tests {
 
         let finance = get_finance_records(
             State(state.clone()),
-            Query(AuthQuery {
+            Query(FinanceRecordsQuery {
                 email: Some(user.email.clone()),
+                limit: None,
             }),
         )
         .await;
@@ -7969,7 +7984,7 @@ async fn get_email_processing_runs(
 
 async fn get_finance_records(
     State(state): State<AppState>,
-    Query(query): Query<AuthQuery>,
+    Query(query): Query<FinanceRecordsQuery>,
 ) -> Json<serde_json::Value> {
     let Some(email) = query.email else {
         return Json(serde_json::json!({ "status": "error", "message": "Missing email" }));
@@ -7979,11 +7994,13 @@ async fn get_finance_records(
         return Json(serde_json::json!({ "status": "error", "message": "User not found" }));
     };
 
+    let limit = query.limit.unwrap_or(500).clamp(1, 10_000);
     let rows = sqlx::query_as::<_, FinanceRecordRow>(
         "SELECT id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after, finance_type, due_date, statement_amount, issuing_bank, card_last4, transaction_month_key, CAST(created_at AS TEXT) as created_at \
-         FROM email_financial_records WHERE user_id = ? ORDER BY created_at DESC LIMIT 500"
+         FROM email_financial_records WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"
     )
     .bind(&user_id)
+    .bind(limit)
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();

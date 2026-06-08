@@ -186,7 +186,7 @@ const FinanceAnalysisPage: React.FC = () => {
 
   useEffect(() => {
     if (!user?.email) return;
-    axios.get(`/api/finance/records?email=${encodeURIComponent(user.email)}`).then((res) => {
+    axios.get(`/api/finance/records?email=${encodeURIComponent(user.email)}&limit=10000`).then((res) => {
       setRecords(res.data.records || []);
     }).catch(() => setRecords([]));
 
