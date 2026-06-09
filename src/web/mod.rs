@@ -89,6 +89,9 @@ struct FinanceRecordRow {
     direction: String,
     amount: f64,
     currency: String,
+    amount_twd: f64,
+    exchange_rate_to_twd: Option<f64>,
+    exchange_rate_date: Option<String>,
     month_key: String,
     month_total_after: f64,
     finance_type: Option<String>,
@@ -1571,7 +1574,7 @@ async fn rollback_financial_records_for_email(
     email_id: &str,
 ) -> i64 {
     let rows = sqlx::query_as::<_, (String, String, f64)>(
-        "SELECT month_key, category, SUM(amount) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
+        "SELECT month_key, category, SUM(COALESCE(NULLIF(amount_twd, 0), amount)) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
     )
     .bind(user_id)
     .bind(email_id)
@@ -5533,15 +5536,14 @@ mod web_tests {
             .await
             .expect("insert monthly");
 
-        let finance_missing =
-            get_finance_records(
-                State(state.clone()),
-                Query(FinanceRecordsQuery {
-                    email: None,
-                    limit: None,
-                }),
-            )
-            .await;
+        let finance_missing = get_finance_records(
+            State(state.clone()),
+            Query(FinanceRecordsQuery {
+                email: None,
+                limit: None,
+            }),
+        )
+        .await;
         assert_eq!(finance_missing["status"], "error");
 
         let finance_unknown = get_finance_records(
@@ -6515,6 +6517,72 @@ mod web_tests {
         assert_mock_ai_task_done(mock_ai_task).await;
         drop(pool);
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn manual_process_logs_reason_when_email_stays_unhandled() {
+        let (mock_ai_url, mock_ai_task) = start_mock_ai_server().await;
+
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users (id, email, is_onboarded, role) VALUES (?, ?, 1, 'user')")
+            .bind(&user_id)
+            .bind("test@example.com")
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO emails (id, user_id, subject, stored_content, status) VALUES (?, ?, 'No finance', 'NO_FINANCE', 'pending')")
+            .bind(&email_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("insert email");
+
+        let config = test_config("sqlite::memory:");
+        let state = AppState {
+            pool: pool.clone(),
+            ai_client: ai_client_with_base_url(&config, &mock_ai_url).await,
+            admin_email: None,
+            developer_email: None,
+            config: std::sync::Arc::new(config),
+        };
+        let payload = ManualProcessRequest {
+            email: "test@example.com".to_string(),
+            email_ids: vec![email_id.clone()],
+            force_reextract: Some(false),
+            archive_path_by_email_id: None,
+        };
+
+        let Json(resp) = post_manual_process_emails(State(state), Json(payload)).await;
+        assert_eq!(resp["status"], "success");
+        assert_eq!(resp["processed"], 0);
+        assert_eq!(resp["skipped"], 1);
+        assert_eq!(resp["results"][0]["result"], "skipped");
+        assert!(resp["results"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No finance records extracted"));
+
+        let log_row: (String, Option<String>) = sqlx::query_as(
+            "SELECT result, details FROM email_processing_logs WHERE user_id = ? AND email_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&user_id)
+        .bind(&email_id)
+        .fetch_one(&pool)
+        .await
+        .expect("query processing log");
+        assert_eq!(log_row.0, "skipped");
+        assert!(log_row
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("AI returned no financial entries"));
+
+        assert_mock_ai_task_done(mock_ai_task).await;
     }
 }
 
@@ -7568,8 +7636,8 @@ async fn post_manual_process_emails(
         )
         .await;
         let default_month_key = crate::mail::month_key_from_timestamp(received_at.as_deref());
-        let extracted_finance_records =
-            crate::mail::analyze_and_store_financial_records_with_month(
+        let finance_extraction =
+            crate::mail::analyze_and_store_financial_records_with_month_report(
                 &state.pool,
                 &state.ai_client,
                 &user,
@@ -7579,6 +7647,7 @@ async fn post_manual_process_emails(
                 default_month_key.as_deref(),
             )
             .await;
+        let extracted_finance_records = finance_extraction.records_inserted;
         let finance_records_after = count_financial_records(&state.pool, &user.id, &id).await;
         upsert_processing_step(
             &mut processing_steps,
@@ -7586,12 +7655,13 @@ async fn post_manual_process_emails(
                 "finance_rules",
                 "finish",
                 format!(
-                    "Extracted {} finance records; total for this email is now {}",
-                    extracted_finance_records, finance_records_after
+                    "Extracted {} finance records via {}; total for this email is now {}",
+                    extracted_finance_records, finance_extraction.method, finance_records_after
                 ),
                 serde_json::json!({
                     "extracted_finance_records": extracted_finance_records,
                     "finance_records_after": finance_records_after,
+                    "extraction": finance_extraction.clone(),
                 }),
             ),
         );
@@ -7824,6 +7894,15 @@ async fn post_manual_process_emails(
         )
         .await;
 
+        let unhandled_reason = if finance_records_after == 0 && generated_reply_id.is_none() {
+            Some(format!(
+                "No finance records extracted and no enabled email rule matched; finance extraction: {}",
+                finance_extraction.reason
+            ))
+        } else {
+            None
+        };
+
         let status_after = if status == "replied" {
             "replied"
         } else if generated_reply_id.is_some() {
@@ -7849,7 +7928,13 @@ async fn post_manual_process_emails(
             ),
         );
 
-        processed += 1;
+        let processing_result = if unhandled_reason.is_some() {
+            skipped += 1;
+            "skipped"
+        } else {
+            processed += 1;
+            "processed"
+        };
         log_email_processing(
             &state.pool,
             &user.id,
@@ -7857,13 +7942,15 @@ async fn post_manual_process_emails(
             process_method,
             Some(&status),
             Some(status_after),
-            "processed",
+            processing_result,
             finance_records_before,
             finance_records_after,
             serde_json::json!({
                 "force_reextract": force_reextract,
                 "removed_finance_records": removed_finance_records,
                 "extracted_finance_records": extracted_finance_records,
+                "finance_extraction": finance_extraction.clone(),
+                "unhandled_reason": unhandled_reason.clone(),
                 "matched_rule_label": matched_rule_label.clone(),
                 "generated_reply_id": generated_reply_id.clone(),
                 "source": source_name,
@@ -7875,8 +7962,8 @@ async fn post_manual_process_emails(
             &state.pool,
             run_id.as_deref(),
             "finished",
-            Some("processed"),
-            None,
+            Some(processing_result),
+            unhandled_reason.as_deref(),
             Some(&status),
             Some(status_after),
             &processing_steps,
@@ -7884,9 +7971,10 @@ async fn post_manual_process_emails(
         .await;
         results.push(serde_json::json!({
             "email_id": id,
-            "result": "processed",
+            "result": processing_result,
             "status_before": status,
             "status_after": status_after,
+            "reason": unhandled_reason,
             "finance_records_before": finance_records_before,
             "finance_records_after": finance_records_after,
             "removed_finance_records": removed_finance_records,
@@ -7996,7 +8084,7 @@ async fn get_finance_records(
 
     let limit = query.limit.unwrap_or(500).clamp(1, 10_000);
     let rows = sqlx::query_as::<_, FinanceRecordRow>(
-        "SELECT id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after, finance_type, due_date, statement_amount, issuing_bank, card_last4, transaction_month_key, CAST(created_at AS TEXT) as created_at \
+        "SELECT id, email_id, subject, reason, category, direction, amount, currency, COALESCE(NULLIF(amount_twd, 0), amount) AS amount_twd, exchange_rate_to_twd, exchange_rate_date, month_key, month_total_after, finance_type, due_date, statement_amount, issuing_bank, card_last4, transaction_month_key, CAST(created_at AS TEXT) as created_at \
          FROM email_financial_records WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"
     )
     .bind(&user_id)

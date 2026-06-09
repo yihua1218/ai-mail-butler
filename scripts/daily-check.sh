@@ -114,11 +114,15 @@ summary_diff_count=0
 summary_max_abs_delta=0
 if [[ -f "${DB_PATH}" ]] && command -v sqlite3 >/dev/null 2>&1; then
     db_exists=true
+    amount_expr="amount"
+    if sqlite3 "${DB_PATH}" "PRAGMA table_info(email_financial_records);" | awk -F'|' '$2 == "amount_twd" { found = 1 } END { exit !found }'; then
+        amount_expr="COALESCE(NULLIF(amount_twd, 0), amount)"
+    fi
     db_uber_count="$(sqlite3 "${DB_PATH}" "SELECT COUNT(*) FROM email_financial_records WHERE user_id=(SELECT id FROM users WHERE email='${SQL_EMAIL}') AND finance_type LIKE 'uber%';")"
-    db_uber_sum="$(sqlite3 "${DB_PATH}" "SELECT COALESCE(SUM(amount), 0) FROM email_financial_records WHERE user_id=(SELECT id FROM users WHERE email='${SQL_EMAIL}') AND finance_type LIKE 'uber%';")"
+    db_uber_sum="$(sqlite3 "${DB_PATH}" "SELECT COALESCE(SUM(${amount_expr}), 0) FROM email_financial_records WHERE user_id=(SELECT id FROM users WHERE email='${SQL_EMAIL}') AND finance_type LIKE 'uber%';")"
     summary_query="
 WITH record_totals AS (
-  SELECT user_id, month_key, category, ROUND(SUM(amount), 2) AS records_total
+  SELECT user_id, month_key, category, ROUND(SUM(${amount_expr}), 2) AS records_total
   FROM email_financial_records
   WHERE user_id=(SELECT id FROM users WHERE email='${SQL_EMAIL}')
   GROUP BY user_id, month_key, category

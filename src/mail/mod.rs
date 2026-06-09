@@ -730,6 +730,12 @@ struct AiFinancialItem {
     currency: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct FrankfurterRateResponse {
+    date: Option<String>,
+    rate: f64,
+}
+
 #[derive(Debug, Clone)]
 struct FinancialEntry {
     reason: String,
@@ -800,6 +806,19 @@ fn normalize_finance_direction(raw: Option<&str>, category: &str) -> String {
     }
 }
 
+fn normalize_currency(raw: Option<&str>) -> String {
+    let v = raw.unwrap_or("").trim().to_uppercase();
+    if v.contains("USD") || v.contains("US$") {
+        "USD".to_string()
+    } else {
+        "TWD".to_string()
+    }
+}
+
+fn detect_currency_from_text(raw: &str) -> String {
+    normalize_currency(Some(raw))
+}
+
 fn extract_json_segment(raw: &str) -> String {
     if let (Some(start), Some(end)) = (raw.find("```json"), raw.rfind("```")) {
         let body = &raw[start + 7..end];
@@ -812,7 +831,7 @@ fn extract_json_segment(raw: &str) -> String {
 }
 
 fn parse_amount(raw: &str) -> Option<f64> {
-    let normalized = raw.replace(',', "").trim().to_string();
+    let normalized = raw.replace(',', "").replace(' ', "").trim().to_string();
     normalized
         .parse::<f64>()
         .ok()
@@ -849,38 +868,77 @@ fn htmlish_to_text(raw: &str) -> String {
     space_re.replace_all(&text, " ").trim().to_string()
 }
 
-fn extract_uber_total_amount(subject: &str, raw: &str) -> Option<f64> {
+fn extract_uber_total_money(subject: &str, raw: &str) -> Option<(f64, String)> {
     if !subject.to_lowercase().contains("uber") && !raw.to_lowercase().contains("uber") {
         return None;
     }
 
     static RAW_TOTAL_RE: OnceLock<Regex> = OnceLock::new();
     static TEXT_TOTAL_RE: OnceLock<Regex> = OnceLock::new();
+    static MONEY_RE: OnceLock<Regex> = OnceLock::new();
     let raw_total_re = RAW_TOTAL_RE.get_or_init(|| {
         Regex::new(
-            r#"(?is)(?:總計|total)\s*</[^>]+>\s*<[^>]+[^>]*(?:total_fare_amount|total-fare-amount)[^>]*>\s*(?:NT\$|TWD|\$)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"#,
+            r#"(?is)(?:總計|合計|總額|訂單總計|行程總計|total|order\s+total|trip\s+total|amount\s+paid|charged|you\s+paid)\s*</[^>]+>\s*<[^>]+[^>]*(?:total_fare_amount|total-fare-amount|total|amount|fare)[^>]*>\s*(?:NT\$|TWD|US\$|USD|CA\$|CAD|HK\$|HKD|JPY|¥|€|£|\$)?\s*([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)"#,
         )
         .expect("uber raw total regex")
     });
     if let Some(caps) = raw_total_re.captures(raw) {
         if let Some(amount) = caps.get(1).and_then(|m| parse_amount(m.as_str())) {
-            return Some(amount);
+            let marker = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
+            return Some((amount, detect_currency_from_text(marker)));
         }
     }
 
     let text = htmlish_to_text(raw);
     let text_total_re = TEXT_TOTAL_RE.get_or_init(|| {
-        Regex::new(r"(?i)(?:總計|total)\s*(?:NT\$|TWD|\$)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+        Regex::new(r"(?i)(?:總計|合計|總額|訂單總計|行程總計|total|order\s+total|trip\s+total|amount\s+paid|charged|you\s+paid)\s*(?:NT\$|TWD|US\$|USD|CA\$|CAD|HK\$|HKD|JPY|¥|€|£|\$)?\s*([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)")
             .expect("uber text total regex")
     });
-    text_total_re
+    if let Some(amount) = text_total_re
         .captures(&text)
         .and_then(|caps| caps.get(1))
         .and_then(|m| parse_amount(m.as_str()))
+    {
+        let marker = text_total_re
+            .captures(&text)
+            .and_then(|caps| caps.get(0))
+            .map(|m| m.as_str())
+            .unwrap_or_default();
+        return Some((amount, detect_currency_from_text(marker)));
+    }
+
+    let money_re = MONEY_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:NT\$|TWD|US\$|USD|CA\$|CAD|HK\$|HKD|JPY|¥|€|£|\$)\s*([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)")
+            .expect("uber money regex")
+    });
+    let labels = [
+        "總計",
+        "合計",
+        "總額",
+        "訂單總計",
+        "行程總計",
+        "total",
+        "order total",
+        "trip total",
+        "amount paid",
+        "charged",
+        "you paid",
+    ];
+    text.lines().find_map(|line| {
+        let line_lower = line.to_lowercase();
+        if !labels.iter().any(|label| line_lower.contains(label)) {
+            return None;
+        }
+        money_re
+            .captures(line)
+            .and_then(|caps| caps.get(1))
+            .and_then(|m| parse_amount(m.as_str()))
+            .map(|amount| (amount, detect_currency_from_text(line)))
+    })
 }
 
 fn extract_uber_financial_entries(subject: &str, raw: &str) -> Vec<FinancialEntry> {
-    let Some(amount) = extract_uber_total_amount(subject, raw) else {
+    let Some((amount, currency)) = extract_uber_total_money(subject, raw) else {
         return Vec::new();
     };
     let subject_lower = subject.to_lowercase();
@@ -895,6 +953,7 @@ fn extract_uber_financial_entries(subject: &str, raw: &str) -> Vec<FinancialEntr
         "expense",
         "expense",
     );
+    entry.currency = currency;
     entry.finance_type = Some(if is_eats {
         "uber_eats_receipt".to_string()
     } else {
@@ -989,10 +1048,35 @@ fn ai_items_to_financial_entries(items: Vec<AiFinancialItem>) -> Vec<FinancialEn
                 category,
                 direction,
             );
-            entry.currency = item.currency.unwrap_or_else(|| "TWD".to_string());
+            entry.currency = normalize_currency(item.currency.as_deref());
             Some(entry)
         })
         .collect()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct FinancialExtractionReport {
+    pub records_inserted: i64,
+    pub method: String,
+    pub reason: String,
+    pub ai_attempted: bool,
+    pub ai_error: Option<String>,
+    pub ai_finish_reason: Option<String>,
+    pub parsed_ai_items: usize,
+}
+
+impl FinancialExtractionReport {
+    fn empty(method: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            records_inserted: 0,
+            method: method.into(),
+            reason: reason.into(),
+            ai_attempted: false,
+            ai_error: None,
+            ai_finish_reason: None,
+            parsed_ai_items: 0,
+        }
+    }
 }
 
 pub(crate) fn month_key_from_timestamp(raw: Option<&str>) -> Option<String> {
@@ -1044,8 +1128,30 @@ pub(crate) async fn analyze_and_store_financial_records_with_month(
     decoded_content: &str,
     default_month_key: Option<&str>,
 ) -> i64 {
+    analyze_and_store_financial_records_with_month_report(
+        pool,
+        ai_client,
+        user,
+        email_id,
+        subject,
+        decoded_content,
+        default_month_key,
+    )
+    .await
+    .records_inserted
+}
+
+pub(crate) async fn analyze_and_store_financial_records_with_month_report(
+    pool: &SqlitePool,
+    ai_client: &AiClient,
+    user: &User,
+    email_id: &str,
+    subject: &str,
+    decoded_content: &str,
+    default_month_key: Option<&str>,
+) -> FinancialExtractionReport {
     if decoded_content.trim().is_empty() {
-        return 0;
+        return FinancialExtractionReport::empty("none", "decoded email content is empty");
     }
 
     let default_month_key = default_month_key
@@ -1055,7 +1161,7 @@ pub(crate) async fn analyze_and_store_financial_records_with_month(
 
     let vendor_entries = extract_vendor_financial_entries(subject, decoded_content);
     if !vendor_entries.is_empty() {
-        return store_financial_entries(
+        let records_inserted = store_financial_entries(
             pool,
             user,
             email_id,
@@ -1064,6 +1170,15 @@ pub(crate) async fn analyze_and_store_financial_records_with_month(
             &default_month_key,
         )
         .await;
+        return FinancialExtractionReport {
+            records_inserted,
+            method: "vendor_rules".to_string(),
+            reason: "vendor financial parser matched".to_string(),
+            ai_attempted: false,
+            ai_error: None,
+            ai_finish_reason: None,
+            parsed_ai_items: 0,
+        };
     }
 
     let snippet = if decoded_content.chars().count() > 6000 {
@@ -1072,7 +1187,7 @@ pub(crate) async fn analyze_and_store_financial_records_with_month(
         decoded_content.to_string()
     };
 
-    let system_prompt = "You extract financial entries from decoded email content. Detect spending amount, transfer amount, deposit amount, withdrawal amount, bill amount, or similar transaction amounts. Return JSON array ONLY. Each item format: {\"reason\":\"...\",\"amount\":1234.56,\"category\":\"expense|transfer|deposit|withdraw|bill\",\"direction\":\"income|expense\",\"currency\":\"TWD\"}. If none found, return []";
+    let system_prompt = "You extract financial entries from decoded email content. Detect spending amount, transfer amount, deposit amount, withdrawal amount, bill amount, or similar transaction amounts. Return JSON array ONLY. Each item format: {\"reason\":\"...\",\"amount\":1234.56,\"category\":\"expense|transfer|deposit|withdraw|bill\",\"direction\":\"income|expense\",\"currency\":\"TWD|USD\"}. Use TWD for New Taiwan Dollar and USD for United States Dollar. If none found, return []";
     let user_prompt = format!("Subject: {}\n\nContent:\n{}", subject, snippet);
 
     let ai_res = match ai_client.chat(system_prompt, &user_prompt).await {
@@ -1082,29 +1197,166 @@ pub(crate) async fn analyze_and_store_financial_records_with_month(
                 "Financial extraction AI call failed for email {}: {}",
                 email_id, e
             );
-            return 0;
+            return FinancialExtractionReport {
+                records_inserted: 0,
+                method: "ai_fallback".to_string(),
+                reason: "vendor rules did not match and AI extraction failed".to_string(),
+                ai_attempted: true,
+                ai_error: Some(e.to_string()),
+                ai_finish_reason: None,
+                parsed_ai_items: 0,
+            };
         }
     };
 
     let json_text = extract_json_segment(&ai_res.content);
 
-    let parsed: Vec<AiFinancialItem> = serde_json::from_str(&json_text)
-        .or_else(|_| {
+    let parsed_result: Result<Vec<AiFinancialItem>, serde_json::Error> =
+        serde_json::from_str(&json_text).or_else(|_| {
             let value: serde_json::Value = serde_json::from_str(&json_text)?;
             if let Some(arr) = value.get("items") {
                 serde_json::from_value(arr.clone())
             } else {
                 Ok(Vec::new())
             }
-        })
-        .unwrap_or_default();
+        });
+    let parsed = match parsed_result {
+        Ok(v) => v,
+        Err(e) => {
+            return FinancialExtractionReport {
+                records_inserted: 0,
+                method: "ai_fallback".to_string(),
+                reason: "AI extraction response was not valid JSON".to_string(),
+                ai_attempted: true,
+                ai_error: Some(e.to_string()),
+                ai_finish_reason: ai_res.finish_reason,
+                parsed_ai_items: 0,
+            };
+        }
+    };
 
     if parsed.is_empty() {
-        return 0;
+        return FinancialExtractionReport {
+            records_inserted: 0,
+            method: "ai_fallback".to_string(),
+            reason: "vendor rules did not match and AI returned no financial entries".to_string(),
+            ai_attempted: true,
+            ai_error: None,
+            ai_finish_reason: ai_res.finish_reason,
+            parsed_ai_items: 0,
+        };
     }
 
+    let parsed_ai_items = parsed.len();
     let entries = ai_items_to_financial_entries(parsed);
-    store_financial_entries(pool, user, email_id, subject, entries, &default_month_key).await
+    let records_inserted =
+        store_financial_entries(pool, user, email_id, subject, entries, &default_month_key).await;
+    FinancialExtractionReport {
+        records_inserted,
+        method: "ai_fallback".to_string(),
+        reason: if records_inserted > 0 {
+            "AI extraction stored financial entries"
+        } else {
+            "AI returned entries but none had a positive amount"
+        }
+        .to_string(),
+        ai_attempted: true,
+        ai_error: None,
+        ai_finish_reason: ai_res.finish_reason,
+        parsed_ai_items,
+    }
+}
+
+async fn amount_to_twd(
+    pool: &SqlitePool,
+    amount: f64,
+    currency: &str,
+) -> (f64, Option<f64>, Option<String>) {
+    match currency {
+        "TWD" => (
+            amount,
+            Some(1.0),
+            Some(Utc::now().format("%Y-%m-%d").to_string()),
+        ),
+        "USD" => {
+            let (rate, rate_date) = get_usd_twd_rate(pool).await;
+            (amount * rate, Some(rate), Some(rate_date))
+        }
+        other => {
+            warn!(
+                "Unsupported finance currency {}; storing amount as TWD estimate without conversion",
+                other
+            );
+            (amount, None, None)
+        }
+    }
+}
+
+async fn get_usd_twd_rate(pool: &SqlitePool) -> (f64, String) {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let cached_today: Option<(f64, String)> = sqlx::query_as(
+        "SELECT rate, rate_date FROM exchange_rates
+         WHERE base_currency = 'USD' AND quote_currency = 'TWD'
+           AND date(fetched_at) = date('now')
+         LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+    if let Some(row) = cached_today {
+        return row;
+    }
+
+    match fetch_usd_twd_rate().await {
+        Ok((rate, rate_date)) => {
+            let _ = sqlx::query(
+                "INSERT INTO exchange_rates (base_currency, quote_currency, rate, rate_date, fetched_at, source)
+                 VALUES ('USD', 'TWD', ?, ?, CURRENT_TIMESTAMP, 'frankfurter')
+                 ON CONFLICT(base_currency, quote_currency)
+                 DO UPDATE SET rate = excluded.rate, rate_date = excluded.rate_date,
+                               fetched_at = CURRENT_TIMESTAMP, source = excluded.source",
+            )
+            .bind(rate)
+            .bind(&rate_date)
+            .execute(pool)
+            .await;
+            (rate, rate_date)
+        }
+        Err(e) => {
+            warn!("Failed to fetch USD/TWD exchange rate: {}", e);
+            let latest: Option<(f64, String)> = sqlx::query_as(
+                "SELECT rate, rate_date FROM exchange_rates
+                 WHERE base_currency = 'USD' AND quote_currency = 'TWD'
+                 ORDER BY fetched_at DESC LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+            latest.unwrap_or_else(|| (1.0, today))
+        }
+    }
+}
+
+async fn fetch_usd_twd_rate() -> Result<(f64, String)> {
+    let url = "https://api.frankfurter.dev/v2/rate/USD/TWD";
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let response = client.get(url).send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "HTTP {} from Frankfurter: {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let parsed: FrankfurterRateResponse = serde_json::from_str(&body)?;
+    let date = parsed
+        .date
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+    Ok((parsed.rate, date))
 }
 
 async fn store_financial_entries(
@@ -1124,6 +1376,9 @@ async fn store_financial_entries(
 
         let category = normalize_finance_category(Some(&entry.category));
         let direction = normalize_finance_direction(Some(&entry.direction), &category);
+        let currency = normalize_currency(Some(&entry.currency));
+        let (amount_twd, exchange_rate_to_twd, exchange_rate_date) =
+            amount_to_twd(pool, entry.amount, &currency).await;
         let month_key = entry.month_key.as_deref().unwrap_or(default_month_key);
 
         let _ = sqlx::query(
@@ -1133,7 +1388,7 @@ async fn store_financial_entries(
         .bind(&user.id)
         .bind(&month_key)
         .bind(&category)
-        .bind(entry.amount)
+        .bind(amount_twd)
         .execute(pool)
         .await;
 
@@ -1149,8 +1404,8 @@ async fn store_financial_entries(
 
         if sqlx::query(
             "INSERT INTO email_financial_records \
-             (id, user_id, email_id, subject, reason, category, direction, amount, currency, month_key, month_total_after, finance_type, due_date, statement_amount, issuing_bank, card_last4, transaction_month_key) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             (id, user_id, email_id, subject, reason, category, direction, amount, currency, amount_twd, exchange_rate_to_twd, exchange_rate_date, month_key, month_total_after, finance_type, due_date, statement_amount, issuing_bank, card_last4, transaction_month_key) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&user.id)
@@ -1160,7 +1415,10 @@ async fn store_financial_entries(
         .bind(&category)
         .bind(&direction)
         .bind(entry.amount)
-        .bind(&entry.currency)
+        .bind(&currency)
+        .bind(amount_twd)
+        .bind(exchange_rate_to_twd)
+        .bind(&exchange_rate_date)
         .bind(&month_key)
         .bind(month_total_after)
         .bind(&entry.finance_type)
@@ -1502,6 +1760,18 @@ mod tests {
     }
 
     #[test]
+    fn vendor_parser_extracts_uber_eats_multilingual_order_total() {
+        let html = r#"<div>Uber Eats</div><table><tr><td>Order total</td><td>CA$ 1,234.56</td></tr></table>"#;
+        let entries = extract_vendor_financial_entries("Your Uber Eats receipt", html);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].amount, 1234.56);
+        assert_eq!(
+            entries[0].finance_type.as_deref(),
+            Some("uber_eats_receipt")
+        );
+    }
+
+    #[test]
     fn vendor_parser_extracts_uber_trip_total() {
         let html = r#"<table><tr><td>Total</td><td data-testid="total_fare_amount" class="total-fare-amount">NT$733.00</td></tr></table>"#;
         let entries =
@@ -1641,7 +1911,7 @@ mod tests {
         email_id: &str,
     ) {
         let rows = sqlx::query_as::<_, (String, String, f64)>(
-            "SELECT month_key, category, SUM(amount) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
+            "SELECT month_key, category, SUM(COALESCE(NULLIF(amount_twd, 0), amount)) FROM email_financial_records WHERE user_id = ? AND email_id = ? GROUP BY month_key, category",
         )
         .bind(user_id)
         .bind(email_id)
@@ -2252,6 +2522,95 @@ mod tests {
 
         mock_ai_task.await.expect("mock ai done");
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn store_financial_entries_converts_usd_to_twd_for_monthly_summary() {
+        let pool = crate::db::connect("sqlite::memory:")
+            .await
+            .expect("create schema");
+        let user = User {
+            id: Uuid::new_v4().to_string(),
+            email: "usd@example.com".to_string(),
+            is_onboarded: true,
+            preferences: None,
+            magic_token: None,
+            role: "user".to_string(),
+            auto_reply: false,
+            dry_run: true,
+            email_format: "both".to_string(),
+            display_name: None,
+            assistant_name_zh: None,
+            assistant_name_en: None,
+            assistant_tone_zh: None,
+            assistant_tone_en: None,
+            onboarding_step: 0,
+            pdf_passwords: None,
+            timezone: "UTC".to_string(),
+            preferred_language: "en".to_string(),
+            training_data_consent: false,
+            training_consent_updated_at: None,
+            mail_send_method: "direct_mx".to_string(),
+            rule_label_mode: "ai_first".to_string(),
+            time_format: "24h".to_string(),
+            date_format: "auto".to_string(),
+            unmatched_rule_guidance_enabled: None,
+        };
+        sqlx::query("INSERT INTO users (id, email, is_onboarded, role) VALUES (?, ?, 1, 'user')")
+            .bind(&user.id)
+            .bind(&user.email)
+            .execute(&pool)
+            .await
+            .expect("insert user");
+        sqlx::query("INSERT INTO emails (id, user_id, subject, preview, status) VALUES ('email-usd', ?, 'USD receipt', '', 'pending')")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .expect("insert email");
+        sqlx::query(
+            "INSERT INTO exchange_rates (base_currency, quote_currency, rate, rate_date, source)
+             VALUES ('USD', 'TWD', 31.5, date('now'), 'test')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert exchange rate");
+
+        let mut entry = FinancialEntry::new("USD receipt", 10.0, "expense", "expense");
+        entry.currency = "USD".to_string();
+        let inserted = store_financial_entries(
+            &pool,
+            &user,
+            "email-usd",
+            "USD receipt",
+            vec![entry],
+            "2026-06",
+        )
+        .await;
+        assert_eq!(inserted, 1);
+
+        let row: (f64, String, f64, Option<f64>) = sqlx::query_as(
+            "SELECT amount, currency, amount_twd, exchange_rate_to_twd
+             FROM email_financial_records WHERE user_id = ? AND email_id = ?",
+        )
+        .bind(&user.id)
+        .bind("email-usd")
+        .fetch_one(&pool)
+        .await
+        .expect("query record");
+        assert_eq!(row.0, 10.0);
+        assert_eq!(row.1, "USD");
+        assert_eq!(row.2, 315.0);
+        assert_eq!(row.3, Some(31.5));
+
+        let monthly_total: f64 = sqlx::query_scalar(
+            "SELECT total_amount FROM monthly_finance_summary
+             WHERE user_id = ? AND month_key = '2026-06' AND category = 'expense'",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .expect("query monthly total");
+        assert_eq!(monthly_total, 315.0);
     }
 
     #[tokio::test]

@@ -14,6 +14,9 @@ type FinanceRecord = {
   direction: string;
   amount: number;
   currency: string;
+  amount_twd?: number;
+  exchange_rate_to_twd?: number;
+  exchange_rate_date?: string;
   month_key: string;
   month_total_after: number;
   finance_type?: string;
@@ -156,6 +159,11 @@ const FinanceAnalysisPage: React.FC = () => {
     row.direction === 'income' || row.direction === 'deposit' || row.category === 'income' || row.category === 'deposit'
   );
 
+  const amountTwd = (row: FinanceRecord) => {
+    const converted = Number(row.amount_twd);
+    return Number.isFinite(converted) && converted > 0 ? converted : Number(row.amount) || 0;
+  };
+
   const formatDayKey = (dayKey: string) => {
     if (!dayKey) return '';
     const [year, month, day] = dayKey.split('-');
@@ -212,6 +220,10 @@ const FinanceAnalysisPage: React.FC = () => {
 
   const financeCategoryLabel = (value?: string) => (
     value ? t(`finance_cat_${value}`, { defaultValue: humanizeFinanceLabel(value) }) : '-'
+  );
+
+  const financeTypeLabel = (value?: string) => (
+    value ? t(`finance_type_${value}`, { defaultValue: financeCategoryLabel(value) }) : '-'
   );
 
   const financeDirectionLabel = (value?: string) => (
@@ -285,7 +297,7 @@ const FinanceAnalysisPage: React.FC = () => {
     records
       .filter((row) => getFinanceMonthKey(row) === selectedIncomeExpenseMonthKey)
       .forEach((row) => {
-        const amount = Math.abs(Number(row.amount) || 0);
+        const amount = Math.abs(amountTwd(row));
         if (isIncomeRecord(row)) {
           totals.set('income', (totals.get('income') || 0) + amount);
         } else if (isExpenseRecord(row)) {
@@ -332,7 +344,7 @@ const FinanceAnalysisPage: React.FC = () => {
       const isExpense = isExpenseRecord(row);
       const isIncome = isIncomeRecord(row);
       if (!isExpense && !isIncome) return;
-      const amount = Math.abs(Number(row.amount) || 0);
+      const amount = Math.abs(amountTwd(row));
       if (!amount) return;
       const key = getRecordDayKey(row);
       if (!totals.has(key)) return;
@@ -417,7 +429,7 @@ const FinanceAnalysisPage: React.FC = () => {
     const periodRows = new Map<string, { key: string; label: string; amount: number }>();
     records.forEach((row) => {
       if (!isExpenseRecord(row)) return;
-      const amount = Math.abs(Number(row.amount) || 0);
+      const amount = Math.abs(amountTwd(row));
       if (!amount) return;
 
       let key = '';
@@ -504,10 +516,12 @@ const FinanceAnalysisPage: React.FC = () => {
     { title: t('finance_time_col'), dataIndex: 'created_at', key: 'created_at', width: 190, render: (v: string) => <span style={{ whiteSpace: 'nowrap' }}>{formatInUserTimezone(v)}</span> },
     { title: t('finance_subject_col'), dataIndex: 'subject', key: 'subject', ellipsis: true },
     { title: t('finance_reason_col'), dataIndex: 'reason', key: 'reason', ellipsis: true },
-    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 160, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{financeCategoryLabel(v)}</Tag> : '-' },
+    { title: t('finance_type'), dataIndex: 'finance_type', key: 'finance_type', width: 160, render: (v?: string) => v ? <Tag color={v === 'bill' ? 'blue' : 'purple'}>{financeTypeLabel(v)}</Tag> : '-' },
     { title: t('finance_category_col'), dataIndex: 'category', key: 'category', width: 120, render: (v: string) => <Tag>{financeCategoryLabel(v)}</Tag> },
     { title: t('finance_direction_col'), dataIndex: 'direction', key: 'direction', width: 120, render: (v: string) => <Tag color={v === 'income' ? 'green' : 'volcano'}>{financeDirectionLabel(v)}</Tag> },
     { title: t('finance_amount_col'), dataIndex: 'amount', key: 'amount', width: 130, render: (v: number) => v?.toLocaleString() ?? '0' },
+    { title: t('finance_amount_twd_col'), dataIndex: 'amount_twd', key: 'amount_twd', width: 150, render: (v?: number) => (typeof v === 'number' ? v.toLocaleString() : '-') },
+    { title: t('finance_exchange_rate_col'), dataIndex: 'exchange_rate_to_twd', key: 'exchange_rate_to_twd', width: 140, render: (v: number | undefined, row: FinanceRecord) => (typeof v === 'number' && row.currency !== 'TWD' ? `${v.toFixed(4)} (${row.exchange_rate_date || '-'})` : '-') },
     { title: t('statement_amount'), dataIndex: 'statement_amount', key: 'statement_amount', width: 150, render: (v?: number) => (typeof v === 'number' ? v.toLocaleString() : '-') },
     { title: t('due_date'), dataIndex: 'due_date', key: 'due_date', width: 130, render: (v?: string) => v || '-' },
     { title: t('issuing_bank'), dataIndex: 'issuing_bank', key: 'issuing_bank', width: 140, render: (v?: string) => v || '-' },

@@ -349,6 +349,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             direction TEXT NOT NULL,
             amount REAL NOT NULL,
             currency TEXT NOT NULL DEFAULT 'TWD',
+            amount_twd REAL NOT NULL DEFAULT 0,
+            exchange_rate_to_twd REAL,
+            exchange_rate_date TEXT,
             month_key TEXT NOT NULL,
             month_total_after REAL NOT NULL DEFAULT 0,
             finance_type TEXT,
@@ -390,6 +393,17 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await;
+    let _ = sqlx::query(
+        "ALTER TABLE email_financial_records ADD COLUMN amount_twd REAL NOT NULL DEFAULT 0",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN exchange_rate_to_twd REAL")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN exchange_rate_date TEXT")
+        .execute(&pool)
+        .await;
     let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN finance_type TEXT")
         .execute(&pool)
         .await;
@@ -412,6 +426,20 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS exchange_rates (
+            base_currency TEXT NOT NULL,
+            quote_currency TEXT NOT NULL,
+            rate REAL NOT NULL,
+            rate_date TEXT NOT NULL,
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            source TEXT NOT NULL,
+            PRIMARY KEY(base_currency, quote_currency)
+        );",
+    )
+    .execute(&pool)
+    .await?;
 
     // Append-only processing history for manual checks/reprocessing.
     sqlx::query(
