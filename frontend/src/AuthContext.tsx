@@ -38,17 +38,48 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
+const USER_EMAIL_KEY = 'user_email';
+const CSRF_COOKIE_NAME = 'csrf_token';
+const CSRF_HEADER_NAME = 'x-csrf-token';
+
+axios.defaults.withCredentials = true;
+
+const readCookie = (name: string) => {
+  if (typeof document === 'undefined') return null;
+  return document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+    ?.slice(name.length + 1) ?? null;
+};
+
+if (axios.interceptors?.request) {
+  axios.interceptors.request.use((config) => {
+    const method = config.method?.toUpperCase() ?? 'GET';
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      const token = readCookie(CSRF_COOKIE_NAME);
+      if (token) {
+        config.headers = config.headers ?? {};
+        config.headers[CSRF_HEADER_NAME] = token;
+      }
+    }
+    return config;
+  });
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const savedEmail = localStorage.getItem('user_email');
+    const savedEmail = localStorage.getItem(USER_EMAIL_KEY);
     if (savedEmail) {
       axios.get(`/api/me?email=${savedEmail}`)
         .then(res => {
           if (res.data) setUser(res.data);
-          else localStorage.removeItem('user_email');
+          else {
+            localStorage.removeItem(USER_EMAIL_KEY);
+          }
         })
         .finally(() => setLoading(false));
     } else {
@@ -61,7 +92,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshUser = async () => {
-    const savedEmail = localStorage.getItem('user_email');
+    const savedEmail = localStorage.getItem(USER_EMAIL_KEY);
     if (savedEmail) {
       try {
         const res = await axios.get(`/api/me?email=${savedEmail}`);
@@ -76,9 +107,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoading(true);
     try {
       const res = await axios.post('/api/auth/verify', { token });
-      if (res.data) {
-        setUser(res.data);
-        localStorage.setItem('user_email', res.data.email);
+      const verifiedUser = res.data?.user ?? res.data;
+      if (verifiedUser) {
+        setUser(verifiedUser);
+        localStorage.setItem(USER_EMAIL_KEY, verifiedUser.email);
       } else {
         throw new Error('Invalid token');
       }
@@ -91,8 +123,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = () => {
+    axios.post('/api/auth/logout').catch(() => undefined);
     setUser(null);
-    localStorage.removeItem('user_email');
+    localStorage.removeItem(USER_EMAIL_KEY);
   };
 
   return (

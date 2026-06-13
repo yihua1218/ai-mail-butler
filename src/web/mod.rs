@@ -1,8 +1,8 @@
 use anyhow::Result;
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::{Path as AxumPath, Query, State},
-    http::{Method, Request, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
@@ -11,12 +11,12 @@ use axum::{
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::fs;
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -1393,6 +1393,89 @@ pub struct AppState {
     pub config: std::sync::Arc<crate::config::Config>,
 }
 
+#[derive(Clone)]
+struct RateLimitPolicy {
+    max_attempts: usize,
+    window: Duration,
+}
+
+struct RateLimitBucket {
+    attempts: Vec<Instant>,
+}
+
+fn rate_limit_map() -> &'static RwLock<HashMap<String, RateLimitBucket>> {
+    static MAP: OnceLock<RwLock<HashMap<String, RateLimitBucket>>> = OnceLock::new();
+    MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+async fn check_rate_limit(key: String, policy: RateLimitPolicy) -> bool {
+    let now = Instant::now();
+    let mut map = rate_limit_map().write().await;
+    if map.len() > 10_000 {
+        map.retain(|_, bucket| bucket.attempts.iter().any(|at| now.duration_since(*at) <= policy.window));
+    }
+    let bucket = map.entry(key).or_insert_with(|| RateLimitBucket { attempts: Vec::new() });
+    bucket
+        .attempts
+        .retain(|at| now.duration_since(*at) <= policy.window);
+    if bucket.attempts.len() >= policy.max_attempts {
+        return false;
+    }
+    bucket.attempts.push(now);
+    true
+}
+
+fn forwarded_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn add_security_headers(response: &mut axum::response::Response) {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        ),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+}
+
+#[cfg(not(test))]
+async fn security_headers_middleware(req: Request<Body>, next: Next) -> impl IntoResponse {
+    let mut response = next.run(req).await;
+    add_security_headers(&mut response);
+    response
+}
+
 fn resolve_runtime_mail_path(state: &AppState, logical_path: &str) -> PathBuf {
     if !state.config.readonly_mode_enabled {
         return PathBuf::from(logical_path);
@@ -1419,16 +1502,130 @@ fn resolve_runtime_mail_path(state: &AppState, logical_path: &str) -> PathBuf {
 #[cfg(not(test))]
 async fn readonly_write_guard(
     State(state): State<AppState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> impl IntoResponse {
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let public_path = matches!(
+        path.as_str(),
+        "/api/health"
+            | "/api/about"
+            | "/api/auth/magic-link"
+            | "/api/auth/verify"
+            | "/api/chat"
+            | "/api/chat/feedback"
+            | "/api/data-deletion/summary"
+            | "/api/data-deletion/confirm"
+    ) || (method == Method::GET && path.starts_with("/api/wishes"));
+
+    if !public_path {
+        let token = session_token_from_request(&req);
+        let Some(auth_user) = (match token.as_deref() {
+            Some(token) => validate_session_token(&state, token).await,
+            None => None,
+        }) else {
+            let payload = serde_json::json!({
+                "status": "error",
+                "message": "Authentication required.",
+            });
+            return (StatusCode::UNAUTHORIZED, Json(payload)).into_response();
+        };
+
+        if path.starts_with("/api/admin/") && !is_admin_or_developer(&state, &auth_user.email) {
+            let payload = serde_json::json!({
+                "status": "error",
+                "message": "Admin privileges required.",
+            });
+            return (StatusCode::FORBIDDEN, Json(payload)).into_response();
+        }
+
+        let unsafe_method = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+        if unsafe_method {
+            let csrf_header = req
+                .headers()
+                .get(CSRF_HEADER_NAME)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let csrf_cookie = cookie_value(req.headers(), CSRF_COOKIE_NAME);
+            let csrf_ok = match (token.as_deref(), csrf_header, csrf_cookie.as_deref()) {
+                (Some(session), Some(header_token), Some(cookie_token))
+                    if header_token == cookie_token =>
+                {
+                    validate_csrf_token(&state, session, header_token).await
+                }
+                _ => false,
+            };
+            if !csrf_ok {
+                let payload = serde_json::json!({
+                    "status": "error",
+                    "message": "Invalid or missing CSRF token.",
+                });
+                return (StatusCode::FORBIDDEN, Json(payload)).into_response();
+            }
+        }
+
+        let query_email = req
+            .uri()
+            .query()
+            .and_then(|query| {
+                query.split('&').find_map(|part| {
+                    let (key, value) = part.split_once('=')?;
+                    (key == "email").then(|| {
+                        value
+                            .replace("%40", "@")
+                            .replace("%2B", "+")
+                            .replace("%2b", "+")
+                    })
+                })
+            })
+            .filter(|email| !email.trim().is_empty());
+
+        if let Some(email) = query_email {
+            if !email.eq_ignore_ascii_case(&auth_user.email) {
+                let payload = serde_json::json!({
+                    "status": "error",
+                    "message": "Session does not match requested user.",
+                });
+                return (StatusCode::FORBIDDEN, Json(payload)).into_response();
+            }
+        }
+
+        if unsafe_method {
+            let (parts, body) = req.into_parts();
+            let bytes = match to_bytes(body, 1024 * 1024).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    let payload = serde_json::json!({
+                        "status": "error",
+                        "message": "Invalid request body.",
+                    });
+                    return (StatusCode::BAD_REQUEST, Json(payload)).into_response();
+                }
+            };
+
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(email) = value.get("email").and_then(|v| v.as_str()) {
+                    if !email.eq_ignore_ascii_case(&auth_user.email) {
+                        let payload = serde_json::json!({
+                            "status": "error",
+                            "message": "Session does not match requested user.",
+                        });
+                        return (StatusCode::FORBIDDEN, Json(payload)).into_response();
+                    }
+                }
+            }
+
+            req = Request::from_parts(parts, Body::from(bytes));
+        }
+    }
+
     if !state.config.readonly_mode_enabled || !state.config.readonly_block_writes {
         return next.run(req).await;
     }
 
-    let method = req.method();
-    let path = req.uri().path();
-    let read_only_method = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    let read_only_method = matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
     if read_only_method {
         return next.run(req).await;
     }
@@ -1472,9 +1669,132 @@ fn role_for_email(state: &AppState, email: &str) -> String {
     }
 }
 
+const SESSION_COOKIE_NAME: &str = "session_token";
+const CSRF_COOKIE_NAME: &str = "csrf_token";
+const CSRF_HEADER_NAME: &str = "x-csrf-token";
+const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 30;
+const MAGIC_LINK_TTL_MINUTES: i64 = 15;
+
+fn hash_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn new_secret_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                let (cookie_name, value) = cookie.trim().split_once('=')?;
+                (cookie_name == name && !value.trim().is_empty())
+                    .then(|| value.trim().to_string())
+            })
+        })
+}
+
+fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, SESSION_COOKIE_NAME)
+}
+
+fn session_token_from_request(req: &Request<Body>) -> Option<String> {
+    session_token_from_headers(req.headers())
+}
+
+fn secure_cookie_attr() -> &'static str {
+    let secure = std::env::var("PUBLIC_URL")
+        .ok()
+        .map(|url| url.trim_start().starts_with("https://"))
+        .unwrap_or(false);
+    if secure { "; Secure" } else { "" }
+}
+
+fn session_cookie(token: &str) -> String {
+    format!(
+        "{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE_SECONDS}{}",
+        secure_cookie_attr()
+    )
+}
+
+fn csrf_cookie(token: &str) -> String {
+    format!(
+        "{CSRF_COOKIE_NAME}={token}; Path=/; SameSite=Lax; Max-Age={SESSION_MAX_AGE_SECONDS}{}",
+        secure_cookie_attr()
+    )
+}
+
+fn expired_session_cookie() -> String {
+    format!("{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+}
+
+fn expired_csrf_cookie() -> String {
+    format!("{CSRF_COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0")
+}
+
+async fn validate_csrf_token(state: &AppState, session_token: &str, csrf_token: &str) -> bool {
+    if session_token.trim().is_empty() || csrf_token.trim().is_empty() {
+        return false;
+    }
+    let session_hash = hash_token(session_token.trim());
+    let csrf_hash = hash_token(csrf_token.trim());
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM sessions
+         WHERE token_hash = ?
+           AND csrf_token_hash = ?
+           AND revoked_at IS NULL
+           AND expires_at > CURRENT_TIMESTAMP",
+    )
+    .bind(session_hash)
+    .bind(csrf_hash)
+    .fetch_one(&state.pool)
+    .await
+    .map(|count| count > 0)
+    .unwrap_or(false)
+}
+
+async fn validate_session_token(state: &AppState, token: &str) -> Option<User> {
+    if token.trim().is_empty() {
+        return None;
+    }
+
+    let token_hash = hash_token(token.trim());
+    let mut user = sqlx::query_as::<_, User>(
+        "SELECT u.*
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = ?
+           AND s.revoked_at IS NULL
+           AND s.expires_at > CURRENT_TIMESTAMP",
+    )
+        .bind(&token_hash)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()?;
+    let _ = sqlx::query("UPDATE sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
+        .bind(token_hash)
+        .execute(&state.pool)
+        .await;
+    user.session_token = None;
+    user.magic_token = None;
+    user.role = role_for_email(state, &user.email);
+    Some(user)
+}
+
 #[derive(Deserialize)]
 struct AuthQuery {
     email: Option<String>,
+    #[allow(dead_code)]
+    session_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3433,21 +3753,49 @@ async fn deliver_email_with_fallback(
 #[cfg(not(test))]
 async fn post_magic_link(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<MagicLinkRequest>,
 ) -> Json<serde_json::Value> {
     let email = payload.email.trim().to_lowercase();
-    let token = uuid::Uuid::new_v4().to_string();
+    if email.is_empty() {
+        return Json(serde_json::json!({ "status": "error", "message": "Email required" }));
+    }
+    let ip = forwarded_ip(&headers);
+    let allowed = check_rate_limit(
+        format!("magic-link:{ip}:{email}"),
+        RateLimitPolicy {
+            max_attempts: 5,
+            window: Duration::from_secs(15 * 60),
+        },
+    )
+    .await;
+    if !allowed {
+        return Json(serde_json::json!({
+            "status": "error",
+            "message": "Too many login link requests. Please try again later."
+        }));
+    }
+
+    let token = new_secret_token();
+    let token_hash = hash_token(&token);
+    let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(MAGIC_LINK_TTL_MINUTES))
+        .naive_utc()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
 
     // Use a true UPSERT to avoid UNIQUE constraint race conditions:
     // If email already exists, just update the token; otherwise insert.
     let new_id = uuid::Uuid::new_v4().to_string();
     let result = sqlx::query(
-        "INSERT INTO users (id, email, magic_token) VALUES (?, ?, ?)
-         ON CONFLICT(email) DO UPDATE SET magic_token = excluded.magic_token",
+        "INSERT INTO users (id, email, magic_token, magic_token_expires_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(email) DO UPDATE SET
+            magic_token = excluded.magic_token,
+            magic_token_expires_at = excluded.magic_token_expires_at",
     )
     .bind(&new_id)
     .bind(&email)
-    .bind(&token)
+    .bind(&token_hash)
+    .bind(&expires_at)
     .execute(&state.pool)
     .await;
 
@@ -3461,17 +3809,22 @@ async fn post_magic_link(
         .unwrap_or_else(|_| format!("http://localhost:{}", state.config.server_port));
     let login_url = format!("{}/login?token={}", base_url, token);
 
-    // ALWAYS log the magic link to terminal so it's usable even without SMTP
-    let log_box = format!(
-        "\n\
-        ╔══════════════════════════════════════════════════════════════════════════════════════════╗\n\
-        ║  MAGIC LOGIN LINK (debug)                                                                ║\n\
-        ║  To : {:<82} ║\n\
-        ║  URL: {:<82} ║\n\
-        ╚══════════════════════════════════════════════════════════════════════════════════════════╝",
-        email, login_url
-    );
-    tracing::info!("{}", log_box);
+    let debug_auth_links = std::env::var("DEBUG_AUTH_LINKS")
+        .ok()
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if debug_auth_links {
+        let log_box = format!(
+            "\n\
+            ╔══════════════════════════════════════════════════════════════════════════════════════════╗\n\
+            ║  MAGIC LOGIN LINK (debug)                                                                ║\n\
+            ║  To : {:<82} ║\n\
+            ║  URL: {:<82} ║\n\
+            ╚══════════════════════════════════════════════════════════════════════════════════════════╝",
+            email, login_url
+        );
+        tracing::info!("{}", log_box);
+    }
 
     let mut subject = "Your AI Mail Butler Login Link".to_string();
     let mut plain_text = format!(
@@ -3685,6 +4038,7 @@ mod web_tests {
             is_onboarded: true,
             preferences: None,
             magic_token: None,
+            session_token: None,
             role: "user".to_string(),
             auto_reply: false,
             dry_run: true,
@@ -3715,6 +4069,52 @@ mod web_tests {
             developer_email: Some("dev@example.com".to_string()),
             config: std::sync::Arc::new(config),
         }
+    }
+
+    #[tokio::test]
+    async fn security_helpers_rate_limit_cookie_and_headers() {
+        let key = format!("test-rate-limit-{}", uuid::Uuid::new_v4());
+        let policy = RateLimitPolicy {
+            max_attempts: 2,
+            window: Duration::from_secs(60),
+        };
+        assert!(check_rate_limit(key.clone(), policy.clone()).await);
+        assert!(check_rate_limit(key.clone(), policy.clone()).await);
+        assert!(!check_rate_limit(key, policy).await);
+
+        let cookie = session_cookie("secret-token");
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Max-Age="));
+
+        let csrf = csrf_cookie("csrf-secret");
+        assert!(!csrf.contains("HttpOnly"));
+        assert!(csrf.contains("SameSite=Lax"));
+        assert!(csrf.contains("Max-Age="));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("theme=dark; session_token=secret-token; csrf_token=csrf-secret"),
+        );
+        assert_eq!(session_token_from_headers(&headers).as_deref(), Some("secret-token"));
+        assert_eq!(cookie_value(&headers, CSRF_COOKIE_NAME).as_deref(), Some("csrf-secret"));
+
+        let mut response = Json(serde_json::json!({"ok": true})).into_response();
+        add_security_headers(&mut response);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        assert!(response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .contains("frame-ancestors 'none'"));
     }
 
     async fn response_json(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
@@ -4167,7 +4567,7 @@ mod web_tests {
         let config = test_config("sqlite::memory:");
         let state = test_state(pool.clone(), config);
 
-        let anon = get_dashboard(State(state.clone()), Query(AuthQuery { email: None }))
+        let anon = get_dashboard(State(state.clone()), Query(AuthQuery { email: None, session_token: None }))
             .await
             .0;
         assert_eq!(anon["type"], "anonymous");
@@ -4200,6 +4600,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("person@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4212,6 +4613,7 @@ mod web_tests {
             State(state),
             Query(AuthQuery {
                 email: Some("admin@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4240,6 +4642,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("missing@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4272,6 +4675,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some(user.email.clone()),
+                session_token: None,
             }),
         )
         .await
@@ -4361,7 +4765,7 @@ mod web_tests {
         .await
         .expect("insert draft");
 
-        let missing = get_auto_replies(State(state.clone()), Query(AuthQuery { email: None }))
+        let missing = get_auto_replies(State(state.clone()), Query(AuthQuery { email: None, session_token: None }))
             .await
             .0;
         assert_eq!(missing["message"], "Missing email");
@@ -4370,6 +4774,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some(user.email.clone()),
+                session_token: None,
             }),
         )
         .await
@@ -4440,9 +4845,12 @@ mod web_tests {
         let config = test_config("sqlite::memory:");
         let state = test_state(pool.clone(), config);
 
+        let magic_hash = hash_token("token-1");
         sqlx::query(
-            "INSERT INTO users (id, email, is_onboarded, magic_token, role) VALUES ('settings-user', 'settings@example.com', 1, 'token-1', 'user')",
+            "INSERT INTO users (id, email, is_onboarded, magic_token, magic_token_expires_at, role)
+             VALUES ('settings-user', 'settings@example.com', 1, ?, datetime('now', '+15 minutes'), 'user')",
         )
+        .bind(&magic_hash)
         .execute(&pool)
         .await
         .expect("insert user");
@@ -4451,6 +4859,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some(String::new()),
+                session_token: None,
             }),
         )
         .await
@@ -4461,6 +4870,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("settings@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4468,17 +4878,30 @@ mod web_tests {
         .expect("get user");
         assert_eq!(me.email, "settings@example.com");
 
-        let verified = post_verify(
+        let verified_response = post_verify(
             State(state.clone()),
+            HeaderMap::new(),
             Json(VerifyRequest {
                 token: "token-1".to_string(),
             }),
         )
         .await
-        .0
-        .expect("verified user");
-        assert_eq!(verified.email, "settings@example.com");
-        assert!(verified.magic_token.is_none());
+        .into_response();
+        assert!(verified_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .contains("HttpOnly"));
+        let bytes = axum::body::to_bytes(verified_response.into_body(), usize::MAX)
+            .await
+            .expect("read verify body");
+        let verified_value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("verify json");
+        let verified: VerifyResponse =
+            serde_json::from_value(verified_value).expect("verified user");
+        assert_eq!(verified.user.email, "settings@example.com");
+        assert!(verified.user.magic_token.is_none());
 
         let token_after: Option<String> =
             sqlx::query_scalar("SELECT magic_token FROM users WHERE id = 'settings-user'")
@@ -4487,15 +4910,18 @@ mod web_tests {
                 .expect("fetch token");
         assert!(token_after.is_none());
 
-        let not_verified = post_verify(
-            State(state.clone()),
-            Json(VerifyRequest {
-                token: "missing".to_string(),
-            }),
+        let (_, not_verified) = response_json(
+            post_verify(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(VerifyRequest {
+                    token: "missing".to_string(),
+                }),
+            )
+            .await,
         )
-        .await
-        .0;
-        assert!(not_verified.is_none());
+        .await;
+        assert!(not_verified.is_null());
 
         let settings = post_settings(
             State(state),
@@ -4545,7 +4971,7 @@ mod web_tests {
         let state = test_state(pool.clone(), test_config("sqlite::memory:"));
 
         assert!(
-            get_me(State(state.clone()), Query(AuthQuery { email: None }))
+            get_me(State(state.clone()), Query(AuthQuery { email: None, session_token: None }))
                 .await
                 .0
                 .is_none()
@@ -4554,6 +4980,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some(String::new()),
+                session_token: None,
             }),
         )
         .await
@@ -4564,6 +4991,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("admin@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4578,6 +5006,7 @@ mod web_tests {
             State(readonly_state),
             Query(AuthQuery {
                 email: Some("new-readonly@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4794,6 +5223,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("support@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4804,6 +5234,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("admin@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4814,6 +5245,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("support@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -4825,6 +5257,7 @@ mod web_tests {
             AxumPath(10),
             Query(AuthQuery {
                 email: Some("support@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -5187,7 +5620,7 @@ mod web_tests {
             .expect("insert private transcript");
 
         let missing_export =
-            get_training_export(State(state.clone()), Query(AuthQuery { email: None }))
+            get_training_export(State(state.clone()), Query(AuthQuery { email: None, session_token: None }))
                 .await
                 .0;
         assert_eq!(missing_export["message"], "Missing email");
@@ -5196,6 +5629,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("private@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -5206,6 +5640,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("admin@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -5247,6 +5682,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("consented@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -5263,6 +5699,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("admin@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await
@@ -5367,13 +5804,14 @@ mod web_tests {
             .expect("insert monthly");
 
         let finance_missing =
-            get_finance_records(State(state.clone()), Query(AuthQuery { email: None })).await;
+            get_finance_records(State(state.clone()), Query(AuthQuery { email: None, session_token: None })).await;
         assert_eq!(finance_missing["status"], "error");
 
         let finance_unknown = get_finance_records(
             State(state.clone()),
             Query(AuthQuery {
                 email: Some("missing@example.com".to_string()),
+                session_token: None,
             }),
         )
         .await;
@@ -5383,6 +5821,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some(user.email.clone()),
+                session_token: None,
             }),
         )
         .await;
@@ -5393,6 +5832,7 @@ mod web_tests {
             State(state.clone()),
             Query(AuthQuery {
                 email: Some(user.email.clone()),
+                session_token: None,
             }),
         )
         .await;
@@ -6346,6 +6786,11 @@ struct VerifyRequest {
     token: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct VerifyResponse {
+    user: User,
+}
+
 fn mask_token(token: &str) -> String {
     if token.len() <= 8 {
         "[redacted]".to_string()
@@ -6356,9 +6801,26 @@ fn mask_token(token: &str) -> String {
 
 async fn post_verify(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<VerifyRequest>,
-) -> Json<Option<User>> {
+) -> impl IntoResponse {
     let token = payload.token.trim();
+    let ip = forwarded_ip(&headers);
+    let allowed = check_rate_limit(
+        format!("verify:{ip}:{}", mask_token(token)),
+        RateLimitPolicy {
+            max_attempts: 10,
+            window: Duration::from_secs(15 * 60),
+        },
+    )
+    .await;
+    if !allowed {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(Option::<VerifyResponse>::None),
+        )
+            .into_response();
+    }
     tracing::info!(
         ">>> [AUTH] Attempting to verify token: '{}'",
         mask_token(token)
@@ -6375,8 +6837,14 @@ async fn post_verify(
         total_tokens
     );
 
-    let query_result = sqlx::query_as::<_, User>("SELECT * FROM users WHERE magic_token = ?")
-        .bind(token)
+    let token_hash = hash_token(token);
+    let query_result = sqlx::query_as::<_, User>(
+        "SELECT * FROM users
+         WHERE magic_token = ?
+           AND magic_token_expires_at IS NOT NULL
+           AND magic_token_expires_at > CURRENT_TIMESTAMP",
+    )
+        .bind(&token_hash)
         .fetch_optional(&state.pool)
         .await;
 
@@ -6386,8 +6854,46 @@ async fn post_verify(
                 ">>> [AUTH] SUCCESS: Token match found for user: {}",
                 u.email
             );
-            // Clear token after use
-            let clear_res = sqlx::query("UPDATE users SET magic_token = NULL WHERE id = ?")
+            let session_token = new_secret_token();
+            let csrf_token = new_secret_token();
+            let session_token_hash = hash_token(&session_token);
+            let csrf_token_hash = hash_token(&csrf_token);
+            let session_expires_at =
+                (chrono::Utc::now() + chrono::Duration::seconds(SESSION_MAX_AGE_SECONDS))
+                    .naive_utc()
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+            let session_id = uuid::Uuid::new_v4().to_string();
+
+            let session_res = sqlx::query(
+                "INSERT INTO sessions (id, user_id, token_hash, csrf_token_hash, expires_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&session_id)
+            .bind(&u.id)
+            .bind(&session_token_hash)
+            .bind(&csrf_token_hash)
+            .bind(&session_expires_at)
+            .execute(&state.pool)
+            .await;
+
+            if let Err(e) = session_res {
+                tracing::error!(
+                    ">>> [AUTH] FAILED to create session for user {}: {:?}",
+                    u.email,
+                    e
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(Option::<VerifyResponse>::None),
+                )
+                    .into_response();
+            }
+
+            // Clear one-time token after use.
+            let clear_res = sqlx::query(
+                "UPDATE users SET magic_token = NULL, magic_token_expires_at = NULL WHERE id = ?",
+            )
                 .bind(&u.id)
                 .execute(&state.pool)
                 .await;
@@ -6401,21 +6907,55 @@ async fn post_verify(
             }
 
             u.magic_token = None;
+            u.session_token = None;
             u.role = role_for_email(&state, &u.email);
-            Json(Some(u))
+            let mut headers = HeaderMap::new();
+            if let Ok(value) = HeaderValue::from_str(&session_cookie(&session_token)) {
+                headers.append(header::SET_COOKIE, value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&csrf_cookie(&csrf_token)) {
+                headers.append(header::SET_COOKIE, value);
+            }
+            (headers, Json(Some(VerifyResponse { user: u }))).into_response()
         }
         Ok(None) => {
             tracing::warn!(
                 ">>> [AUTH] FAILED: No user found with token '{}'.",
                 mask_token(token)
             );
-            Json(None)
+            Json(Option::<VerifyResponse>::None).into_response()
         }
         Err(e) => {
             tracing::error!(">>> [AUTH] DATABASE ERROR during verification: {:?}", e);
-            Json(None)
+            Json(Option::<VerifyResponse>::None).into_response()
         }
     }
+}
+
+async fn post_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Some(token) = session_token_from_headers(&headers) {
+        let token_hash = hash_token(&token);
+        let _ = sqlx::query(
+            "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL",
+        )
+        .bind(token_hash)
+        .execute(&state.pool)
+        .await;
+    }
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&expired_session_cookie()).unwrap_or_else(|_| HeaderValue::from_static("session_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")),
+    );
+    response_headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&expired_csrf_cookie()).unwrap_or_else(|_| HeaderValue::from_static("csrf_token=; Path=/; SameSite=Lax; Max-Age=0")),
+    );
+    (
+        response_headers,
+        Json(serde_json::json!({ "status": "success" })),
+    )
 }
 
 #[derive(Deserialize)]
@@ -8309,30 +8849,44 @@ async fn post_privacy_settings(
         None => return Json(serde_json::json!({"status": "error", "message": "User not found"})),
     };
 
-    let mut updates = Vec::new();
-    if let Some(v) = req.do_not_sell_share {
-        updates.push(format!("do_not_sell_share = {}", v as i32));
-    }
-    if let Some(v) = req.cross_border_disclosure_given {
-        updates.push(format!("cross_border_disclosure_given = {}", v as i32));
-    }
-    if let Some(ref loc) = req.data_location_preference {
-        updates.push(format!("data_location_preference = '{}'", loc));
-    }
+    let existing = sqlx::query_as::<_, UserPrivacySettings>(
+        "SELECT user_id, do_not_sell_share, cross_border_disclosure_given, data_location_preference, updated_at FROM user_privacy_settings WHERE user_id = ?",
+    )
+    .bind(&user.id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
 
-    if !updates.is_empty() {
-        let set_clause = updates.join(", ");
-        let _ = sqlx::query(&format!(
-            "INSERT INTO user_privacy_settings (user_id, do_not_sell_share, cross_border_disclosure_given, data_location_preference, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET {}",
-            set_clause
-        ))
-        .bind(&user.id)
-        .bind(req.do_not_sell_share.unwrap_or(false))
-        .bind(req.cross_border_disclosure_given.unwrap_or(false))
-        .bind(req.data_location_preference.clone().unwrap_or_default())
-        .execute(&state.pool)
-        .await;
-    }
+    let do_not_sell_share = req
+        .do_not_sell_share
+        .unwrap_or_else(|| existing.as_ref().map(|s| s.do_not_sell_share).unwrap_or(false));
+    let cross_border_disclosure_given = req.cross_border_disclosure_given.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|s| s.cross_border_disclosure_given)
+            .unwrap_or(false)
+    });
+    let data_location_preference = req.data_location_preference.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|s| s.data_location_preference.clone())
+    });
+
+    let _ = sqlx::query(
+        "INSERT INTO user_privacy_settings (user_id, do_not_sell_share, cross_border_disclosure_given, data_location_preference, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id) DO UPDATE SET
+            do_not_sell_share = excluded.do_not_sell_share,
+            cross_border_disclosure_given = excluded.cross_border_disclosure_given,
+            data_location_preference = excluded.data_location_preference,
+            updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(&user.id)
+    .bind(do_not_sell_share)
+    .bind(cross_border_disclosure_given)
+    .bind(data_location_preference)
+    .execute(&state.pool)
+    .await;
 
     Json(serde_json::json!({"status": "success", "message": "Privacy settings updated"}))
 }
@@ -8934,6 +9488,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
         .route("/about", get(get_about))
         .route("/auth/magic-link", post(post_magic_link))
         .route("/auth/verify", post(post_verify))
+        .route("/auth/logout", post(post_logout))
         .route("/me", get(get_me))
         .route("/settings", post(post_settings))
         .route("/data-deletion/request", post(post_request_data_deletion))
@@ -9004,7 +9559,7 @@ pub async fn start_server(port: u16, state: AppState) -> Result<()> {
             ServeDir::new("frontend/dist")
                 .not_found_service(ServeFile::new("frontend/dist/index.html")),
         )
-        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(security_headers_middleware))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

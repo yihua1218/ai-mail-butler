@@ -39,6 +39,12 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN magic_token TEXT")
         .execute(&pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN magic_token_expires_at DATETIME")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN session_token TEXT")
+        .execute(&pool)
+        .await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN auto_reply BOOLEAN NOT NULL DEFAULT 0")
         .execute(&pool)
         .await;
@@ -113,6 +119,31 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            token_hash TEXT UNIQUE NOT NULL,
+            csrf_token_hash TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at DATETIME,
+            expires_at DATETIME NOT NULL,
+            revoked_at DATETIME,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );",
+    )
+    .execute(&pool)
+    .await?;
+    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN csrf_token_hash TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, revoked_at, expires_at)")
+        .execute(&pool)
+        .await;
 
     // Table for tracking repetitive behaviors/questions for analytics
     sqlx::query(
@@ -458,6 +489,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             user_id TEXT NOT NULL,
             request_type TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
+            snapshot_json TEXT,
             admin_notes TEXT,
             completed_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -466,6 +498,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    let _ = sqlx::query("ALTER TABLE dsar_requests ADD COLUMN snapshot_json TEXT")
+        .execute(&pool)
+        .await;
 
     // Data retention policy settings
     sqlx::query(

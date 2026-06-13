@@ -8,6 +8,8 @@ pub struct User {
     pub is_onboarded: bool,
     pub preferences: Option<String>,
     pub magic_token: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub session_token: Option<String>,
     #[serde(default)]
     pub role: String,
     #[serde(default)]
@@ -129,6 +131,7 @@ mod tests {
                 "is_onboarded": false,
                 "preferences": null,
                 "magic_token": null,
+                "session_token": null,
                 "display_name": null,
                 "assistant_name_zh": null,
                 "assistant_name_en": null,

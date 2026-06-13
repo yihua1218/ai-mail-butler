@@ -7,6 +7,10 @@ import { makeUser } from './test/factories'
 
 vi.mock('axios', () => ({
   default: {
+    defaults: {},
+    interceptors: {
+      request: { use: vi.fn() },
+    },
     get: vi.fn(),
     post: vi.fn(),
   },
@@ -53,8 +57,13 @@ describe('AuthContext', () => {
   })
 
   it('verifies tokens, persists the email, refreshes, and logs out', async () => {
-    mockedPost.mockResolvedValueOnce({ data: makeUser({ email: 'verified@example.com' }) })
+    mockedPost.mockResolvedValueOnce({
+      data: {
+        user: makeUser({ email: 'verified@example.com' }),
+      },
+    })
     mockedGet.mockResolvedValueOnce({ data: makeUser({ email: 'refreshed@example.com' }) })
+    mockedPost.mockResolvedValueOnce({ data: { status: 'success' } })
 
     render(
       <AuthProvider>
@@ -74,6 +83,7 @@ describe('AuthContext', () => {
     await userEvent.click(screen.getByRole('button', { name: /logout/i }))
     expect(screen.getByTestId('email')).toHaveTextContent('guest')
     expect(localStorage.getItem('user_email')).toBeNull()
+    expect(mockedPost).toHaveBeenCalledWith('/api/auth/logout')
   })
 
   it('requests a magic link through the backend API', async () => {

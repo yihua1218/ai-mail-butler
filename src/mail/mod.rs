@@ -939,6 +939,7 @@ mod tests {
             is_onboarded: true,
             preferences: None,
             magic_token: None,
+            session_token: None,
             role: "user".to_string(),
             auto_reply: false,
             dry_run: true,
