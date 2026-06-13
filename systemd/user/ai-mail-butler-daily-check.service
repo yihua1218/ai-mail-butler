@@ -1,0 +1,8 @@
+[Unit]
+Description=AI Mail Butler daily health and finance invariant check
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/workspace/ai-mail-butler
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/workspace/ai-mail-butler/scripts/daily-check.sh

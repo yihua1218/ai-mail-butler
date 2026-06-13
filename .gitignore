@@ -6,6 +6,7 @@
 
 # Logs
 *.log
+/logs/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

@@ -22,6 +22,7 @@ export interface User {
   training_data_consent: boolean;
   training_consent_updated_at: string | null;
   rule_label_mode: 'ai_first' | 'deterministic_only';
+  unmatched_rule_guidance_enabled: boolean | null;
   time_format: string | null;
   date_format: string | null;
 }

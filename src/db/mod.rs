@@ -109,6 +109,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT 'auto'")
         .execute(&pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN unmatched_rule_guidance_enabled BOOLEAN")
+        .execute(&pool)
+        .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS app_settings (
@@ -377,6 +380,9 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
             direction TEXT NOT NULL,
             amount REAL NOT NULL,
             currency TEXT NOT NULL DEFAULT 'TWD',
+            amount_twd REAL NOT NULL DEFAULT 0,
+            exchange_rate_to_twd REAL,
+            exchange_rate_date TEXT,
             month_key TEXT NOT NULL,
             month_total_after REAL NOT NULL DEFAULT 0,
             finance_type TEXT,
@@ -418,6 +424,17 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await;
+    let _ = sqlx::query(
+        "ALTER TABLE email_financial_records ADD COLUMN amount_twd REAL NOT NULL DEFAULT 0",
+    )
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN exchange_rate_to_twd REAL")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN exchange_rate_date TEXT")
+        .execute(&pool)
+        .await;
     let _ = sqlx::query("ALTER TABLE email_financial_records ADD COLUMN finance_type TEXT")
         .execute(&pool)
         .await;
@@ -441,6 +458,20 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_created ON email_financial_records(user_id, created_at DESC)").execute(&pool).await;
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_financial_records_user_email ON email_financial_records(user_id, email_id)").execute(&pool).await;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS exchange_rates (
+            base_currency TEXT NOT NULL,
+            quote_currency TEXT NOT NULL,
+            rate REAL NOT NULL,
+            rate_date TEXT NOT NULL,
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            source TEXT NOT NULL,
+            PRIMARY KEY(base_currency, quote_currency)
+        );",
+    )
+    .execute(&pool)
+    .await?;
+
     // Append-only processing history for manual checks/reprocessing.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS email_processing_logs (
@@ -463,6 +494,33 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     .await?;
 
     let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_logs_user_email_created ON email_processing_logs(user_id, email_id, created_at DESC)").execute(&pool).await;
+
+    // Live processing status for dashboard polling. Rows are overwritten as a run progresses and
+    // remain available briefly after completion so users can navigate away and return.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS email_processing_runs (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            email_id TEXT NOT NULL,
+            process_method TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result TEXT,
+            reason TEXT,
+            status_before TEXT,
+            status_after TEXT,
+            steps TEXT NOT NULL,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(email_id) REFERENCES emails(id)
+        );",
+    )
+    .execute(&pool)
+    .await?;
+
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_runs_user_email_updated ON email_processing_runs(user_id, email_id, updated_at DESC)").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_processing_runs_user_status_updated ON email_processing_runs(user_id, status, updated_at DESC)").execute(&pool).await;
 
     // Consent audit trail for legal proof (GDPR/CCPA compliance)
     sqlx::query(

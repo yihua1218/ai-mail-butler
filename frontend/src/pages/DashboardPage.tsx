@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -57,8 +57,13 @@ type ProcessingStep = {
 type EmailProcessingState = {
   running: boolean;
   steps: ProcessingStep[];
+  runId?: string;
   result?: string;
   reason?: string;
+  processMethod?: string;
+  statusBefore?: string;
+  statusAfter?: string;
+  updatedAt?: string;
 };
 
 const DANGEROUS_HTML_TAGS = new Set([
@@ -644,15 +649,63 @@ const DashboardPage: React.FC = () => {
 
   const initialProcessingSteps = (): ProcessingStep[] => [
     { key: 'submit', label: t('processing_step_submit'), status: 'finish' },
-    { key: 'reset_previous', label: t('processing_step_reset'), status: 'process' },
+    { key: 'load_email', label: t('processing_step_load_email'), status: 'process' },
+    { key: 'reset_previous', label: t('processing_step_reset'), status: 'wait' },
+    { key: 'source_fallback', label: t('processing_step_source_fallback'), status: 'wait' },
     { key: 'finance_rules', label: t('processing_step_finance'), status: 'wait' },
     { key: 'match_rules', label: t('processing_step_rules'), status: 'wait' },
     { key: 'draft_reply', label: t('processing_step_draft'), status: 'wait' },
+    { key: 'finalize', label: t('processing_step_finalize'), status: 'wait' },
   ];
 
   const setEmailProcessingState = (emailId: string, updater: (prev?: EmailProcessingState) => EmailProcessingState) => {
     setProcessingByEmailId((prev) => ({ ...prev, [emailId]: updater(prev[emailId]) }));
   };
+
+  const applyProcessingRuns = useCallback((runs: any[]) => {
+    if (!Array.isArray(runs) || runs.length === 0) return;
+    setProcessingByEmailId((prev) => {
+      const next = { ...prev };
+      runs.forEach((run) => {
+        const emailId = String(run.email_id || '');
+        if (!emailId) return;
+        next[emailId] = {
+          running: !!run.running,
+          steps: Array.isArray(run.steps) ? run.steps : [],
+          runId: run.id,
+          result: run.result,
+          reason: run.reason,
+          processMethod: run.process_method,
+          statusBefore: run.status_before,
+          statusAfter: run.status_after,
+          updatedAt: run.updated_at,
+        };
+      });
+      return next;
+    });
+    const runningIds = runs
+      .filter((run) => run.running && run.email_id)
+      .map((run) => String(run.email_id));
+    if (runningIds.length) {
+      setExpandedEmailRowKeys((keys) => Array.from(new Set([...keys, ...runningIds])));
+    }
+  }, []);
+
+  const loadProcessingRuns = useCallback(async () => {
+    if (!user?.email) return;
+    try {
+      const res = await axios.get(`/api/emails/processing-runs?email=${encodeURIComponent(user.email)}`);
+      applyProcessingRuns(res.data?.runs || []);
+    } catch {
+      // Dashboard polling should stay quiet; explicit actions still surface errors.
+    }
+  }, [applyProcessingRuns, user?.email]);
+
+  useEffect(() => {
+    loadProcessingRuns();
+    const timer = window.setInterval(loadProcessingRuns, 1500);
+    return () => window.clearInterval(timer);
+  }, [loadProcessingRuns]);
 
   const processEmail = async (emailId: string) => {
     if (!user?.email) return null;
@@ -667,6 +720,7 @@ const DashboardPage: React.FC = () => {
         force_reextract: true,
         archive_path_by_email_id: archivePath ? { [emailId]: archivePath } : undefined,
       });
+      await loadProcessingRuns();
       const result = res.data?.results?.[0];
       const backendSteps = (result?.processing_steps || []) as ProcessingStep[];
       setEmailProcessingState(emailId, () => ({
@@ -1386,8 +1440,22 @@ const DashboardPage: React.FC = () => {
       color: step.status === 'error' ? 'red' : step.status === 'finish' ? 'green' : step.status === 'process' ? 'blue' : 'gray',
       children: (
         <div>
-          <div style={{ fontWeight: 600 }}>{t(step.label_key || step.label || `processing_step_${step.key}`, { defaultValue: step.label || step.key })}</div>
+          <Space size={8} wrap>
+            <span style={{ fontWeight: 600 }}>{t(step.label_key || step.label || `processing_step_${step.key}`, { defaultValue: step.label || step.key })}</span>
+            <Tag color={step.status === 'error' ? 'red' : step.status === 'finish' ? 'green' : step.status === 'process' ? 'blue' : 'default'}>
+              {t(`processing_status_${step.status}`, { defaultValue: step.status })}
+            </Tag>
+          </Space>
           {step.detail ? <div style={{ color: '#86868b', marginTop: 2 }}>{step.detail}</div> : null}
+          {step.metadata && Object.keys(step.metadata).length ? (
+            <Space size={[4, 4]} wrap style={{ marginTop: 6 }}>
+              {Object.entries(step.metadata).slice(0, 4).map(([key, value]) => (
+                <Tag key={key}>
+                  {key}: {String(value)}
+                </Tag>
+              ))}
+            </Space>
+          ) : null}
         </div>
       ),
     }));
@@ -1400,6 +1468,13 @@ const DashboardPage: React.FC = () => {
               {state.running ? t('processing_running') : t('processing_finished')}
             </Tag>
             {state.result ? <Tag>{state.result}</Tag> : null}
+            {state.processMethod ? <Tag>{state.processMethod}</Tag> : null}
+            {state.statusBefore || state.statusAfter ? (
+              <span style={{ color: '#86868b' }}>
+                {state.statusBefore || '-'} → {state.statusAfter || '-'}
+              </span>
+            ) : null}
+            {state.updatedAt ? <span style={{ color: '#86868b' }}>{t('processing_updated_at')}: {state.updatedAt}</span> : null}
             {state.reason ? <span style={{ color: '#86868b' }}>{state.reason}</span> : null}
           </Space>
         ) : null}

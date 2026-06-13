@@ -387,6 +387,7 @@ mod tests {
             remote_debug_overlay_dir: None,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
+            unmatched_rule_guidance_default: false,
         }
     }
 
@@ -417,6 +418,7 @@ mod tests {
             rule_label_mode: "local".to_string(),
             time_format: "24h".to_string(),
             date_format: "YYYY-MM-DD".to_string(),
+            unmatched_rule_guidance_enabled: None,
         }
     }
 
@@ -510,6 +512,7 @@ mod tests {
             rule_label_mode: "ai_first".to_string(),
             time_format: "24h".to_string(),
             date_format: "auto".to_string(),
+            unmatched_rule_guidance_enabled: None,
         };
 
         assert!(OnboardingService::get_next_onboarding_question(&user)
